@@ -1,0 +1,8 @@
+# Recorded flight/bench logs stay local (the repo is public).
+*.log
+logs/
+.playwright-mcp/
+.claude/
+node_modules/
+app/target/
+web/version.json
