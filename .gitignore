@@ -1,0 +1,27 @@
+.claude/
+**/.claude/
+
+# Flight and bench logs stay out: this repo is public and the logs are data, not source
+*.log
+logs/
+
+# Flight software: the toolchain is fetched by ./build.sh setup, and the rest is build output
+fsw/deps
+fsw/deps/
+fsw/build/
+fsw/data/
+fsw/tools/.venv/
+__pycache__/
+*.pyc
+
+# Dashboard
+ground/app/target
+ground/app/target/
+ground/node_modules/
+ground/web/version.json
+ground/.playwright-mcp/
+
+# Build leftovers either half can produce
+*.o
+*.obj
+*.elf.map

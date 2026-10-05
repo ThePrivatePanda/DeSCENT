@@ -1,0 +1,465 @@
+/* DeSCENT ChipSat. Design rules: docs/design-guide.md */
+
+@font-face { font-family: "Plex Sans"; src: url("../vendor/fonts/ibm-plex-sans-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Plex Sans"; src: url("../vendor/fonts/ibm-plex-sans-latin-500-normal.woff2") format("woff2"); font-weight: 500; font-display: swap; }
+@font-face { font-family: "Plex Sans"; src: url("../vendor/fonts/ibm-plex-sans-latin-600-normal.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Plex Mono"; src: url("../vendor/fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Plex Mono"; src: url("../vendor/fonts/ibm-plex-mono-latin-500-normal.woff2") format("woff2"); font-weight: 500; font-display: swap; }
+
+:root {
+  color-scheme: light;
+  --bg: #edf0f3;
+  --panel: #ffffff;
+  --sunk: #f5f7f9;
+  --rule: #dde2e8;
+  --rule-strong: #c9d0d8;
+  --ink: #18222c;
+  --ink-2: #414e5b;
+  --ink-3: #667380;
+  --edge: #98a2ad;
+  --accent: #2f6fdb;
+  --accent-soft: rgba(47, 111, 219, 0.09);
+  --good: #0c7a35;
+  --warning: #96610f;
+  --serious: #c2572b;
+  --critical: #c93434;
+  --good-soft: rgba(12, 122, 53, 0.12);
+  --warning-soft: rgba(150, 97, 15, 0.14);
+  --critical-soft: rgba(201, 52, 52, 0.10);
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+  --sans: "Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --r: 6px;
+  /* Type. Live keeps its own dense 13 px; the other screens and the drawer use this scale. */
+  --t-title: 22px;
+  --t-head: 15px;
+  --t-body: 14px;
+  --t-label: 13px;
+  --t-note: 12.5px;
+  /* Controls: one height and text size, larger off the dashboard. */
+  --ch: 28px;
+  --cf: 12.5px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --bg: #0e151c; --panel: #151f29; --sunk: #1a2530; --rule: #26323e; --rule-strong: #34424f;
+    --ink: #e4eaf0; --ink-2: #b4c0cc; --ink-3: #8b99a7; --edge: #586878;
+    --accent: #5b92ea; --accent-soft: rgba(91, 146, 234, 0.14);
+    --good: #3cbf6a; --warning: #e0a53a; --serious: #e5794d; --critical: #ec6464;
+    --good-soft: rgba(60, 191, 106, 0.14); --warning-soft: rgba(224, 165, 58, 0.16); --critical-soft: rgba(236, 100, 100, 0.13);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e151c; --panel: #151f29; --sunk: #1a2530; --rule: #26323e; --rule-strong: #34424f;
+  --ink: #e4eaf0; --ink-2: #b4c0cc; --ink-3: #8b99a7; --edge: #586878;
+  --accent: #5b92ea; --accent-soft: rgba(91, 146, 234, 0.14);
+  --good: #3cbf6a; --warning: #e0a53a; --serious: #e5794d; --critical: #ec6464;
+  --good-soft: rgba(60, 191, 106, 0.14); --warning-soft: rgba(224, 165, 58, 0.16); --critical-soft: rgba(236, 100, 100, 0.13);
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+}
+
+[hidden] { display: none !important; }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 13px/1.45 var(--sans);
+  font-variant-numeric: tabular-nums;
+  display: flex; flex-direction: column; overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+h2, h3 { margin: 0; font-weight: 600; }
+.hex { font-family: var(--mono); font-size: 12px; }
+.spacer { flex: 1; }
+.muted { color: var(--ink-3); }
+.good { color: var(--good); } .warn { color: var(--warning); } .serious { color: var(--serious); } .bad { color: var(--critical); }
+
+/* ---------- controls ---------- */
+/* One family: a border at rest, one radius, one height, one focus ring. Anything that
+   does something when clicked is one of these. Tabs are the only clickable text without
+   a border, and a row of a list or a table selects without being a button. */
+button, select, .button, input[type=text], input[type=number], input[type=search], input:not([type]) {
+  font: 500 var(--cf)/1 var(--sans); color: var(--ink);
+  border: 1px solid var(--edge); border-radius: 5px; height: var(--ch); padding: 0 10px;
+}
+button, select, .button {
+  background: var(--sunk); cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px;
+}
+input[type=text], input[type=number], input[type=search], input:not([type]) { background: var(--panel); font-weight: 400; min-width: 0; }
+select { padding-right: 6px; }
+a.button { text-decoration: none; }
+button:hover, .button:hover, select:hover { border-color: var(--ink-2); background: var(--rule); }
+input:hover { border-color: var(--ink-2); }
+button:focus-visible, select:focus-visible, .button:focus-within, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { background: var(--accent); filter: brightness(1.08); }
+button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+button:disabled, select:disabled, input:disabled, .button.disabled { opacity: .5; cursor: default; }
+.button.disabled { pointer-events: none; }
+input[type=checkbox] { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+
+/* ---------- top bar ---------- */
+.bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--rule);
+}
+.brand { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; margin-right: 10px; }
+.brand span { color: var(--ink-3); font-weight: 400; }
+.mode { color: var(--ink-2); font-size: 12px; margin-right: 4px; }
+.receivers { display: flex; gap: 6px; flex-wrap: wrap; }
+.rx {
+  display: inline-flex; align-items: center; gap: 8px; height: 28px;
+  border: 1px solid var(--rule); border-radius: 5px; padding: 0 4px 0 9px; font-size: 12px; background: var(--sunk);
+}
+.rx .sw { width: 3px; height: 14px; border-radius: 2px; }
+.rx .name { font-weight: 500; }
+.rx .st { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-2); }
+.rx .st::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); }
+.rx .st.good::before { background: var(--good); } .rx .st.warning::before { background: var(--warning); } .rx .st.critical::before { background: var(--critical); }
+.rx .meta { color: var(--ink-3); }
+.rx button { height: 22px; padding: 0 6px; color: var(--ink-2); }
+.rx select { height: 22px; padding: 0 2px 0 5px; font-size: 11.5px; }
+
+.replaybar, .banner {
+  display: flex; align-items: center; gap: 10px; padding: 7px 14px;
+  background: var(--accent-soft); border-bottom: 1px solid var(--rule); font-size: 12.5px;
+}
+.replaybar input[type=range] { flex: 1; accent-color: var(--accent); }
+/* Which file is open and where it is kept, on a line of its own so a long path is never cut. */
+.replaybar { flex-wrap: wrap; row-gap: 4px; }
+.rp-file { flex-basis: 100%; color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
+.rp-file:empty { display: none; }
+.banner { background: var(--warning-soft); }
+
+/* ---------- recording panel ---------- */
+.recpanel { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 4px 0 10px; border: 1px solid var(--rule); border-radius: 6px; background: var(--sunk); }
+.rec-state { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; font-size: 12.5px; color: var(--ink-2); margin-right: 2px; }
+.rec-state::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
+.rec-state.recording { color: var(--critical); } .rec-state.recording::before { background: var(--critical); }
+.rec-state.paused { color: var(--warning); } .rec-state.paused::before { background: var(--warning); }
+.recpanel button { height: 26px; }
+.rec-info { font-size: 12px; color: var(--ink-2); margin: 0 6px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rec-info b { color: var(--ink); font-weight: 600; }
+
+/* ---------- layout ---------- */
+.layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(340px, 32%) minmax(0, 1fr); gap: 10px; padding: 10px; }
+.right { min-height: 0; display: grid; grid-template-rows: minmax(150px, 38%) 1fr; gap: 10px; }
+/* The fleet table is wider than a small window; it scrolls inside its pane instead of pushing the page sideways. */
+.right > * { min-width: 0; }
+.pane { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); min-height: 0; display: flex; flex-direction: column; }
+.pane-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid var(--rule); min-height: 45px; }
+.pane-head h2 { font-size: 14px; margin-right: 6px; }
+.scroll { overflow: auto; min-height: 0; flex: 1; }
+.empty { color: var(--ink-2); padding: 18px 14px; margin: 0; }
+
+.summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-2); }
+.summary b { font-weight: 600; color: var(--ink); }
+.summary .issue b { color: var(--serious); }
+.summary .issue.bad b { color: var(--critical); }
+
+/* ---------- fleet table ---------- */
+table { border-collapse: collapse; width: 100%; }
+.grid th {
+  position: sticky; top: 0; z-index: 1; background: var(--panel); text-align: left;
+  font-weight: 500; font-size: 12px; color: var(--ink-2); padding: 7px 10px; border-bottom: 1px solid var(--rule);
+}
+.grid td { padding: 6px 10px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.grid th.r, .grid td.r { text-align: right; }
+.grid tbody tr { cursor: pointer; }
+.grid tbody tr:hover td { background: var(--sunk); }
+.grid tbody tr.sel td { background: var(--accent-soft); }
+.grid tbody tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.grid td.csid { font-weight: 600; font-size: 14px; }
+
+.state { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+.state::before { content: ""; width: 8px; height: 8px; border-radius: 50%; }
+.state.OK { color: var(--good); } .state.OK::before { background: var(--good); }
+.state.STALE { color: var(--warning); } .state.STALE::before { background: var(--warning); }
+.state.LOST { color: var(--critical); } .state.LOST::before { background: transparent; box-shadow: inset 0 0 0 2px var(--critical); }
+
+/* Age: time since last packet, with a bar filling toward this unit's stale limit. */
+.age { display: inline-grid; justify-items: end; gap: 3px; min-width: 64px; }
+.age i { display: block; width: 64px; height: 3px; border-radius: 2px; background: var(--rule); overflow: hidden; }
+.age i b { display: block; height: 100%; background: var(--good); }
+.age i b.near { background: var(--warning); }
+.age i b.over { background: var(--critical); }
+
+.batt { display: inline-flex; align-items: center; gap: 7px; }
+.batt i { width: 26px; height: 9px; border: 1px solid var(--ink-3); border-radius: 2px; padding: 1px; display: block; }
+.batt i b { display: block; height: 100%; background: var(--ink-2); border-radius: 1px; }
+.batt.low { color: var(--serious); } .batt.low i { border-color: var(--serious); } .batt.low i b { background: var(--serious); }
+
+.bits { display: inline-flex; gap: 2px; vertical-align: middle; }
+.bits span {
+  width: 16px; height: 16px; border-radius: 3px; font: 600 9.5px/16px var(--sans); text-align: center;
+  background: var(--good-soft); color: var(--good);
+}
+.bits span.off { background: var(--critical-soft); color: var(--critical); box-shadow: inset 0 0 0 1px var(--critical); }
+.flag { color: var(--warning); font-weight: 600; font-size: 12px; margin-left: 6px; }
+
+/* ---------- unit detail (left) ---------- */
+/* Scrolls rather than clips when the window is too short for every list. */
+.detail { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; display: flex; flex-direction: column; }
+.detail .none { color: var(--ink-2); padding: 18px 14px; }
+.unit-head { display: flex; align-items: center; gap: 12px; padding: 12px 14px 10px; border-bottom: 1px solid var(--rule); }
+.unit-head .id { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; }
+.unit-head .id small { font-size: 13px; font-weight: 500; color: var(--ink-3); margin-right: 4px; letter-spacing: 0; }
+.unit-head .when { margin-left: auto; text-align: right; color: var(--ink-2); font-size: 12px; line-height: 1.3; }
+.unit-head .when b { display: block; color: var(--ink); font-weight: 500; font-size: 13px; }
+.validity-line { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--rule); font-size: 12px; color: var(--ink-2); }
+
+.lists { flex: none; padding: 4px 14px 10px; columns: 2 195px; column-gap: 22px; column-rule: 1px solid var(--rule); }
+.list { break-inside: avoid; margin: 8px 0 6px; }
+.list h3 { font-size: 12.5px; color: var(--ink); display: flex; align-items: baseline; gap: 8px; padding-bottom: 3px; border-bottom: 1px solid var(--rule-strong); margin-bottom: 1px; }
+.list h3 .note { font-weight: 400; font-size: 11.5px; }
+.list dl { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto 44px; }
+.list dt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list dt, .list dd { margin: 0; padding: 2.5px 0; border-bottom: 1px solid var(--rule); }
+.list dt { color: var(--ink-2); }
+.list dd.v { text-align: right; font-weight: 500; padding-left: 8px; white-space: nowrap; }
+.list dd.u { color: var(--ink-3); font-size: 11.5px; padding-left: 6px; }
+.list dd.v.stale { color: var(--ink-3); font-weight: 400; }
+.list dd.v.sat { color: var(--warning); }
+.list dt:nth-last-of-type(1), .list dd:nth-last-child(-n+2) { border-bottom: 0; }
+
+/* ---------- graphs ---------- */
+.tabs { display: flex; gap: 2px; padding: 2px; background: var(--sunk); border: 1px solid var(--rule); border-radius: 6px; }
+.tabs button { height: 24px; border: 0; background: transparent; color: var(--ink-2); padding: 0 10px; }
+.tabs button:hover { color: var(--ink); background: transparent; }
+.tabs button.on { background: var(--panel); color: var(--ink); box-shadow: 0 0 0 1px var(--rule-strong); }
+.charts { flex: 1; min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 26px; padding: 10px 14px; align-content: start; }
+.chart { min-width: 0; padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
+.chart h3 { font-size: 12.5px; font-weight: 500; color: var(--ink); margin: 4px 0 2px; }
+.chart h3 span { color: var(--ink-3); font-weight: 400; }
+.chart h3 .readout { float: right; color: var(--ink-2); }
+.chart .none { color: var(--ink-3); font-size: 12px; height: 190px; display: grid; place-items: center; background: var(--sunk); border-radius: 4px; }
+.uplot { font-family: var(--sans); }
+.u-legend { font-size: 11.5px; text-align: left; color: var(--ink-2); }
+.u-legend .u-series:first-child { display: none; }
+.u-legend th { font-weight: 500; }
+.u-legend .u-marker { width: 10px; height: 3px; border: 0 !important; border-radius: 2px; }
+
+/* ---------- settings drawer ---------- */
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100vw); z-index: 10;
+  background: var(--panel); border-left: 1px solid var(--rule); box-shadow: -12px 0 32px rgba(10, 20, 30, .14);
+  display: flex; flex-direction: column;
+}
+.drawer { font-size: var(--t-body); --ch: 32px; --cf: 13px; }
+.drawer-head, .drawer-foot { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-bottom: 1px solid var(--rule); }
+.drawer-head h2 { font-size: var(--t-title); letter-spacing: -0.01em; }
+.drawer-foot { border-top: 1px solid var(--rule); border-bottom: 0; }
+.drawer-body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 18px 18px; }
+/* A section is a heading over a strong rule, with room above it. Each field is a label
+   with its hint under it on the left and its control in one column on the right. */
+.drawer-body h3 { font-size: var(--t-head); color: var(--ink); margin: 26px 0 0; padding-bottom: 7px; border-bottom: 1px solid var(--edge); }
+.drawer-body h3:first-child { margin-top: 16px; }
+.field { display: grid; grid-template-columns: minmax(0, 1fr) 150px; column-gap: 16px; row-gap: 2px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--rule); }
+.field label { grid-column: 1; color: var(--ink); }
+.field .hint { grid-column: 1; color: var(--ink-2); font-size: var(--t-note); }
+.field input, .field select { grid-column: 2; grid-row: 1 / span 2; align-self: start; width: 100%; font-weight: 600; }
+.field input[type=checkbox] { width: 18px; height: 18px; justify-self: start; margin-top: 2px; }
+.note { color: var(--ink-2); font-size: 12px; }
+
+.toast {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 20;
+  background: var(--ink); color: var(--panel); padding: 10px 16px; border-radius: 5px; font-size: 13.5px; font-weight: 500;
+}
+
+@media (max-width: 900px) {
+  body { overflow: auto; }
+  .layout { grid-template-columns: 1fr; }
+  .right { grid-template-rows: auto auto; }
+  .fleet .scroll { max-height: 45vh; }
+  .detail, .lists { overflow: visible; }
+  .charts { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* ---------- progress of a flash or a pull ---------- */
+.bar-track { height: 4px; background: var(--rule); border-radius: 2px; margin: 8px 0 4px; }
+.bar-fill { height: 4px; background: var(--accent); border-radius: 2px; }
+
+/* ---------- clear panel, bottom left ---------- */
+.left { min-height: 0; display: grid; grid-template-rows: 1fr auto; gap: 10px; }
+.clearbox .pane-head { min-height: 38px; padding: 6px 12px; }
+.clear-opts { display: grid; gap: 2px; padding: 8px 12px 10px; font-size: 12px; color: var(--ink-2); }
+.clear-opts label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.gens { font-size: 11px; padding: 0 4px; margin-left: 4px; border-radius: 3px; }
+tr.gen td { background: var(--sunk); font-size: 12px; }
+tr.gen td.csid { font-weight: 500; padding-left: 20px; }
+.act { font-size: 11px; padding: 1px 6px; margin-left: 4px; border-radius: 3px; }
+tr.gen td.csid { white-space: nowrap; }
+
+/* ---------- runs tab ---------- */
+.runs { padding: 4px 4px 12px; }
+.runrow { padding: 10px 12px; border: 1px solid var(--rule); border-radius: var(--r); margin-bottom: 8px; }
+.runrow.sel { box-shadow: inset 3px 0 0 var(--accent); background: var(--sunk); }
+.runhead { display: flex; align-items: center; gap: 8px; }
+.runhead b { font-size: 15px; cursor: pointer; }
+.runs .charts.custom { display: block; }
+
+/* ---------- screens: a list and a sheet ---------- */
+/* ChipSats and T-Beams share one shape. Left, everything of that kind the app knows, one
+   row each: a name, then its state in words. Right, the picked one's sheet: a head that
+   says what it is, then a pane for each thing done to it. */
+.screen, .screen-data { font-size: var(--t-body); --ch: 32px; --cf: 13px; }
+.screen { flex: 1; min-height: 0; display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 10px; padding: 10px; }
+.screen .pane-head h2, .screen-data .pane-head h2 { font-size: 17px; }
+.screen .pane-head, .screen-data .pane-head { min-height: 52px; padding: 9px 14px; }
+.screen .note, .screen-data .note { font-size: var(--t-note); }
+.screen .empty, .screen-data .empty { font-size: var(--t-body); }
+/* A value carries the weight; its label does not. */
+.val { font-weight: 600; color: var(--ink); }
+.val.hex { font-size: 13px; }
+.item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; height: auto;
+  padding: 10px 14px; border: 0; border-bottom: 1px solid var(--rule); border-radius: 0; background: transparent;
+  text-align: left; white-space: normal; font-weight: 400; line-height: 1.4;
+}
+.item:hover { background: var(--sunk); border-color: var(--rule); }
+.item.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); border-color: var(--rule); color: var(--ink); }
+.item b { font-weight: 600; font-size: var(--t-head); }
+.item small { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--t-note); color: var(--ink-2); }
+.ident { margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--rule); background: var(--sunk); font-size: var(--t-label); }
+.ident.found { background: var(--accent-soft); }
+
+.sheet { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.sheet > * { flex: none; }
+.pane > h3 { display: flex; align-items: baseline; gap: 10px; padding: 11px 14px 10px; border-bottom: 1px solid var(--rule-strong); font-size: var(--t-head); }
+.pane > h3 .note { font-weight: 400; }
+.sheet-head { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 14px; }
+.sheet-head .id { font-size: var(--t-title); font-weight: 600; letter-spacing: -0.01em; line-height: 1.2; }
+/* A board's name is typed where it is read: an input like any other, at the title's size. */
+input.nameit { font-size: var(--t-title); font-weight: 600; letter-spacing: -0.01em; height: 40px; padding: 0 9px; max-width: 100%; }
+input.nameit::placeholder { color: var(--ink-3); font-weight: 500; }
+.sheet-head .line { flex-basis: 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }
+/* A confirm strip at the foot of the head runs edge to edge, as it does in a pane. */
+.sheet-head .confirm { flex-basis: 100%; margin: 6px -14px -14px; }
+.two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
+.col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
+/* A state is a word in a mark. The tint repeats the word; it never stands in for it. */
+.mark { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 12px; font-weight: 600; line-height: 1.5; white-space: nowrap; }
+.mark.good { color: var(--good); background: var(--good-soft); }
+.mark.warn { color: var(--warning); background: var(--warning-soft); }
+.mark.bad { color: var(--critical); background: var(--critical-soft); }
+.mark.off { color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--edge); }
+
+/* Rows in a pane: what it is on the left, what to do about it on the right. */
+.rows > div { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 50px; padding: 8px 14px; border-bottom: 1px solid var(--rule); }
+.rows > div:last-child { border-bottom: 0; }
+.pane > :not(h3) + .rows, .pane > .rows + .job { border-top: 1px solid var(--rule); }
+.rows .l { flex: 0 0 140px; color: var(--ink-2); font-size: var(--t-label); }
+.grow { flex: 1; min-width: 0; }
+label.check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+label.check input { margin: 0; accent-color: var(--accent); }
+.acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.inpane { margin: 10px 14px; }
+.plain { font-size: var(--t-label); color: var(--ink-2); }
+.testout { margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--rule); background: var(--sunk); font: 12px/1.45 var(--sans); white-space: pre-wrap; max-height: 140px; overflow: auto; }
+
+/* On the board, and what will be written. A setting that differs is written in the right
+   column and read back; until then the left column is the only truth. */
+.kv { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); border-top: 1px solid var(--rule); }
+.kv > div { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 14px; border-bottom: 1px solid var(--rule); }
+.kv > .h { padding-block: 7px; font-size: var(--t-note); font-weight: 600; color: var(--ink-2); }
+.kv > .l { color: var(--ink-2); font-size: var(--t-label); }
+/* A row that differs from the board: what is there now struck through, the control that
+   will replace it outlined in the accent. */
+.kv .was { text-decoration: line-through; text-decoration-color: var(--ink-3); font-weight: 400; color: var(--ink-2); }
+.kv .changed { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.kv input[type=text] { width: 12ch; font-weight: 600; }
+.foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 14px; border-top: 1px solid var(--rule); }
+.seg { display: inline-flex; border: 1px solid var(--edge); border-radius: 5px; overflow: hidden; }
+.seg button { height: 30px; border: 0; border-radius: 0; }
+.seg button + button { border-left: 1px solid var(--edge); }
+.seg button.on { background: var(--accent); color: #fff; }
+
+/* The second click before anything is written. */
+.confirm { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 14px; border-top: 1px solid var(--rule); background: var(--accent-soft); }
+
+/* A running job: its steps as the app reports them, then the bar. */
+.job { padding: 11px 14px 9px; border-bottom: 1px solid var(--rule); }
+.job:last-child { border-bottom: 0; }
+.job-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.steps { display: flex; flex-direction: column; gap: 4px; margin: 7px 0 8px; }
+.steps div { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 6px; align-items: baseline; }
+.steps .done { color: var(--ink-2); }
+.steps .now { font-weight: 600; }
+.steps .failed { font-weight: 600; color: var(--critical); }
+.steps span:last-child { font-weight: 400; }
+
+/* What a job is doing now, and what the last one left behind. */
+.step { font-size: var(--t-label); }
+.outcome { font-size: var(--t-label); padding-left: 9px; box-shadow: inset 3px 0 0 var(--ink-3); }
+.outcome.bad { box-shadow: inset 3px 0 0 var(--critical); color: var(--ink); }
+.outcome.warn { box-shadow: inset 3px 0 0 var(--warning); color: var(--ink); }
+p.step, p.outcome { margin-block: 8px; }
+/* A folder someone will paste into a file manager: one click takes all of it. */
+.path { user-select: all; overflow-wrap: anywhere; }
+
+/* ---------- data ---------- */
+/* One table of files, newest first, with what can be done to each at the end of its row.
+   A pull's report opens under it. */
+.screen-data { flex: 1; min-height: 0; display: grid; grid-template-rows: minmax(150px, 1fr) auto; gap: 10px; padding: 10px; }
+.screen-data .two { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); max-height: 46vh; overflow-y: auto; }
+.screen-data td { vertical-align: middle; }
+.under { display: block; max-width: 60ch; white-space: normal; overflow-wrap: anywhere; }
+.screen-data .grid th { font-size: var(--t-note); font-weight: 600; padding: 9px 14px; }
+.screen-data .grid td { padding: 9px 14px; }
+.screen-data .grid td b { font-size: var(--t-head); }
+.grid.plain tbody tr { cursor: default; }
+.grid.plain tbody tr:hover td { background: transparent; }
+
+/* ---------- live chrome only on Live ---------- */
+/* Connect and the receiver chips belong to the screen that shows live reception. A log,
+   or any other screen, does not get controls that look clickable beside it. */
+body:not([data-screen="live"]) .live-only { display: none; }
+
+/* ---------- the screens, as tabs ---------- */
+/* The tab says which screen is up. Replay is there once a log is open and carries its name. */
+.views { display: flex; gap: 2px; margin-left: 4px; }
+.views button {
+  display: inline-block; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; line-height: 26px;
+  padding: 0 11px; background: transparent; border-color: transparent; color: var(--ink-2); font-size: 13px;
+}
+.views button:hover { background: var(--sunk); color: var(--ink); }
+.views button[aria-selected="true"] { background: var(--accent-soft); color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+.views button[disabled] { color: var(--ink-3); background: transparent; }
+
+/* ---------- the strip ---------- */
+/* On every screen, at the right of the bar: receivers being read, the file being logged
+   to, and any job that is running. */
+/* Everything that is not a screen sits at the right, and stays there when the bar wraps. */
+.bar-right { flex: 1 1 520px; display: flex; align-items: center; justify-content: flex-end; gap: 6px 8px; flex-wrap: wrap; min-width: 0; }
+.bar > * { align-self: flex-start; }
+.brand { line-height: 28px; }
+.strip { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+/* The receivers and a running job are buttons that go to their screen. The log's name is
+   text, with its two buttons beside it. */
+.strip-part { font-size: 12px; font-weight: 400; gap: 10px; }
+span.strip-part { display: inline-flex; align-items: center; gap: 6px; padding-left: 4px; color: var(--ink-2); }
+.strip-part b { font-weight: 600; color: var(--ink); }
+.strip-one { display: inline-flex; align-items: center; gap: 5px; }
+.strip-file { max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strip-job { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.strip-job:hover { border-color: var(--accent); background: var(--accent-soft); filter: brightness(0.97); }
+
+/* ---------- narrow windows ---------- */
+/* Last in the file, so these win over the recipes above. */
+@media (max-width: 1240px) {
+  .two, .screen-data .two { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .screen { grid-template-columns: minmax(0, 1fr); }
+  .screen-data { grid-template-rows: auto auto; }
+  .screen-data .two { max-height: none; }
+  .sheet { overflow: visible; }
+}

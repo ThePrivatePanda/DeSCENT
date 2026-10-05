@@ -1,0 +1,4 @@
+The flight software under fsw/ is part of the Cornell Space Systems Design Studio
+DeSCENT ChipSat project. Earlier versions of it, and the hardware it runs on, are
+in the project's own repository at https://github.com/OrionFoxtrot/SSDS_DeSCENT,
+which is MIT licensed, Copyright (c) 2025 Mark Lohatepanont.

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeSCENT ChipSat</title>
+<meta name="description" content="The DeSCENT ChipSat tool: live fleet over T-Beam LoRa receivers, flashing, flight log pulls and saved data">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%232a78d6' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2' fill='%232a78d6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="vendor/uPlot.min.css">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body data-screen="live">
+<header class="bar">
+  <span class="brand">DeSCENT <span>ChipSat</span></span>
+  <nav class="views" role="tablist" aria-label="Screen">
+    <button id="view-chipsats" role="tab" aria-selected="false" data-screen="chipsats" title="Read, flash and pull the flight log off a ChipSat" hidden>ChipSats</button>
+    <button id="view-tbeams" role="tab" aria-selected="false" data-screen="tbeams" title="Serial boards and receivers" hidden>T-Beams</button>
+    <button id="view-live" role="tab" aria-selected="true" data-screen="live">Live</button>
+    <button id="view-data" role="tab" aria-selected="false" data-screen="data" title="Everything the app has written to disk" hidden>Data</button>
+    <button id="view-replay" role="tab" aria-selected="false" data-screen="replay" disabled title="Open a log, or pull one off a ChipSat">Replay</button>
+  </nav>
+  <button id="btn-connect" class="primary live-only" title="Pick a T-Beam serial port">Connect receiver</button>
+  <div id="receivers" class="receivers live-only"></div>
+  <div class="bar-right">
+  <span id="mode" class="mode"></span>
+  <div id="strip" class="strip" hidden>
+    <button id="strip-rx" class="strip-part" title="Open T-Beams"></button>
+    <span id="strip-log" class="strip-part">
+      <span id="strip-log-name" class="strip-file"></span>
+      <a id="strip-log-save" class="button" title="Download the log being written now">Save a copy</a>
+      <button id="strip-log-new" title="Close this log and start writing a new one">New file</button>
+    </span>
+    <button id="strip-job" class="strip-part strip-job" hidden></button>
+    <span id="strip-build" class="mark warn" hidden>A newer build is on disk. Restart the app.</span>
+    <span id="strip-release" class="strip-part" hidden>Version <b id="strip-release-version"></b> is out.
+      <a id="strip-release-link" class="button" target="_blank" rel="noopener">Get it</a></span>
+  </div>
+  <div class="recpanel live-only" id="recpanel" role="group" aria-label="Recording">
+    <span id="rec-state" class="rec-state">Not recording</span>
+    <button id="rec-start" title="Record every line from every connected receiver to a file">Start</button>
+    <button id="rec-pause" disabled>Pause</button>
+    <button id="rec-stop" disabled>Stop</button>
+    <span id="rec-info" class="rec-info"></span>
+  </div>
+  <button id="btn-save" class="live-only" title="Download everything received from all receivers since this page opened">Save session</button>
+  <label class="button" title="Replay saved logs, including old lab CSV logs">Open a file…<input id="file-open" type="file" multiple accept=".txt,.log,.csv,.tsv" hidden></label>
+  <button id="btn-settings" title="Graph, status and saving settings">Settings</button>
+  <button id="btn-theme" title="Switch light / dark" aria-label="Switch light or dark theme">◑</button>
+  </div>
+</header>
+
+<div id="recover" class="banner" hidden>
+  <span id="recover-text"></span>
+  <button id="recover-open">Open</button>
+  <button id="recover-download">Download</button>
+  <button id="recover-discard">Discard</button>
+</div>
+
+<div id="replay" class="replaybar" hidden>
+  <button id="rp-play" class="primary">Play</button>
+  <select id="rp-speed" title="Replay speed">
+    <option value="1">1×</option><option value="10">10×</option><option value="60" selected>60×</option><option value="600">600×</option>
+  </select>
+  <input id="rp-pos" type="range" min="0" max="0" value="0">
+  <span id="rp-time" class="num"></span>
+  <button id="rp-save" title="Download the log that is open">Save log</button>
+  <button id="rp-csv" title="Download the decoded packets as a table: one row for each packet that passes its CRC">Save CSV</button>
+  <button id="rp-raw" title="Download the dump as it came off the chip" hidden>Save raw</button>
+  <button id="rp-exit">Close log</button>
+  <span id="rp-file" class="rp-file"></span>
+</div>
+
+<div id="unsupported" class="banner" hidden>
+  This browser cannot open serial ports. Use Chrome or Edge on a desktop to connect a T-Beam. It can open saved logs.
+</div>
+
+<main id="dash" class="layout">
+  <div class="left">
+    <section class="pane">
+      <div class="pane-head">
+        <h2>Unit</h2>
+        <select id="sel-unit" title="Unit shown"></select>
+        <span class="spacer"></span>
+        <button id="btn-pause" title="Freeze this panel">Pause</button>
+      </div>
+      <div id="latest" class="detail"></div>
+    </section>
+
+    <section class="pane clearbox">
+      <div class="pane-head">
+        <h2>Clear</h2>
+        <span id="clear-what" class="note"></span>
+        <span class="spacer"></span>
+        <button id="cl-toggle" title="Choose what Clear removes" aria-expanded="false">Change…</button>
+        <button id="btn-clear" class="primary" title="Clear what is named beside it">Clear</button>
+      </div>
+      <div id="clear-opts" class="clear-opts" hidden>
+        <label><input type="checkbox" id="cl-units" checked> All unit data and history</label>
+        <label><input type="checkbox" id="cl-sel"> Only the unit shown</label>
+        <label><input type="checkbox" id="cl-rx" checked> Receiver counts</label>
+        <label><input type="checkbox" id="cl-hidden" checked> Hidden units</label>
+        <label><input type="checkbox" id="cl-log"> Start a new log file</label>
+      </div>
+    </section>
+  </div>
+
+  <section class="right">
+    <div class="pane fleet">
+      <div class="pane-head">
+        <h2>Fleet</h2>
+        <div id="summary" class="summary"></div>
+        <span class="spacer"></span>
+        <select id="sort" title="Row order">
+          <option value="attention">Sort: attention</option>
+          <option value="csid">Sort: CSID</option>
+        </select>
+        <button id="btn-hide" title="Hide the selected unit">Hide</button>
+        <button id="btn-restore" title="Show hidden units">Restore</button>
+      </div>
+      <div class="scroll">
+        <table id="fleet" class="grid">
+          <thead><tr>
+            <th>CSID</th><th>State</th><th class="r" title="Time since the last packet; the bar fills toward this unit's stale limit">Last heard</th><th class="r">Counter</th><th class="r">Packets</th>
+            <th class="r">Missed</th><th class="r">Rx %</th><th class="r">Resets</th><th>Battery</th>
+            <th>Sensors</th><th class="r">RSSI</th><th class="r">SNR</th><th class="r">Interval</th><th class="r">Heard by</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <p id="fleet-empty" class="empty">No packets yet. Connect a T-Beam receiver, or open a saved log to review it.</p>
+      </div>
+    </div>
+
+    <div class="pane graphs">
+      <div class="pane-head">
+        <h2 id="graph-title">History</h2>
+        <nav id="tabs" class="tabs"></nav>
+        <span class="spacer"></span>
+        <select id="window" title="Time shown on the graphs"></select>
+      </div>
+      <div id="charts" class="charts"></div>
+    </div>
+  </section>
+</main>
+
+<section id="screen-chipsats" class="screen" hidden>
+  <div class="pane picklist">
+    <div class="pane-head">
+      <h2>ChipSats</h2>
+      <span class="spacer"></span>
+      <button id="cs-look" title="Looks for an ST-Link on USB">Look for a probe</button>
+    </div>
+    <div id="cs-list" class="scroll"></div>
+  </div>
+  <div id="cs-sheet" class="sheet"></div>
+</section>
+
+<section id="screen-tbeams" class="screen" hidden>
+  <div class="pane picklist">
+    <div class="pane-head">
+      <h2>T-Beams</h2>
+      <span class="spacer"></span>
+      <button id="tb-ident" title="Find a board's port by unplugging it and plugging it back in">Which board is which?</button>
+      <button id="tb-ident-stop" hidden>Stop</button>
+    </div>
+    <div id="tb-list" class="scroll"></div>
+  </div>
+  <div id="tb-sheet" class="sheet"></div>
+</section>
+
+<section id="screen-data" class="screen-data" hidden>
+  <div class="pane">
+    <div class="pane-head">
+      <h2>Data</h2>
+      <span id="data-where" class="note"></span>
+      <span class="spacer"></span>
+      <label class="button" for="file-open" title="Replay a log from anywhere on this computer">Open a file…</label>
+      <button id="data-look" title="Read the folder again">Look again</button>
+    </div>
+    <div class="scroll">
+      <table id="data-table" class="grid">
+        <thead><tr><th>What</th><th>From</th><th>Written</th><th class="r">Size</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p id="data-empty" class="empty" hidden></p>
+    </div>
+  </div>
+  <div id="data-detail" class="two" hidden></div>
+</section>
+
+<aside id="settings" class="drawer" hidden>
+  <div class="drawer-head">
+    <h2>Settings</h2>
+    <span class="spacer"></span>
+    <button id="settings-close">Close</button>
+  </div>
+  <form id="settings-form" class="drawer-body" autocomplete="off"></form>
+  <div class="drawer-foot">
+    <span class="note">Kept in this browser.</span>
+    <span id="built" class="note"></span>
+    <span class="spacer"></span>
+    <button id="settings-reset">Reset to defaults</button>
+  </div>
+</aside>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="vendor/uPlot.iife.min.js"></script>
+<script src="js/packet.js"></script>
+<script src="js/lines.js"></script>
+<script src="js/fleet.js"></script>
+<script src="js/store.js"></script>
+<script src="js/serial.js"></script>
+<script src="js/serial_native.js"></script>
+<script src="js/recorder.js"></script>
+<script src="js/exportcsv.js"></script>
+<script src="js/datamodel.js"></script>
+<script src="js/boardmodel.js"></script>
+<script src="js/update.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/app.js"></script>
+<script src="js/screens.js"></script>
+<script src="js/tbeams.js"></script>
+<script src="js/chipsats.js"></script>
+<script src="js/datascreen.js"></script>
+</body>
+</html>

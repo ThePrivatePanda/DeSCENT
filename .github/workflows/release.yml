@@ -1,0 +1,50 @@
+name: Release builds
+
+on:
+  push:
+    tags: ['ground-v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+        working-directory: ground/app
+      - run: copy ground\app\target\release\descent-ground.exe descent-ground-windows-x64.exe
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: descent-ground-windows-x64.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get install -y musl-tools
+      - run: cargo build --release --target x86_64-unknown-linux-musl
+        working-directory: ground/app
+      - run: cp ground/app/target/x86_64-unknown-linux-musl/release/descent-ground descent-ground-linux-x64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: descent-ground-linux-x64
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - run: cargo build --release --target aarch64-apple-darwin
+        working-directory: ground/app
+      - run: cp ground/app/target/aarch64-apple-darwin/release/descent-ground descent-ground-macos-arm64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: descent-ground-macos-arm64
