@@ -6,7 +6,7 @@ Flight software for the DeSCENT ChipSats (Wio-E5 boards)
 Configure src/config.h - most importantly, look at the id `kChipSatId` (different on every board) and radio module `CHIPSAT_RADIO_MODULE`
 
 ## Build
-From V2_6_X, with only CMake installed:
+From fsw/, with only CMake installed:
 ```
 ./build.sh                    # build.cmd on Windows
 ./build.sh flash
@@ -16,7 +16,7 @@ From V2_6_X, with only CMake installed:
 ./build.sh flash --sketch flash_dump    # a bench sketch instead of the flight software
 ./build.sh flash                        # and back to the flight software
 ```
-The first run downloads everything into V2_6_X/deps, pinned and checked by sha256: the Arduino STM32
+The first run downloads everything into fsw/deps, pinned and checked by sha256: the Arduino STM32
 core 2.12.0 and CMSIS sources, the compiler, ninja and OpenOCD. Deleting deps/ and build/ is always safe
 
 Arduino IDE still works: Generic WLE5JCIx, upload method SWD. It's needed for the library drivers

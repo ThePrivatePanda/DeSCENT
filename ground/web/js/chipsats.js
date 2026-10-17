@@ -267,6 +267,28 @@
   // the spreading factor because it is what the choice costs: SF12 holds the radio for over 3 s.
   const AIR_MS = { 5: 47, 6: 80, 7: 143, 8: 257, 9: 456, 10: 854, 11: 1823, 12: 3187 };
 
+  const seconds = (ms) => String(Number((ms / 1000).toFixed(3)));
+  const DEFAULT_RATE = { fixedMs: 60000, follow: false, percent: [75, 50, 35, 20], intervalMs: [10000, 30000, 60000, 120000, 180000] };
+
+  // The rates the draft starts from: the board's own when its block has them, else the ones
+  // a fresh image ships (radio.json), else the numbers that have always been compiled in.
+  function startingRates(was) {
+    if (was && was.rates) return was.rates;
+    if (state.radio && state.radio.phases) return state.radio.phases;
+    return [60000, 1000, 1000, 60000].map((fixedMs) => Object.assign({}, DEFAULT_RATE, { fixedMs }));
+  }
+
+  // The flash log gaps the same way: per phase, and the one with no altitude source.
+  function startingLogs(was) {
+    if (was && was.logMs && was.logBlindMs != null) return { logs: was.logMs, blind: was.logBlindMs };
+    const rp = state.radio && state.radio.phases;
+    if (rp && rp.every((p) => p.logMs != null) && state.radio.logBlindMs != null) return { logs: rp.map((p) => p.logMs), blind: state.radio.logBlindMs };
+    return { logs: [1000, 50, 50, 1000], blind: 200 };
+  }
+
+  // One box per number, per phase: p<i>s the fixed gap in seconds, p<i>f whether it follows
+  // the battery, p<i>soc<k> the thresholds in percent, p<i>ms<k> the band gaps in seconds,
+  // p<i>l the flash log gap in seconds; lb the log gap with no altitude source.
   function buildDraft(r) {
     const was = r.onProbe && !state.stale && state.read ? state.read.settings : null;
     if (!state.build || state.build.uid !== r.uid) {
@@ -275,16 +297,55 @@
         csid: was && was.csid != null ? String(was.csid) : (r.csid != null ? String(r.csid) : '255'),
         sf: was && was.sf != null ? Number(was.sf) : 7,
         dbm: was && was.dbm != null ? Number(was.dbm) : (r.module === 'hp' ? 14 : 14),
-        interval: was && was.txIntervalMs != null ? String(was.txIntervalMs) : '1000',
       };
+      startingRates(was).forEach((rate, i) => {
+        state.build['p' + i + 's'] = seconds(rate.fixedMs);
+        state.build['p' + i + 'f'] = !!rate.follow;
+        rate.percent.forEach((p, k) => { state.build['p' + i + 'soc' + k] = String(p); });
+        rate.intervalMs.forEach((ms, k) => { state.build['p' + i + 'ms' + k] = seconds(ms); });
+      });
+      const logs = startingLogs(was);
+      logs.logs.forEach((ms, i) => { state.build['p' + i + 'l'] = seconds(ms); });
+      state.build.lb = seconds(logs.blind);
     }
     return state.build;
   }
 
-  // Settings go into the image by building it, which is also what checks them: a power the module
-  // has no row for does not flash, it fails to compile and says which powers that module takes.
-  // Laid out as the other panes are - a row per setting, then a confirm strip saying what the
-  // button will do.
+  // A log box in words: 0 is a record per IMU reading.
+  const logSecs = (v) => (Number(v) === 0 ? 'every reading' : 'every ' + v + ' s');
+
+  // One phase of the draft as a rate object, for the words and the request.
+  function draftRate(d, i) {
+    const ms = (v) => Math.round(Number(v) * 1000);
+    return {
+      fixedMs: ms(d['p' + i + 's']), follow: !!d['p' + i + 'f'],
+      percent: [0, 1, 2, 3].map((k) => Number(d['p' + i + 'soc' + k])),
+      intervalMs: [0, 1, 2, 3, 4].map((k) => ms(d['p' + i + 'ms' + k])),
+    };
+  }
+
+  // What goes on the request: the four rates and four log gaps, in the block's order. The
+  // falling slot is never entered by the board, so it gets the air's (rising's) values.
+  function ratesAsked(d) {
+    const out = {};
+    const ms = (v) => Math.round(Number(v) * 1000);
+    for (let i = 0; i < 4; i++) {
+      const from = i === 2 ? 1 : i;
+      const r = draftRate(d, from);
+      out['fixed' + i] = String(r.fixedMs);
+      out['follow' + i] = r.follow ? '1' : '0';
+      out['soc' + i] = r.percent.join(',');
+      out['socms' + i] = r.intervalMs.join(',');
+      out['log' + i] = String(ms(d['p' + from + 'l']));
+    }
+    out.logblind = String(ms(d.lb));
+    return out;
+  }
+
+  // Settings go into the image's block, whether the image is built here or carried, and the app
+  // checks them against the firmware's own table before anything runs: a power the module has no
+  // row for, or a battery table the firmware would refuse, does not flash and says why. Laid out as
+  // the other panes are - a row per setting, then a confirm strip saying what the button will do.
 async function buildAndFlash() {
     const r = rows().find((x) => x.id === state.sel);
     if (!r) return;
@@ -298,7 +359,7 @@ async function buildAndFlash() {
     state.buildError = '';
     if (state.peek) await state.peek;
     try {
-      const settings = { csid: d.csid, sf: d.sf, dbm: d.dbm, interval: d.interval };
+      const settings = Object.assign({ csid: d.csid, sf: d.sf, dbm: d.dbm }, ratesAsked(d));
       await hub.chipFlash(Object.assign({ uid: r.uid, backup: state.backup }, settings,
         how.way === 'build' ? { embedded: 'built', module: r.module } : { embedded: 'flight' }));
       toast(how.way === 'build' ? 'Building the flight software for ' + nameOf(r) : 'Flashing ' + nameOf(r));
@@ -348,8 +409,9 @@ async function buildAndFlash() {
     const noBlock = read && t.line ? '<p class="' + (t.damaged ? 'outcome bad' : 'plain') + ' inpane">' + esc(t.line) + '</p>' : '';
 
     const pick_state = state.pick && state.pick.kind === 'build' ? state.pick : null;
-    const intervalPhrase = d.interval === '0' ? 'back to back' : 'every ' + d.interval + ' ms';
-    const summary = 'board ' + d.csid + ', ' + B.MODULE[r.module || 'le'] + ', SF' + d.sf + ', ' + d.dbm + ' dBm, ' + intervalPhrase;
+    const summary = 'board ' + d.csid + ', ' + B.MODULE[r.module || 'le'] + ', SF' + d.sf + ', ' + d.dbm + ' dBm; ' +
+      B.PHASE_CARDS.map((i) => B.PHASE_LABELS[B.PHASE_NAMES[i]].toLowerCase() + ' ' + B.rateWords(draftRate(d, i)) + ', log ' + logSecs(d['p' + i + 'l'])).join('; ') +
+      '; blind log ' + logSecs(d.lb);
     // The module is said in words either way: the image for the other module transmits
     // almost nothing and still reports success.
     const module = '<b>' + B.MODULE[r.module || 'le'] + ' module</b>';
@@ -377,16 +439,57 @@ async function buildAndFlash() {
       '<div class="l">Board id</div>' + onBoard(t.rows[0].onBoard, differs.csid) + '<div>' +
         wrapChanged(box('csid', d.csid, '1 to 255'), differs.csid) + '<span class="note">1 to 255, goes in every packet</span></div>' +
       '<div class="l">Spreading factor</div>' + onBoard(t.rows[1].onBoard, differs.sf) + '<div>' +
-        wrapChanged(pick('sf', [5, 6, 7, 8, 9, 10, 11, 12], d.sf, (v) => 'SF' + v), differs.sf) +
+        // The firmware takes 5 to 12. The T-Beam's SX1276 has no SF5, and its SF6 is the first
+        // generation format, which the ChipSat's SX1262 cannot make: tested 2026-10-17, headerless
+        // on both sides, every packet heard and every CRC failed. So neither is offered
+        wrapChanged(pick('sf', [7, 8, 9, 10, 11, 12], d.sf, (v) => 'SF' + v), differs.sf) +
         (AIR_MS[Number(d.sf)] ? '<span class="note">' + AIR_MS[Number(d.sf)] + ' ms on air per packet</span>' : '<span class="note">ms on air per packet</span>') + '</div>' +
       '<div class="l">Transmit power</div>' + onBoard(t.rows[2].onBoard, differs.dbm) + '<div>' +
         wrapChanged(pick('dbm', powers, d.dbm, (v) => v + ' dBm'), differs.dbm) + '<span class="note">the rows the ' + (r.module || 'le').toUpperCase() + ' module has</span></div>' +
-      '<div class="l">Transmit interval</div>' + onBoard(t.rows[3].onBoard, differs.interval) + '<div>' +
-        wrapChanged(box('interval', d.interval, '1000'), differs.interval) + '<span class="note" style="margin-left: 4px;">ms</span>' +
-        '<span class="note">the gap after transmission' + (d.interval !== '0' && AIR_MS[Number(d.sf)] && Number(d.interval) < AIR_MS[Number(d.sf)] ? '. At SF' + d.sf + ' a packet takes ' + AIR_MS[Number(d.sf)] + ' ms, so this sends back to back' : '. 0 sends back to back') + '</span></div>' +
-      '<div class="l">' + how.verb + '</div><div><span class="val">' + esc(summary) + '</span></div><div style="grid-column: span 2"><button data-buildembed="1"' + buildOff + '>' + how.verb + '</button></div>' +
       '</div>';
-    return head + noBlock + way + table + confirm + last + buildError + '</div>';
+
+    // The phases of a flight, side by side, each with how often it logs to the chip and how often
+    // it transmits: a fixed gap, or its own battery table. The board works out which phase it is
+    // in from its altitude; what is set here is the gap after a record and after a packet in each.
+    const secsBox = (field, value, size) => '<input type="text" inputmode="numeric" data-keep="build:' + field + '" data-build="' + field + '"' +
+      ' value="' + esc(String(value)) + '" placeholder="s" aria-label="seconds" size="' + size + '">';
+    const WHAT = ['switched on, on the ground or mounted on the drone', 'from the climb through the release and the fall', '', 'at rest after the flight'];
+    const cards = B.PHASE_CARDS.map((i) => {
+      const name = B.PHASE_NAMES[i];
+      const follow = !!d['p' + i + 'f'];
+      const differs_i = differs[name];
+      const fixed = wrapChanged(secsBox('p' + i + 's', d['p' + i + 's'], 5), differs_i) + '<span class="note"> s' + (follow ? ', while the gauge cannot be read' : '') + '</span>';
+      const log = wrapChanged(secsBox('p' + i + 'l', d['p' + i + 'l'], 5), differs_i) + '<span class="note"> s between records</span>';
+      const toggle = '<label class="check"><input type="checkbox" data-build="p' + i + 'f"' + (follow ? ' checked' : '') + '> follow the battery</label>';
+      const bands = follow ? '<div class="bands">' + bandRows(d, i) + '</div>' : '';
+      return '<div class="phase' + (differs_i ? ' changed' : '') + '"><div class="phase-name">' + B.PHASE_LABELS[name] + '</div><div class="phase-what">' + WHAT[i] + '</div>' +
+        '<div class="phase-row"><span class="l">Log</span><span>' + log + '</span></div>' +
+        '<div class="phase-row"><span class="l">Gap</span><span>' + fixed + '</span></div>' +
+        '<div class="phase-row"><span class="l">Battery</span><span>' + toggle + bands + '</span></div>' +
+        '<div class="was-line"><span class="val' + (differs_i ? ' was' : '') + '">' + esc(t.rows[3 + i].onBoard) + '</span><span class="note">on the board</span></div></div>';
+    });
+    const blind = '<div class="kv"><div class="l">No altitude source</div><div><span class="val' + (differs.waiting ? ' was' : '') + '">' + esc(t.rows[7].onBoard) + '</span></div>' +
+      '<div>' + wrapChanged(secsBox('lb', d.lb, 5), differs.waiting) + '<span class="note"> s between records, whatever the phase, while neither the barometer nor GPS gives an altitude</span></div></div>';
+    const phases = '<h3>Phases</h3>' +
+      '<p class="plain inpane">The board tells the phases apart itself from its altitude: a climb of 15 m (30 m on GPS, when the barometer is dead) is the air, and 30 s at rest below half of what it climbed is landed. A release is not detected: the air phase runs from the climb through the fall. Landed re-arms, so the next climb is the air again. Each phase logs to the chip at its own gap and transmits at its own gap, or follows its own battery table. With neither barometer nor GPS the board logs at the blind gap whatever the phase.</p>' +
+      '<div class="phases">' + cards.join('') + '</div>' + blind;
+    const go = '<div class="kv"><div class="l">' + how.verb + '</div><div><span class="val">' + esc(summary) + '</span></div><div><button data-buildembed="1"' + buildOff + '>' + how.verb + '</button></div></div>';
+    return head + noBlock + way + table + phases + go + confirm + last + buildError + '</div>';
+  }
+
+  // One phase's five bands as rows of boxes: "above [75] % → [10] s", then "to [50] % → [30] s"...,
+  // then "below that → [180] s". Thresholds are the boxes between bands, so each one appears once.
+  function bandRows(d, i) {
+    const small = (field, value, hint) => '<input type="text" inputmode="numeric" data-keep="build:' + field + '" data-build="' + field + '"' +
+      ' value="' + esc(String(value)) + '" placeholder="' + hint + '" aria-label="' + hint + '" size="4">';
+    const rows = [];
+    for (let k = 0; k < 5; k++) {
+      const lead = k === 0 ? 'above ' + small('p' + i + 'soc0', d['p' + i + 'soc0'], '%') + ' %'
+        : k < 4 ? 'to ' + small('p' + i + 'soc' + k, d['p' + i + 'soc' + k], '%') + ' %'
+          : 'below that';
+      rows.push('<div class="band"><span>' + lead + '</span><span>' + small('p' + i + 'ms' + k, d['p' + i + 'ms' + k], 's') + ' s</span></div>');
+    }
+    return rows.join('');
   }
 
   function jobBlock(job, title) {
@@ -496,11 +599,16 @@ async function buildAndFlash() {
   }
 
   // The console port for this board, as last chosen for it, while that port is still here.
+  // The drone's flight controller shows up as a serial port too (ArduPilot, USB 1209:5741), and
+  // three pulls were pointed at it on one day. It is never a console: not offered, not kept.
+  const isFlightController = (b) => b.usb === '1209:5741';
+
   function consoleFor(r) {
-    const ports = (hub.boards || []).map((b) => b.port);
+    const usable = (hub.boards || []).filter((b) => !isFlightController(b));
+    const ports = usable.map((b) => b.port);
     const kept = store.get('dg-console-' + (r.uid || ANY));
     if (kept && ports.includes(kept)) return kept;
-    const free = (hub.boards || []).find((b) => b.state !== 'receiver');
+    const free = usable.find((b) => b.state !== 'receiver');
     return free ? free.port : '';
   }
 
@@ -515,7 +623,7 @@ async function buildAndFlash() {
 
     if (mine && s.running) {
       return '<div class="pane"><h3>Flight log</h3>' +
-        jobBlock(s, 'Pulling the flight log' + (s.board ? ', console on ' + s.board : '')) +
+        jobBlock(s, (s.wipe ? 'Clearing the flash' : 'Pulling the flight log') + (s.board ? ', console on ' + s.board : '')) +
         '<p class="note inpane">Leave the board plugged in.</p></div>';
     }
 
@@ -523,12 +631,14 @@ async function buildAndFlash() {
     // board running the wrong firmware, and that must not vanish with a toast.
     let last = '';
     if (mine && s.error) {
-      last = '<p class="outcome bad inpane">Pull failed: ' + esc(s.error) + '</p>' +
+      last = '<p class="outcome bad inpane">' + (s.wipe ? 'Clear failed: ' : 'Pull failed: ') + esc(s.error) + '</p>' +
         '<div class="inpane">' + steps(s) + '</div>' +
         (s.keepFsw && !s.restored
           ? '<p class="outcome bad inpane">The flight software was not put back. The board is still running the dump firmware' +
             (s.savedFsw ? '; the image that was on it is saved as <span class="path">' + esc(s.savedFsw) + '</span>' : '') + '.</p>'
           : '');
+    } else if (mine && s.wipe && s.pct === 100) {
+      last = '<p class="outcome inpane">Flash cleared. The flight software is back on the board with its settings as they were.</p>';
     } else if (mine && s.log) {
       // The id read off the board before the pull is still its id: a pull puts the same image back.
       const read = r.onProbe && state.read.settings ? state.read.settings.csid : null;
@@ -543,8 +653,8 @@ async function buildAndFlash() {
 
     const chooser = boards.length
       ? '<select data-console="' + esc(r.uid || ANY) + '" aria-label="Serial port of this board\'s console">' +
-          boards.map((b) => '<option value="' + esc(b.port) + '"' + (b.port === port ? ' selected' : '') + '>' +
-            esc((b.name || b.port) + (b.state === 'receiver' ? ', being read as a receiver' : '')) + '</option>').join('') + '</select>' +
+          boards.map((b) => '<option value="' + esc(b.port) + '"' + (b.port === port ? ' selected' : '') + (isFlightController(b) ? ' disabled' : '') + '>' +
+            esc((b.name || b.port) + (isFlightController(b) ? ', the drone\'s flight controller' : b.state === 'receiver' ? ', being read as a receiver' : '')) + '</option>').join('') + '</select>' +
         '<span class="note">The board\'s serial console.</span>'
       : '<span class="note">No serial port. Plug in the board\'s console.</span>';
 
@@ -558,7 +668,34 @@ async function buildAndFlash() {
           '<span class="note">' + (r.onProbe || r.id === ANY
             ? 'Flashes the board twice. Takes minutes.'
             : 'Put the board on the ST-Link and press Read the board first.') + '</span></div>' +
+        '<div><button data-wipe="1"' + (ready && r.uid ? '' : ' disabled') + '>Clear flash</button>' +
+          '<span class="note">Erases the log on the chip and nothing else. The flight software is saved and put back, settings untouched. The last click before launch.</span></div>' +
+        (state.pick && state.pick.kind === 'wipe' && state.pickFor === r.uid && !busy()
+          ? '<div class="confirm"><span class="grow">Erases the flight log on <b>' + esc(nameOf(r)) + '</b> for good. Flashes the board twice, about a minute.</span>' +
+            '<button data-wipego="1" class="primary">Clear the flash</button><button data-wipecancel="1">Cancel</button></div>'
+          : '') +
       '</div></div>';
+  }
+
+  // Clear the chip: the same job as a pull, told to erase instead of read.
+  async function wipe() {
+    const r = rows().find((x) => x.id === state.sel);
+    state.pick = null;
+    if (!r || !r.uid || busy()) return;
+    const port = consoleFor(r);
+    if (!port) return;
+    if (state.peek) { await state.peek; if (busy()) return; }
+    try {
+      const more = { uid: r.uid, wipe: 1 };
+      if (r.probe && r.probe.serial) more.probe = r.probe.serial;
+      await hub.pull(port, true, more);
+      store.set('dg-pull-board', r.uid);
+      toast('Clearing the flash on ' + nameOf(r));
+    } catch (e) {
+      toast('Could not start the clear: ' + (e.message || e));
+    }
+    await A.shell.pollJobs();
+    render();
   }
 
   function sheetHtml() {
@@ -742,6 +879,11 @@ async function pull() {
     } else if (at('data-flashgo')) { flash(false); return; }
     else if (at('data-flashforce')) { flash(true); return; }
     else if (at('data-pull')) { pull(); return; }
+    else if (at('data-wipe') && r && r.uid) {
+      state.pickFor = r.uid;
+      state.pick = { kind: 'wipe', label: 'the flash' };
+    } else if (at('data-wipego')) { wipe(); return; }
+    else if (at('data-wipecancel')) { state.pick = null; }
     else if (at('data-openlog')) {
       const s = jobs.pull;
       A.openServerLog(at('data-openlog'), s && s.log === at('data-openlog') ? { raw: s.raw || null, dir: s.dir || null } : null);
@@ -769,6 +911,12 @@ async function pull() {
       state.build[t.getAttribute('data-build')] = Number(t.value);
       state.buildError = '';
       t.blur();
+      render();
+      return;
+    }
+    if (t.getAttribute('data-build') && t.type === 'checkbox' && state.build) {
+      state.build[t.getAttribute('data-build')] = !!t.checked;
+      state.buildError = '';
       render();
       return;
     }

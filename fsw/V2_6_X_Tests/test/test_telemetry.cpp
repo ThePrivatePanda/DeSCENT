@@ -1,6 +1,6 @@
 // Telemetry.cpp and TxInterval.cpp on the laptop. Writes 20000 packets to the file you name, diff
 // that against test_v25_telemetry's to check the ground station can still decode us
-//   g++ -std=gnu++17 -Wall -Wextra -Itest/mock -I../V2_6_X_Code/src/app test/test_telemetry.cpp ../V2_6_X_Code/src/app/{Telemetry,TxInterval}.cpp -o /tmp/enc && /tmp/enc /tmp/enc.txt
+//   g++ -std=gnu++17 -Wall -Wextra -Itest/mock -I../V2_6_X_Code/src -I../V2_6_X_Code/src/app test/test_telemetry.cpp ../V2_6_X_Code/src/app/{Telemetry,TxInterval}.cpp -o /tmp/enc && /tmp/enc /tmp/enc.txt
 #include <stdint.h>
 #include <cstdio>
 #include <cstring>
@@ -42,7 +42,7 @@ static SensorData vectorInputs() {
   d.imu.magnetometerMicroTesla = {25.0f, -12.5f, 50.0f};
   d.imu.orientation.i = 0; d.imu.orientation.j = 0; d.imu.orientation.k = 0; d.imu.orientation.real = 1.0f;
   d.imu.linearAccelerationValid = d.imu.gyroscopeValid = d.imu.magnetometerValid = d.imu.orientationValid = true;
-  d.stateOfCharge.cellPercentage = 75.0f; d.stateOfCharge.valid = true;
+  d.stateOfCharge.cellPercentage = 75.0f; d.stateOfCharge.cellVoltage = 4.00f; d.stateOfCharge.valid = true;   // 4.00 V -> byte 150, as 75 % x2 was
   return d;
 }
 
@@ -60,6 +60,7 @@ static SensorData targetInputs() {
   d.imu.linearAccelerationValid = d.imu.gyroscopeValid = d.imu.magnetometerValid = d.imu.orientationValid = true;
   d.gps.latitudeE7 = 0; d.gps.longitudeE7 = 0; d.gps.altitudeMSLmm = -17000; d.gps.valid = false;
   d.stateOfCharge.cellPercentage = 54.73f; d.stateOfCharge.valid = true;
+  d.stateOfCharge.cellVoltage = 3.59f;   // the board sent 109 as percent x2; as volts that is 3.59, so the vector stands
   d.environmental.temperatureC = 26.82f; d.environmental.pressurePa = 98554.0f;
   d.environmental.humidityPercent = 43.67f; d.environmental.altitudeM = 233.31f; d.environmental.valid = true;
   return d;
@@ -98,10 +99,16 @@ int main(int argc, char **argv) {
 
 
   struct { float soc; uint32_t ms; } iv[] = {
-    {100.0f, 10000}, {75.01f, 10000}, {75.0f, 30000}, {74.99f, 30000}, {50.0f, 30000}, {49.99f, 60000},
+    {100.0f, 10000}, {75.01f, 10000}, {75.0f, 10000}, {74.99f, 30000}, {50.0f, 30000}, {49.99f, 60000},
     {35.0f, 60000}, {34.99f, 120000}, {20.0f, 120000}, {19.99f, 180000}, {0.0f, 180000}, {NAN, 180000}};
+  // the table as the build ships it; a charge at exactly a threshold is in the band above it
+  ChipSatSettings::Rate table{};
+  const uint8_t pct[4] = {75, 50, 35, 20};
+  const uint32_t ms[5] = {10000, 30000, 60000, 120000, 180000};
+  for (size_t i = 0; i < 4; i++) table.socPercent[i] = pct[i];
+  for (size_t i = 0; i < 5; i++) table.socIntervalMs[i] = ms[i];
   for (auto &c : iv) {
-    char what[96]; uint32_t got = txIntervalFromSoc(c.soc);
+    char what[96]; uint32_t got = txIntervalFromSoc(table, c.soc);
     snprintf(what, sizeof what, "txIntervalFromSoc(%g) = %u ms (want %u)", c.soc, got, c.ms);
     check(got == c.ms, what);
   }
@@ -118,7 +125,7 @@ int main(int argc, char **argv) {
     d.imu.magnetometerMicroTesla = {pick(-4000.f, 4000.f), pick(-4000.f, 4000.f), pick(-4000.f, 4000.f)};
     d.imu.orientation.i = pick(-1.5f, 1.5f); d.imu.orientation.j = pick(-1.5f, 1.5f);
     d.imu.orientation.k = pick(-1.5f, 1.5f); d.imu.orientation.real = pick(-1.5f, 1.5f);
-    d.stateOfCharge.cellPercentage = pick(-20.f, 200.f);
+    d.stateOfCharge.cellPercentage = pick(-20.f, 200.f); d.stateOfCharge.cellVoltage = pick(1.f, 6.f);
     d.imu.linearAccelerationValid = coin(); d.imu.gyroscopeValid = coin(); d.imu.magnetometerValid = coin();
     d.imu.orientationValid = coin(); d.gps.valid = coin(); d.stateOfCharge.valid = coin(); d.environmental.valid = coin();
     if (n % 3 == 0) {  // make "everything valid" common so bit 7 is exercised
@@ -127,7 +134,7 @@ int main(int argc, char **argv) {
     }
     const uint16_t counter = (uint16_t)next32(); const uint8_t csid = (uint8_t)next32(); const bool fresh = coin();
     ChipSatTelemetry::encodePacket(d, counter, csid, fresh, p);
-    // One line: counter csid fresh validbits(7) | 3 GPS ints | 18 floats as C99 hex floats (exact) | expected bytes
+    // One line: counter csid fresh validbits(7) | 3 GPS ints | 19 floats as C99 hex floats (exact) | expected bytes
     fprintf(f, "%u %u %d %d%d%d%d%d%d%d | %d %d %d |", counter, csid, fresh,
             d.imu.linearAccelerationValid, d.imu.gyroscopeValid, d.imu.magnetometerValid, d.imu.orientationValid,
             d.gps.valid, d.stateOfCharge.valid, d.environmental.valid,
@@ -137,7 +144,7 @@ int main(int argc, char **argv) {
       d.imu.magnetometerMicroTesla.x, d.imu.magnetometerMicroTesla.y, d.imu.magnetometerMicroTesla.z,
       d.imu.orientation.i, d.imu.orientation.j, d.imu.orientation.k, d.imu.orientation.real,
       d.environmental.temperatureC, d.environmental.pressurePa, d.environmental.humidityPercent,
-      d.stateOfCharge.cellPercentage};
+      d.stateOfCharge.cellPercentage, d.stateOfCharge.cellVoltage};
     for (float x : fl) fprintf(f, " %a", (double)x);
     fprintf(f, " | %s\n", hexOf(p).c_str());
     if (!ChipSatTelemetry::packetCRCIsValid(p)) { ++failures; }

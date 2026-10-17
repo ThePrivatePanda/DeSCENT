@@ -5,7 +5,7 @@
     ./tbeam.py --sf 12                  set the spreading factor on the one receiver found
     ./tbeam.py --sf 9 --port /dev/ttyUSB1
     ./tbeam.py --freq 914.0 --sf 12     several at once
-    ./tbeam.py --flash ../../../../descent-ground/receiver/firmware/descent-raw-receiver-1.2.1.bin
+    ./tbeam.py --flash ../../ground/receiver/firmware/descent-raw-receiver-1.2.1.bin
     ./tbeam.py --name 01                set the name this receiver answers by, kept on the board
 
 The settings live in the T-Beam's own flash and survive a power cycle, so this is a one-off per

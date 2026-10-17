@@ -187,9 +187,12 @@ pub struct FlightImage {
     pub block_at: Option<usize>,
 }
 
-// flash_dump.bin as it was before 2026-10-04, when it printed record and time lines.
-const OLDER_DUMPS: &[(usize, &str)] =
-    &[(31224, "4a5f0ead87429a51d9c84757c8be07058b58ed14ac885e25b9f48ca3f8c531a6")];
+// flash_dump.bin as it was: before 2026-10-04, when it printed record and time lines, and
+// before 2026-10-13, when it could not be interrupted while printing.
+const OLDER_DUMPS: &[(usize, &str)] = &[
+    (31224, "4a5f0ead87429a51d9c84757c8be07058b58ed14ac885e25b9f48ca3f8c531a6"),
+    (31008, "25118bdfafab456c2bbe94260bfbdbb333318f676d95c2b0599648f6cf789d41"),
+];
 
 impl Known {
     pub fn carried() -> Known {
@@ -394,7 +397,9 @@ pub struct Job {
 
 pub struct BuildPlan {
     pub at: PathBuf,
-    pub settings: crate::fswbuild::Settings,
+    pub module: String,
+    pub asked: settings::Asked,
+    pub words: String,   // what is being built, for the steps
 }
 
 // The caller holds the probe's gate, and hands it over so it is let go when the job ends.
@@ -404,12 +409,19 @@ pub fn start(job: Job, held: stm32::Held) {
     let mut job = job;
     std::thread::spawn(move || {
         if let Some(plan) = job.build.take() {
-            step(&job.shared, 2, &format!("building {}", crate::fswbuild::words(&plan.settings)));
-            match crate::fswbuild::build(&plan.at, &plan.settings) {
-                Ok((bytes, label)) => {
-                    step(&job.shared, 5, &format!("built {}, {} kB", label, bytes.len() / 1024));
+            step(&job.shared, 2, &format!("building {}", plan.words));
+            // Built for the module, then given the board's settings the same way the carried
+            // image is: by rewriting the block. One writer, so what a damaged block falls
+            // back to is the same whichever way the image came.
+            let built = crate::fswbuild::build(&plan.at, &plan.module).and_then(|bytes| {
+                let (at, _) = settings::writable(&bytes)?;
+                settings::patch(&bytes, at, &plan.asked)
+            });
+            match built {
+                Ok(bytes) => {
+                    step(&job.shared, 5, &format!("built {}, {} kB", plan.words, bytes.len() / 1024));
                     job.image = bytes;
-                    job.label = label;
+                    job.label = plan.words;
                 }
                 Err(e) => {
                     finish(&job.shared, String::from("the image was not built, so nothing was written to the board"), Some(e));
@@ -1005,9 +1017,28 @@ mod tests {
 
     fn built_block(module: u8) -> Vec<u8> {
         let mut b = settings::MAGIC.to_vec();
-        b.extend_from_slice(&[1, 255, module, 7, 14, 1, 0xE8, 0x03, 0, 0, 0, 0, 0, 0]);
+        b.extend_from_slice(&[2, 255, module, 7, 14, 1]);
+        for fixed in [60_000u32, 10_000, 1_000, 60_000] {
+            b.extend_from_slice(&fixed.to_le_bytes());
+            b.extend_from_slice(&[0, 75, 50, 35, 20]);
+            for ms in [10_000u32, 30_000, 60_000, 120_000, 180_000] {
+                b.extend_from_slice(&ms.to_le_bytes());
+            }
+        }
+        b.extend_from_slice(&[0; 20]);
         let crc = crate::dump::crc16(&b);
         b.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(b.len(), settings::SIZE);
+        b
+    }
+
+    // The same block after a tool has set the board id, as patch() writes it.
+    fn tool_block(csid: u8, module: u8) -> Vec<u8> {
+        let mut b = built_block(module);
+        b[17] = csid;
+        b[21] = 2;
+        let crc = crate::dump::crc16(&b[..158]);
+        b[158..].copy_from_slice(&crc.to_le_bytes());
         b
     }
 
@@ -1042,7 +1073,7 @@ mod tests {
             let carried = flight_with_block(n);
             assert_eq!(recognise(carried, &known).module, Some(module));
             let mut given = carried.to_vec();
-            given[BLOCK_AT..BLOCK_AT + settings::SIZE].copy_from_slice(&block(12, n));
+            given[BLOCK_AT..BLOCK_AT + settings::SIZE].copy_from_slice(&tool_block(12, n));
             assert_ne!(given, carried);
             let f = recognise(&in_flash(&given), &known);
             assert_eq!((f.kind, f.module), ("flight", Some(module)), "the {} image with other settings", module);
@@ -1101,7 +1132,8 @@ mod tests {
 
         // A whole one is given with where it is, and no block at all has no place.
         let answer = read(&shared(), &known(), &on(self::desk(), flight_with_block(2)), &with_blocks());
-        assert!(answer.contains("\"setBy\":\"build\",\"txIntervalMs\":1000,\"reservedClear\":true},\"settingsError\":null,\"settingsBlockAt\":1000,"), "{}", answer);
+        assert!(answer.contains("\"setBy\":\"build\",\"txIntervalMs\":1000,\"rates\":[{\"fixedMs\":60000,\"follow\":false,\"percent\":[75,50,35,20],\"intervalMs\":[10000,30000,60000,120000,180000]},"), "{}", answer);
+        assert!(answer.contains("\"reservedClear\":true},\"settingsError\":null,\"settingsBlockAt\":1000,"), "{}", answer);
         let answer = read(&shared(), &known(), &self::desk(), &with_blocks());
         assert!(answer.contains("\"settings\":null,\"settingsError\":null,\"settingsBlockAt\":null,"), "{}", answer);
     }
@@ -1259,6 +1291,7 @@ mod tests {
         assert!(steps.iter().any(|l| l.contains("reset")), "{:?}", steps);
     }
 
+    // A layout-1 block, as a board flashed before the battery table carries one.
     fn block(csid: u8, module: u8) -> Vec<u8> {
         let mut b = settings::MAGIC.to_vec();
         b.extend_from_slice(&[1, csid, module, 9, 14, 2, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -1275,7 +1308,7 @@ mod tests {
         *desk.on_board.lock().unwrap() = image.clone();
         let answer = read(&shared(), &known(), &desk, &only_dump());
         assert!(
-            answer.contains("\"settings\":{\"layoutVersion\":1,\"csid\":7,\"module\":\"hp\",\"sf\":9,\"dbm\":14,\"setBy\":\"tool\",\"txIntervalMs\":0,\"reservedClear\":true},\"settingsError\":null,"),
+            answer.contains("\"settings\":{\"layoutVersion\":1,\"csid\":7,\"module\":\"hp\",\"sf\":9,\"dbm\":14,\"setBy\":\"tool\",\"txIntervalMs\":0,\"rates\":null,\"logMs\":null,\"logBlindMs\":null,\"reservedClear\":true},\"settingsError\":null,"),
             "{}",
             answer
         );
@@ -1294,16 +1327,14 @@ mod tests {
     fn a_settings_block_in_a_newer_layout_is_said_to_be_there_and_not_read() {
         let desk = desk();
         let mut b = block(7, 2);
-        b[16] = 2;
-        let crc = crate::dump::crc16(&b[..30]);
-        b[30..].copy_from_slice(&crc.to_le_bytes());
+        b[16] = 4;
         let mut image = vec![0x42u8; 500];
         image.extend_from_slice(&b);
         *desk.on_board.lock().unwrap() = image;
         let state = shared();
         let answer = read(&state, &known(), &desk, &only_dump());
-        assert!(answer.contains("\"settings\":null,\"settingsError\":\"the settings block on the board is layout 2"), "{}", answer);
-        assert!(state.lock().unwrap().steps.iter().any(|l| l.contains("layout 2")));
+        assert!(answer.contains("\"settings\":null,\"settingsError\":\"the settings block on the board is layout 4"), "{}", answer);
+        assert!(state.lock().unwrap().steps.iter().any(|l| l.contains("layout 4")));
     }
 
     #[test]

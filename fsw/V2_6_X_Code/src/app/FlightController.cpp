@@ -39,13 +39,9 @@ FlightController::FlightController(ChipSatPlatform::System &system,
 {
 }
 
-// The gap between transmissions, measured from the end of one to the start of the next: the cycle
-// stamps its clock after the radio is done, so the interval is time off air and nothing needs
+// The gap between transmissions is measured from the end of one to the start of the next: the cycle
+// stamps its clock after the radio is done, so an interval is time off air and nothing needs
 // clamping to the time on air. 0 therefore means back to back
-uint32_t FlightController::configuredTxIntervalMs()
-{
-  return ChipSatSettings::active().txIntervalMs;
-}
 
 void FlightController::setup()
 {
@@ -66,7 +62,15 @@ void FlightController::setup()
     line.field("module", s.module == ChipSatSettings::kModuleHp ? "hp" : "le");
     line.field("sf", s.spreadingFactor);
     line.field("dbm", s.targetDbm);
-    line.field("txms", s.txIntervalMs);
+    // one gap per phase: the fixed one, or 'soc' for one that follows the battery
+    uint32_t fixed[ChipSatSettings::kPhases];
+    uint32_t soc[ChipSatSettings::kPhases];
+    for (size_t p = 0; p < ChipSatSettings::kPhases; p++) {
+      fixed[p] = s.rate[p].fixedMs;
+      soc[p] = s.rate[p].fromSoc ? 1 : 0;
+    }
+    line.fieldList("fixedms", fixed, ChipSatSettings::kPhases);
+    line.fieldList("soc", soc, ChipSatSettings::kPhases);
     // only when something was wrong with a block that was actually written, so a plain image is quiet
     if (ChipSatSettings::rejectReason() != nullptr) {
       line.field("refused", ChipSatSettings::rejectReason());
@@ -78,7 +82,7 @@ void FlightController::setup()
   // Radio before the sensors, so a sensor that hangs at boot still leaves one packet on air.
   // Never halts, a missing sensor just goes out invalid
   radioReady_ = configRadio();
-  txIntervalMs_ = configuredTxIntervalMs();
+  txIntervalMs_ = ChipSatSettings::active().rate[0].fixedMs;   // it starts waiting
   sendStatusPacket();
 
   beginSensors();
@@ -86,7 +90,6 @@ void FlightController::setup()
   LOG_BOOT(Boot, "setup") {
     line.field("done", true);
     line.field("txms", txIntervalMs_);                          // what it will actually use
-    line.field("askedms", ChipSatSettings::active().txIntervalMs);
     line.field("radiostate", radio_.lastCode());
   }
 }
@@ -253,6 +256,56 @@ void FlightController::sampleSensors()
     gauge_.read();
     gaugeReadMs_ = now;
   }
+  followPhase();
+}
+
+// Every fresh reading goes to the phase as it arrives, IMU at 50 ms and barometer at 200 ms, so a
+// release is felt on the reading that shows it and not on the next log tick. A phase change
+// makes the next packet due at once: the first thing a dropped sat should do is say so
+void FlightController::followPhase()
+{
+  const uint32_t now = system_.nowMs();
+  const ChipSatSensors::IMUData imu = imu_.data();
+  if (imu.linearAccelerationValid && imu.gyroscopeValid && imu.linearAccelerationUpdatedMs != imuSeenMs_) {
+    imuSeenMs_ = imu.linearAccelerationUpdatedMs;
+    const ChipSatSensors::Vector3f &a = imu.linearAccelerationMps2;
+    const ChipSatSensors::Vector3f &g = imu.gyroscopeRadPerSec;
+    phase_.imuSample(now, sqrtf(a.x * a.x + a.y * a.y + a.z * a.z), sqrtf(g.x * g.x + g.y * g.y + g.z * g.z));
+  } else if (now - imuSeenMs_ > kImuMaxAgeMs) {
+    phase_.imuLost(now);
+  }
+  const ChipSatSensors::EnvironmentalData env = env_.data();
+  if (env.valid && env.updatedMs != envSeenMs_) {
+    envSeenMs_ = env.updatedMs;
+    phase_.envSample(now, env.altitudeM);
+  }
+  // GPS altitude stands in for a dead barometer. The driver's valid is a trusted 3D fix, fresh
+  const ChipSatSensors::GPSData gps = gps_.data();
+  if (gps.valid && gps.updatedMs != gpsSeenMs_) {
+    gpsSeenMs_ = gps.updatedMs;
+    phase_.gpsSample(now, static_cast<float>(gps.altitudeMSLmm) / 1000.0f);
+  }
+  if (phase_.changed()) {
+    LOG_I(Phase, "now") {
+      line.field("phase", static_cast<unsigned int>(phase_.phase()));
+      line.field("source", static_cast<unsigned int>(phase_.altitudeSource()));
+      line.field("rate", phase_.verticalRateMps(), 2);
+      line.field("above", phase_.aboveGroundM(), 1);
+    }
+    txIntervalMs_ = phaseTxIntervalMs(gauge_.data().valid);
+    previousReadMs_ = now - txIntervalMs_;   // due now
+  }
+}
+
+// The gap after a packet in this phase: its fixed gap, or its battery table when it follows the
+// battery and the gauge reads
+uint32_t FlightController::phaseTxIntervalMs(bool socOkay)
+{
+  const ChipSatSettings::Rate &rate = ChipSatSettings::active().rate[static_cast<size_t>(phase_.phase())];
+  if (rate.fromSoc && socOkay) {
+    return txIntervalFromSoc(rate, gauge_.data().cellPercentage);
+  }
+  return rate.fixedMs;
 }
 
 // The newest reading each sensor has, with anything too old marked invalid
@@ -282,7 +335,7 @@ void FlightController::buildPacket(ChipSatTelemetry::TelemetryPacket &into, bool
   ChipSatTelemetry::encodePacket(data_, counter, ChipSatSettings::active().csid, allFresh, into);
 }
 
-// One record per log interval, slower once the sat is on the ground
+// One record per log gap: fast in the air, slow on the ground either side
 void FlightController::logIfDue()
 {
   // A full chip is the end of the mission's logging, not a fault. Stop building records for it and
@@ -298,9 +351,22 @@ void FlightController::logIfDue()
     return;
   }
 
+  // The gap this phase was given, or the blind one while nothing says what the phase is: the IMU
+  // alone cannot tell a hover from the ground, and a chip full on the drone is a flight lost
   const uint32_t now = system_.nowMs();
-  const uint32_t interval = landing_.landed() ? kLogLandedIntervalMs : kLogIntervalMs;
-  if (now - logWrittenMs_ < interval) {
+  const ChipSatSettings::Settings &settings = ChipSatSettings::active();
+  const uint32_t interval = phase_.altitudeSource() == AltitudeSource::None
+    ? settings.logBlindMs
+    : settings.logMs[static_cast<size_t>(phase_.phase())];
+  if (interval == 0) {
+    // every reading: a record each time the IMU delivers a new one, or at its rate with it dead
+    const uint32_t imuMs = imu_.data().linearAccelerationUpdatedMs;
+    const bool fresh = imu_.data().linearAccelerationValid && imuMs != logImuMs_;
+    if (!fresh && now - logWrittenMs_ < kImuReportIntervalMs) {
+      return;
+    }
+    logImuMs_ = imuMs;
+  } else if (now - logWrittenMs_ < interval) {
     return;
   }
   logWrittenMs_ = now;
@@ -309,11 +375,6 @@ void FlightController::logIfDue()
   // moves on a transmission, and a record carrying the next one can't be lined up against a radio log
   bool allFresh = false;
   buildPacket(logPacket_, allFresh, sentCounter_);
-
-  const ChipSatSensors::Vector3f &a = data_.imu.linearAccelerationMps2;
-  landing_.update(now, sqrtf(a.x * a.x + a.y * a.y + a.z * a.z),
-                  data_.environmental.pressurePa / 100.0f,
-                  data_.imu.linearAccelerationValid && data_.environmental.valid);
 
   anchorUtc(now);
 
@@ -394,7 +455,7 @@ void FlightController::runCycle()
     line.field("gate", reads.gateMs);
     line.field("imuready", imu_.ready());
     line.field("imusleep", imu_.sleeping());
-    line.field("landed", landing_.landed());
+    line.field("phase", static_cast<unsigned int>(phase_.phase()));
     line.field("rec", flashLog_.records());
     line.field("drop", flashLog_.dropped());
   }
@@ -445,15 +506,14 @@ void FlightController::runCycle()
     imuStuckCycles_ = 0;
   }
 
-  const bool fromBattery = kTxFromBattery && reads.socOkay;
-  txIntervalMs_ = fromBattery ? txIntervalFromSoc(data_.stateOfCharge.cellPercentage)
-                              : configuredTxIntervalMs();
+  txIntervalMs_ = phaseTxIntervalMs(reads.socOkay);
 
   previousReadMs_ = system_.nowMs();
 
   LOG_I(Cyc, "end") {
     line.field("nextms", txIntervalMs_);
-    line.field("battery", fromBattery);
+    line.field("phase", static_cast<unsigned int>(phase_.phase()));
+    line.field("battery", ChipSatSettings::active().rate[static_cast<size_t>(phase_.phase())].fromSoc && reads.socOkay);
     line.field("durms", previousReadMs_ - reads.gateMs);
   }
 }
@@ -584,6 +644,7 @@ void FlightController::logReads(const CycleReads &reads) const
   }
   LOG_D(Soc, "values") {
     line.field("pct", data_.stateOfCharge.cellPercentage, 2);
+    line.field("v", data_.stateOfCharge.cellVoltage, 3);
     line.field("raw", gauge_.rawPercent(), 2);
     line.field("upd", data_.stateOfCharge.updatedMs);
   }

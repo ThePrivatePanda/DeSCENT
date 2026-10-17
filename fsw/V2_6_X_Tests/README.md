@@ -18,13 +18,15 @@ python3 tools/test_descent_decode.py
 python3 tools/test_imu_power_analyze.py
 ```
 
-- test_telemetry and test_v25_telemetry each write out 20000 packets. diff the two files, they come out identical, so the ground station can still decode us
+- test_telemetry and test_v25_telemetry each write out 20000 packets. diff the two files: since 2026-10-17 they differ only in byte 51 (V2.6 sends the cell voltage there, V2.5 sent percent) and the extra float on each line, so the ground station still decodes everything else
 - test_imu_validity - the stale rule, edge cases and the millis wrap
 - test_env_compensation - our BME280 maths against Adafruit's on the same raw readings, they agree
 - test_radio_bytes - our radio command bytes and time on air against RadioLib's maths, they agree
 - test_log - log lines at every level, then descent_decode.py reads the packet line back
 - imu_sleep_hang - give the IMU library a failing I2C write and modeSleep() never returns, it just keeps retrying
 - test_flash_log - the flash log against a chip kept in RAM: finding the end after a reset, cut off records, a full chip, erasing ahead
+- test_phase - the flight phases on the barometer, on GPS when it is dead, and blind on the IMU: a climb is the air, 30 s still below half the climb is landed, a hover never is, landed re-arms. Ends by replaying the real drops of 2026-10-13 from test/data, both drops in the air and landed after each
+- test_settings - the settings block: every field, the CRC, layout 3's flash log gaps, and what is refused
 
 ## Board
 

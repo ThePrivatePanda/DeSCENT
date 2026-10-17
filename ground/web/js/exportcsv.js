@@ -13,9 +13,9 @@
   const LEAD = ['time_ms', 'time_utc', 'source', 'boot', 'uptime_ms', 'csid', 'counter', 'validity'];
   const LINK = ['rssi', 'snr', 'freq_err'];
 
-  // Column names the flight-side records.csv (V2_6_X/tools/flash_replay.py) already uses
-  // for the same quantity, so the two files line up. Any other field goes by its key.
-  const NAMES = { gpsAlt: 'gps_alt_m', envAlt: 'baro_alt_m', temp: 'temp_c', pressure: 'pressure_hpa', battery: 'cell_pct' };
+  // Column names for these quantities, kept as the flight-side records.csv once named them
+  // so older spreadsheets line up. Any other field goes by its key.
+  const NAMES = { gpsAlt: 'gps_alt_m', envAlt: 'baro_alt_m', temp: 'temp_c', pressure: 'pressure_hpa', battery: 'cell_v' };
 
   // csid, counter and validity lead the row, so they are not repeated among the fields.
   const FIELDS = P.FIELDS.filter((f) => !LEAD.includes(f.key));

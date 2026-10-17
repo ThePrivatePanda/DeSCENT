@@ -13,7 +13,7 @@
 #include "../platform/Uart.h"
 #include "../devices/Flash.h"
 #include "FlashLog.h"
-#include "Landing.h"
+#include "Phase.h"
 #include "Telemetry.h"
 
 namespace ChipSatApp
@@ -58,8 +58,9 @@ private:
   void sendStatusPacket();
   void keepAlive();
   bool configRadio();                  // false if any step failed
-  uint32_t configuredTxIntervalMs();   // the gap after a transmission, not including it
   void sampleSensors();     // each sensor at its own pace, nothing waits on the radio
+  void followPhase();       // hands fresh readings to the phase and acts on a change
+  uint32_t phaseTxIntervalMs(bool socOkay);
   void logIfDue();
   void anchorUtc(uint32_t nowMs);
   void buildPacket(ChipSatTelemetry::TelemetryPacket &into, bool &allFresh, uint16_t counter);
@@ -84,12 +85,16 @@ private:
   ChipSatSensors::SensorData data_;
   ChipSatTelemetry::TelemetryPacket packet_{};
   ChipSatTelemetry::TelemetryPacket logPacket_{};   // kept apart, the radio has the other one
-  Landing landing_;
+  FlightPhase phase_;
+  uint32_t imuSeenMs_ = 0;   // the IMU reading last handed to the phase
+  uint32_t envSeenMs_ = 0;   // and the barometer reading
+  uint32_t gpsSeenMs_ = 0;
   uint32_t envStartedMs_ = 0;
   bool envMeasuring_ = false;
   uint32_t gpsReadMs_ = 0;
   uint32_t gaugeReadMs_ = 0;
   uint32_t logWrittenMs_ = 0;
+  uint32_t logImuMs_ = 0;      // the IMU reading the last record carried, for a gap of 0
   uint32_t utcAnchorMs_ = 0;
   bool utcAnchored_ = false;
   bool logFull_ = false;

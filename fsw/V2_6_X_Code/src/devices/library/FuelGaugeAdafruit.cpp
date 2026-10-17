@@ -76,6 +76,7 @@ Status FuelGauge::read()
 
   // constrain is a macro that evaluates its args twice, keep it on a local
   data_.cellPercentage = constrain(percentage, 0.0f, 100.0f);
+  data_.cellVoltage = gauge.cellVoltage();   // what the packet carries
   data_.updatedMs = system_.nowMs();
   data_.valid = true;
   return Status::Ok;

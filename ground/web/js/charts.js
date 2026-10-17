@@ -19,7 +19,7 @@
   // because a board's earlier runs are a list to act on, not a graph.
   const TABS = [
     { id: 'overview', label: 'Overview', panels: [
-      { title: 'Battery', unit: '%', series: [{ key: 'battery', label: 'Battery' }] },
+      { title: 'Cell voltage', unit: 'V', series: [{ key: 'battery', label: 'Cell voltage' }] },
       { title: 'Pressure altitude', unit: 'm', series: [{ key: 'envAlt', label: 'Altitude' }] },
       { title: 'RSSI, best receiver', unit: 'dBm', series: [{ key: 'rssi', label: 'RSSI' }] },
       { title: 'SNR, best receiver', unit: 'dB', series: [{ key: 'snr', label: 'SNR' }] },

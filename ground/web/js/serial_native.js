@@ -199,7 +199,8 @@
 
     // Pull a flight log off a chip. port is the board's serial console; keepFsw says
     // whether the flight software now on the board is saved and put back. more names the
-    // probe and the board the sheet was showing: {probe, uid}.
+    // probe and the board the sheet was showing: {probe, uid}, and wipe: 1 clears the
+    // chip instead of reading it (the flight software always goes back on then).
     async pull(port, keepFsw, more) {
       const r = await fetch('/api/pull', {
         method: 'POST',
@@ -288,7 +289,15 @@
       // Either way the board's settings go on the query. The module goes only with a
       // build: the carried image is picked by the module the app has for the board.
       if (o.embedded === 'built' || o.embedded === 'flight') {
-        for (const [key, value] of [['module', o.module], ['csid', o.csid], ['sf', o.sf], ['dbm', o.dbm], ['interval', o.interval]]) {
+        const keys = [['module', o.module], ['csid', o.csid], ['sf', o.sf], ['dbm', o.dbm]];
+        // One rate per phase, waiting, rising, falling, landed: fixed0..3 in ms, follow0..3
+        // as 0 or 1, soc0..3 the thresholds and socms0..3 the intervals, comma separated,
+        // log0..3 the flash log gap in ms; logblind the gap with no altitude source.
+        for (let p = 0; p < 4; p++) {
+          for (const k of ['fixed', 'follow', 'soc', 'socms', 'log']) keys.push([k + p, o[k + p]]);
+        }
+        keys.push(['logblind', o.logblind]);
+        for (const [key, value] of keys) {
           if (value !== null && value !== undefined && value !== '') q.set(key, String(value));
         }
       }

@@ -3,8 +3,8 @@
 // number the flight software wrote - the readable lines this replaced had them outside any check, and a
 // character lost on the wire read as a real timestamp. Slots the CRC rejects are printed too, so a reader can
 // compare its own count against the "found" line. Stops at the first erased record. Send D to print it again,
-// E then Y to erase the whole chip before a flight. Console PB7/PB6 at 115200; read it with
-// tools/flash_replay.py
+// E then Y to erase the whole chip before a flight. Console PB7/PB6 at 115200. The ground software
+// puts this sketch on a board and reads it back itself: the ChipSats screen's pull
 
 #include <stdio.h>
 #include "../../../V2_6_X_Code/src/platform/arduino/SystemArduino.cpp"
@@ -34,7 +34,10 @@ void printHex(const uint8_t *bytes, size_t length)
   }
 }
 
-void dump()
+// Prints the log. Returns true if an E arrived while it was printing: the ground software clears a
+// chip by sending E as soon as the board boots, and a full chip would otherwise print for seven
+// minutes before the E was read
+bool dump()
 {
   char text[160];   // the found line is 120 with a full chip, and a short buffer cuts it off
   uint32_t good = 0;
@@ -44,6 +47,13 @@ void dump()
   int32_t lastBoot = -1;
   uint32_t index = 0;
   for (; index < ChipSatApp::kLogRecordCount; ++index) {
+    if ((index & 31) == 0) {
+      const int c = console.read();
+      if (c == 'E' || c == 'e') {
+        console.write("\r\nstopped printing: E received\r\n");
+        return true;
+      }
+    }
     uint8_t bytes[kLogRecordSize];
     const Status status = flash.read(index * kLogRecordSize, bytes, sizeof bytes);
     if (status != Status::Ok) {
@@ -90,6 +100,7 @@ void dump()
   if (index == ChipSatApp::kLogRecordCount) {
     console.write("the chip is full\r\n");
   }
+  return false;
 }
 
 // Skips the line ending that came with the E, anything else cancels
@@ -137,7 +148,9 @@ void setup()
   if (!flashReady) {
     return;   // the init line says why
   }
-  dump();
+  if (dump()) {
+    eraseAll();
+  }
   prompt();
 }
 
@@ -148,7 +161,9 @@ void loop()
   }
   const int c = console.read();
   if (c == 'D' || c == 'd') {
-    dump();
+    if (dump()) {
+      eraseAll();
+    }
     prompt();
   } else if (c == 'E' || c == 'e') {
     eraseAll();

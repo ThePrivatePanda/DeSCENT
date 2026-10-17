@@ -61,7 +61,7 @@ class TestDecodePacket(unittest.TestCase):
         self.assertAlmostEqual(p["humidity_pct"], 45.50, places=6)
         self.assertEqual(p["counter"], 42)
         self.assertEqual(p["csid"], 9)
-        self.assertAlmostEqual(p["soc_pct"], 75.0, places=6)
+        self.assertAlmostEqual(p["cell_v"], 4.00, places=6)   # byte 150: 75 % x2 then, 4.00 V now
         self.assertEqual(p["validity"], 0xFF)
         self.assertEqual(p["crc_rx"], 0x9393)
         self.assertEqual(p["crc_calc"], 0x9393)

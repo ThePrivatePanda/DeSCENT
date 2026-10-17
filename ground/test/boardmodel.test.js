@@ -250,7 +250,7 @@ test('flight software is built when a tree is at hand and patched into the carri
 test('the radio table with no settings block is all dashes under the plain line', () => {
   const t = B.settingsTable(null, 'hp');
   assert.deepStrictEqual(t.rows.map((r) => [r.key, r.onBoard]),
-    [['csid', '—'], ['sf', '—'], ['dbm', '—'], ['interval', '—']]);
+    [['csid', '—'], ['sf', '—'], ['dbm', '—'], ['waiting', '—'], ['rising', '—'], ['falling', '—'], ['landed', '—'], ['blind', '—']]);
   assert.equal(t.line, 'This board\'s firmware predates the settings block, so the id, spreading factor, power and interval ' +
     'it was built with cannot be read off it. Flashing it from here gives it one.');
   // The dump firmware is not an old flight image, and is not called one.
@@ -261,23 +261,39 @@ test('the radio table with no settings block is all dashes under the plain line'
   assert.equal(t.module, '');
 });
 
-test('a settings block fills the on-the-board column', () => {
-  const s = { layoutVersion: 1, csid: 255, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 1000, reservedClear: true };
+const RATE = (fixedMs, more) => Object.assign({ fixedMs, follow: false, percent: [75, 50, 35, 20], intervalMs: [10000, 30000, 60000, 120000, 180000] }, more || {});
+const RATES = [RATE(60000), RATE(10000), RATE(1000), RATE(60000)];
+
+test('a settings block fills the on-the-board column, one row per phase', () => {
+  const s = { layoutVersion: 3, csid: 255, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, rates: RATES, logMs: [1000, 50, 50, 1000], logBlindMs: 200, reservedClear: true };
   const t = B.settingsTable(s, 'le');
-  assert.deepStrictEqual(t.rows.map((r) => r.onBoard), ['unconfigured (255)', 'SF7', '+14 dBm', '1 s']);
+  assert.deepStrictEqual(t.rows.map((r) => r.onBoard), ['unconfigured (255)', 'SF7', '+14 dBm', 'every 60 s, log every 1 s', 'every 10 s, log every 0.05 s', 'every 1 s, log every 0.05 s', 'every 60 s, log every 1 s', 'log every 0.2 s']);
+  assert.deepStrictEqual(t.rows.slice(3).map((r) => r.label), ['Waiting', 'In the air', 'Falling', 'Landed', 'No altitude source']);
+  // A layout-2 block, from before the log gaps, has the gaps and no logs.
+  assert.deepStrictEqual(B.settingsTable(Object.assign({}, s, { layoutVersion: 2, logMs: null, logBlindMs: null }), 'le').rows.slice(3).map((r) => r.onBoard),
+    ['every 60 s', 'every 10 s', 'every 1 s', 'every 60 s', '—']);
   assert.equal(t.module, 'LE');
   assert.equal(t.setBy, 'from the build, not set from here');
   assert.equal(t.line, '');
   assert.equal(t.damaged, false);
   assert.equal(t.disagree, '');
+  // A phase on the battery says what it follows and what it falls back to; back to back is said.
+  const landed = RATES.slice(); landed[3] = RATE(300000, { follow: true, percent: [90, 60, 30, 5], intervalMs: [0, 20000, 60000, 90000, 200000] });
+  assert.equal(B.settingsTable(Object.assign({}, s, { rates: landed }), 'le').rows[6].onBoard,
+    'by battery: back to back above 90 %, 20 s to 60 %, 60 s to 30 %, 90 s to 5 %, then 200 s (300 s when the gauge cannot be read), log every 1 s');
+  const btb = RATES.slice(); btb[2] = RATE(0);
+  assert.equal(B.settingsTable(Object.assign({}, s, { rates: btb }), 'le').rows[5].onBoard, 'back to back, log every 0.05 s');
+  // A block from before the phases has one gap, shown under falling, and no others.
+  const old = B.settingsTable(Object.assign({}, s, { layoutVersion: 1, txIntervalMs: 250, rates: null, logMs: null, logBlindMs: null }), 'le');
+  assert.deepStrictEqual(old.rows.slice(3).map((r) => r.onBoard),
+    ['no phases in this firmware', 'no phases in this firmware', 'every 0.25 s (no phases in this firmware)', 'no phases in this firmware', '—']);
 
-  const u = B.settingsTable(Object.assign({}, s, { csid: 12, setBy: 'tool', txIntervalMs: 0 }), 'hp');
-  assert.deepStrictEqual(u.rows.map((r) => r.onBoard), ['12', 'SF7', '+14 dBm', 'back to back']);
+  const u = B.settingsTable(Object.assign({}, s, { csid: 12, setBy: 'tool' }), 'hp');
+  assert.equal(u.rows[0].onBoard, '12');
   assert.equal(u.setBy, 'set from this tool');
   assert.match(u.disagree, /The board's settings say LE and this app has it down as HP/);
   // Nothing remembered is not a disagreement; it is the never-set case, said elsewhere.
   assert.equal(B.settingsTable(s, null).disagree, '');
-  assert.equal(B.settingsTable(Object.assign({}, s, { txIntervalMs: 250 }), 'le').rows[3].onBoard, '0.25 s');
 });
 
 test('what the board says about a block it could not give is shown as it comes', () => {
@@ -293,21 +309,41 @@ test('what the board says about a block it could not give is shown as it comes',
 });
 
 test('a row is marked as replaced only when the build would change what the board holds', () => {
-  const s = { csid: 255, module: 'le', sf: 7, dbm: 14, txIntervalMs: 1000 };
-  const same = { csid: '255', sf: 7, dbm: 14, interval: '1000' };
-  const none = { module: false, csid: false, sf: false, dbm: false, interval: false };
-  // The column reads "unconfigured (255)", "+14 dBm" and "1 s" for these, and none of it differs.
+  const s = { csid: 255, module: 'le', sf: 7, dbm: 14, txIntervalMs: 1000, rates: RATES, logMs: [1000, 50, 50, 1000], logBlindMs: 200 };
+  const same = { csid: '255', sf: 7, dbm: 14, lb: '0.2' };
+  [60, 10, 1, 60].forEach((secs, i) => {
+    same['p' + i + 's'] = String(secs); same['p' + i + 'f'] = false;
+    same['p' + i + 'l'] = i === 0 || i === 3 ? '1' : '0.05';
+    [75, 50, 35, 20].forEach((p, k) => { same['p' + i + 'soc' + k] = String(p); });
+    [10, 30, 60, 120, 180].forEach((v, k) => { same['p' + i + 'ms' + k] = String(v); });
+  });
+  const none = { module: false, csid: false, sf: false, dbm: false, waiting: false, rising: false, falling: false, landed: false };
   assert.deepStrictEqual(B.buildDiffers(s, 'le', same), none);
   assert.deepStrictEqual(B.buildDiffers(s, 'hp', Object.assign({}, same, { csid: '9' })),
     Object.assign({}, none, { module: true, csid: true }));
-  assert.deepStrictEqual(B.buildDiffers(s, 'le', { csid: '255', sf: 12, dbm: 15, interval: '0' }),
-    Object.assign({}, none, { sf: true, dbm: true, interval: true }));
+  assert.deepStrictEqual(B.buildDiffers(s, 'le', Object.assign({}, same, { sf: 12, dbm: 15, p2s: '0.5' })),
+    Object.assign({}, none, { sf: true, dbm: true, falling: true }));
+  // Each phase differs on its own: its gap in seconds, its switch, a threshold or a band.
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1f: true })).rising, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p3soc2: '36' })).landed, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0ms4: '181' })).waiting, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0ms4: '181' })).rising, false);
+  // A log gap differs on its own phase; the blind one is counted under waiting.
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1l: '0.1' })).rising, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1l: '0.1' })).waiting, false);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { lb: '0.5' })).waiting, true);
+  // A board from before the log gaps is replaced in every phase: flashing gives it them.
+  assert.deepStrictEqual(B.buildDiffers(Object.assign({}, s, { logMs: null, logBlindMs: null }), 'le', same),
+    Object.assign({}, none, { waiting: true, rising: true, falling: true, landed: true }));
   // An empty or half-typed box is not the board's value.
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { interval: '' })).interval, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p2s: '' })).falling, true);
   assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { csid: '25x' })).csid, true);
   // No module chosen yet is said elsewhere; no block read means nothing is known to be replaced.
   assert.equal(B.buildDiffers(s, null, same).module, false);
-  assert.deepStrictEqual(B.buildDiffers(null, 'hp', { csid: '9', sf: 12, dbm: 22, interval: '0' }), none);
+  assert.deepStrictEqual(B.buildDiffers(null, 'hp', same), none);
+  // A board with no phases is replaced in every phase: flashing gives it them.
+  assert.deepStrictEqual(B.buildDiffers(Object.assign({}, s, { rates: null }), 'le', same),
+    Object.assign({}, none, { waiting: true, rising: true, falling: true, landed: true }));
 });
 
 test('which receivers are listening on a spreading factor, by name', () => {

@@ -49,9 +49,19 @@ int main(int argc, char** argv)
   printf("  at 0x%zX\n", at);
   switch (result) {
     case Parse::kGood:
-      printf("  the board would run: csid %u  module %s  sf %u  dbm %d  interval %u ms  set by %s\n",
+      printf("  the board would run: csid %u  module %s  sf %u  dbm %d  set by %s\n",
              s.csid, s.module == kModuleHp ? "hp" : "le", s.spreadingFactor, s.targetDbm,
-             s.txIntervalMs, s.setBy == kSetByTool ? "tool" : "build");
+             s.setBy == kSetByTool ? "tool" : "build");
+      for (size_t p = 0; p < kPhases; p++) {
+        static const char* names[4] = {"waiting", "rising", "falling", "landed"};
+        printf("    %-8s every %u ms%s", names[p], s.rate[p].fixedMs, s.rate[p].fromSoc ? ", by battery:" : "\n");
+        if (s.rate[p].fromSoc) {
+          for (size_t i = 0; i < kSocBands; i++) {
+            if (i < kSocBands - 1) printf(" %u ms >= %u %%,", s.rate[p].socIntervalMs[i], s.rate[p].socPercent[i]);
+            else printf(" then %u ms\n", s.rate[p].socIntervalMs[i]);
+          }
+        }
+      }
       return 0;
     case Parse::kDamaged:
       printf("  REFUSED, running the values it was built with: %s\n", why);

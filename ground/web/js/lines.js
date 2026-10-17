@@ -53,6 +53,10 @@
       if (Number.isNaN(v)) return null;
       values[P.FIELDS[i].key] = v;
     }
+    // That receiver printed the battery byte as percent (byte / 2). The byte is the cell
+    // voltage now, so the column goes back to the byte and then to volts, which keeps the
+    // rebuilt bytes and their CRC right. The volts it shows for an old capture are not real
+    values.battery = (values.battery * 2) / 100 + 2.5;
     const crc = num(parts[32]);
     if (Number.isNaN(crc)) return null;
     const bytes = P.encode(values, crc);

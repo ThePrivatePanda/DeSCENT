@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn the_images_in_this_build_are_the_ones_its_flight_json_describes() {
-        // Whatever chipsat/firmware held when this was built: nothing, or a set that agrees.
+        // Whatever fsw/firmware held when this was built: nothing, or a set that agrees.
         let f = carried();
         assert!(f.trouble.is_empty(), "{:?}", f.trouble);
         for image in &f.images {

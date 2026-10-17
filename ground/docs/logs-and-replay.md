@@ -64,9 +64,8 @@ blocks it before any request is made. Use the app's own address for that, as abo
 
 ## Replaying a flash dump
 
-**Open a file…** also takes a log written from a ChipSat's flash, exported by
-`V2_6_X/tools/flash_to_ground.py` on the flight-software side. Such a file names itself on its
-second line:
+**Open a file…** also takes a log written from a ChipSat's flash: a pull saved as a log from
+the Data screen. Such a file names itself on its second line:
 
 ```
 #DG,SRC,v1,kind=flash,from=CS64_2026-09-24.bin,boot=7,packets=120,anchor_uptime_ms=41230,anchor_utc=2026-09-24T11:02:03.500Z,anchor_tacc_ns=35000000
@@ -80,7 +79,7 @@ A dump that names its boots with `#DG,BOOT,v1,n=<n>` is split into one run per b
 counter alone could never do. Otherwise a chip log is not split into runs at all, nothing in
 it is discarded as a duplicate reception, and the columns that are read off the transmission
 counter — missed, restarts, Rx %, interval — show nothing rather than something wrong. The board
-logs at 20 Hz while the counter moves once per transmission, and every boot in a dump starts at the
+logs at its own gap per phase (20 Hz in the air, 1 Hz on the ground as shipped) while the counter moves once per transmission, and every boot in a dump starts at the
 same time, so the counter tells you nothing about runs here.
 
 A replay says so on the line under its bar, with how many boots it holds and how many of them have
@@ -133,7 +132,7 @@ This is the Live screen, and Replay is the same screen over a log.
 | Thresholds | All rules below are defaults; change them in Settings. |
 | Several receivers | Identical bytes within 1.5 s = one packet. RSSI/SNR kept per receiver; the fleet list shows the best. |
 | Saturation | ▲sat when valid acceleration reaches ±75 m/s² (BNO085 limit is ±8 g). |
-| Low battery | Below 20 %. |
+| Low battery | Cell under 3.5 V (set in Settings). |
 | Weak RF | Best RSSI below −115 dBm. |
 
 ## Receiver

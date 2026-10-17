@@ -627,7 +627,7 @@
     { key: 'lostMin', label: 'Lost after silence of (min)', type: 'number', min: 1, step: 1 },
     { key: 'staleFactor', label: 'Stale after missed intervals', type: 'number', min: 1, step: 0.5 },
     { key: 'staleMinS', label: 'Stale no sooner than (s)', type: 'number', min: 1, step: 1 },
-    { key: 'lowBatteryPct', label: 'Low battery below (%)', type: 'number', min: 0, max: 100, step: 1 },
+    { key: 'lowBatteryV', label: 'Low battery below (V)', type: 'number', min: 2.5, max: 4.5, step: 0.05 },
     { key: 'weakRssiDbm', label: 'Weak RF below (dBm)', type: 'number', max: 0, step: 1 },
     { key: 'saturationMps2', label: 'Accel saturation at (m/s²)', type: 'number', min: 1, step: 1,
       hint: 'BNO085 range is ±8 g ≈ 78 m/s².' },
@@ -757,10 +757,12 @@
       '<i><b class="' + cls + '" style="width:' + (a > limit ? 100 : Math.max(2, frac * 100)).toFixed(0) + '%"></b></i></span>';
   }
 
+  // The bar spans 3.0 V (empty) to 4.2 V (a full lithium cell); the number is the voltage
   function battCell(d) {
     if (!d.valid.soc) return '<span class="muted">—</span>';
-    const pct = Math.max(0, Math.min(100, d.values.battery));
-    return '<span class="batt' + (pct < settings.lowBatteryPct ? ' low' : '') + '"><i><b style="width:' + pct.toFixed(0) + '%"></b></i>' + fmt(pct, 1) + '%</span>';
+    const v = d.values.battery;
+    const pct = Math.max(0, Math.min(100, (v - 3.0) / 1.2 * 100));
+    return '<span class="batt' + (v < settings.lowBatteryV ? ' low' : '') + '"><i><b style="width:' + pct.toFixed(0) + '%"></b></i>' + fmt(v, 2) + ' V</span>';
   }
 
   // An earlier run of a board, shown under the live one. Deliberately thin: it is
@@ -950,7 +952,7 @@
       '<div class="lists">' +
         list('Link', [
           plainRow('Counter', d.values.counter),
-          plainRow('Battery', d.valid.soc ? fmt(d.values.battery, 1) : '—', '%', d.valid.soc ? '' : 'stale'),
+          plainRow('Cell voltage', d.valid.soc ? fmt(d.values.battery, 2) : '—', 'V', d.valid.soc ? '' : 'stale'),
           plainRow('Interval', Number.isFinite(u.intervalMs) ? fmt(u.intervalMs / 1000, 2) : '—', 's'),
           plainRow('CRC', crcOk + ' <span class="hex muted">' + d.crcReceived.toString(16).toUpperCase().padStart(4, '0') + '</span>'),
           plainRow('Packets', u.packets), plainRow('Missed', u.missed), plainRow('Resets', u.resets),

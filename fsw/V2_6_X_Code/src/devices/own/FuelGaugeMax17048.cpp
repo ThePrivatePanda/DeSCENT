@@ -111,6 +111,21 @@ Status FuelGauge::read()
   const float percentage = static_cast<float>(raw) / 256.0f;
   rawPercent_ = percentage;
 
+  // The cell voltage too: it is what the packet carries. Read second, so a gauge that answers
+  // the first and not this one is still a failed read with the old values marked invalid
+  uint16_t rawVolts = 0;
+  const Status voltsStatus = read16(kGaugeRegVcell, rawVolts);
+  if (voltsStatus != Status::Ok) {
+    data_.valid = false;
+    rawPercent_ = 0.0f;
+    LOG_W(Soc, "read") {
+      line.field("ok", false);
+      line.field("reason", "vcell");
+    }
+    return voltsStatus;
+  }
+  data_.cellVoltage = static_cast<float>(rawVolts) * 78.125e-6f;
+
   // constrain is a macro that evaluates its args twice, keep it on a local
   data_.cellPercentage = constrain(percentage, 0.0f, 100.0f);
   data_.updatedMs = system_.nowMs();

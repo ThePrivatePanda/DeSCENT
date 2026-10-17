@@ -51,10 +51,11 @@ fn main() {
         std::process::exit(stop(&dir, opts.port));
     }
 
-    let (server, port) = match server::bind(opts.port) {
+    let on = opts.host.clone().unwrap_or_else(|| String::from("127.0.0.1"));
+    let (server, port) = match server::bind(&on, opts.port) {
         Ok(Bound::Ours(s, p)) => (s, p),
         Ok(Bound::AlreadyRunning(p)) => {
-            let url = format!("http://127.0.0.1:{}/", p);
+            let url = format!("http://{}:{}/", opts::url_host(&on), p);
             println!("DeSCENT ChipSat is already running at {}", url);
             if opts.open_browser {
                 let _ = webbrowser::open(&url);
@@ -62,7 +63,7 @@ fn main() {
             return;
         }
         Err(e) => {
-            println!("could not listen on 127.0.0.1: {}", e);
+            println!("could not listen on {}: {}", on, e);
             std::process::exit(1);
         }
     };
@@ -122,7 +123,7 @@ fn main() {
         }
     });
 
-    let url = format!("http://127.0.0.1:{}/", port);
+    let url = format!("http://{}:{}/", opts::url_host(&on), port);
     // After the server thread, so anything that finds the file gets an answer from
     // /api/health. Without it the app still runs; only a launcher notices.
     if let Some(w) = urlfile::write(&dir, &url) {

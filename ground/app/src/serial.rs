@@ -45,8 +45,16 @@ pub fn bridge_name(vid: u16, pid: u16) -> &'static str {
         (0x1a86, 0x7523) => "CH340",
         (0x303a, _) => "ESP32 native USB",
         (0x0483, _) => "ST-Link",
+        // pid.codes 1209:5741 is ArduPilot's: the drone's flight controller, never a board of ours
+        (0x1209, 0x5741) => "flight controller",
         _ => "USB serial",
     }
+}
+
+// Whether a port is the drone's flight controller, which three pulls on 2026-10-16 were pointed
+// at by mistake: it talks MAVLink, never a log, and opening it resets the drone's link
+pub fn is_flight_controller(usb: &str) -> bool {
+    usb == "1209:5741"
 }
 
 pub enum Event {

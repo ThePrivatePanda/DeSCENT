@@ -3,19 +3,14 @@
 namespace ChipSatApp
 {
 
-uint32_t txIntervalFromSoc(float socPercent)
+uint32_t txIntervalFromSoc(const ChipSatSettings::Rate &rate, float socPercent)
 {
-  if (socPercent > 75.0f) {
-    return 10UL * 1000UL;
-  } else if (socPercent >= 50.0f) {
-    return 30UL * 1000UL;
-  } else if (socPercent >= 35.0f) {
-    return 60UL * 1000UL;
-  } else if (socPercent >= 20.0f) {
-    return 120UL * 1000UL;
-  } else {
-    return 180UL * 1000UL;
+  for (size_t i = 0; i < ChipSatSettings::kSocBands - 1; i++) {
+    if (socPercent >= static_cast<float>(rate.socPercent[i])) {
+      return rate.socIntervalMs[i];
+    }
   }
+  return rate.socIntervalMs[ChipSatSettings::kSocBands - 1];
 }
 
 } // namespace ChipSatApp

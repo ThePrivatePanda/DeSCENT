@@ -26,6 +26,7 @@ public:
   bool transmitDone();
   ChipSatPlatform::Status finishTransmit();   // clears the flags, back to standby
   uint32_t timeOnAirMs(size_t length);
+  uint8_t headerType();   // explicit from SF7 up, none below: the receiver cannot read one there
 
   // Raw codes for logging, RadioLib's or ours depending on the driver
   int16_t lastCode() const { return lastCode_; }

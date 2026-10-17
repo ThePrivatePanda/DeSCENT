@@ -6,6 +6,13 @@ One page to print. The app needs no internet.
 
 - set the spreading factor you are flying and flash both receivers to it (**T-Beams** → **Flash the receiver firmware**)
 - check every ChipSat on the **ChipSats** screen: module set, and none still running the dump firmware
+- set each board's **Phases**: for waiting, in the air and landed, the gap between flash log
+  records and the gap between packets, and whether the packets follow the battery with that
+  phase's own table; and the log gap with no altitude source. A board flashed before the phases
+  has none and keeps its one fixed interval whatever is set
+- last of all, **Clear flash** on each board: the log chip is wiped, the flight software and its
+  settings stay. A board switched on an hour before the drop then still has an empty chip to log
+  the flight into
 - flash a spare T-Beam the same way, so a dead receiver is a swap
 - check the laptop clock, because logs are timestamped from it
 - check free disk space; a long flight is a few MB, a chip dump about 5 MB
@@ -43,8 +50,9 @@ One page to print. The app needs no internet.
   **Listen** on its T-Beams sheet says what a board is.
 - **ChipSat buttons greyed out** — the board has not been read since it was clipped on. Press **Read
   the board**.
-- **SF6 does not link** — the ChipSat sends an explicit header, which the receiver cannot read at
-  SF6. Fly SF7 or above.
+- **SF6 does not link, SF5 is not offered** — the T-Beam's SX1276 has no SF5, and its SF6 is the
+  first generation format, which the ChipSat's SX1262 cannot produce: tested 2026-10-17 with both
+  sides headerless, every packet heard, every CRC failed (`ERR,-7` in the log). Fly SF7 or above.
 
 ## Numbers
 

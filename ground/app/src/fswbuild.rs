@@ -1,24 +1,12 @@
 //! Builds the flight software for one board, with that board's settings compiled into it.
 //!
-//! Which board it is, which radio module is on it, the spreading factor, the transmit power and the
-//! transmit interval are compile-time constants in the flight software. Rather than carry one
-//! prebuilt image and edit it, this runs the flight software's own build with those values as -D
-//! flags and flashes what comes out.
-//!
-//! The build is also what validates the settings. A power the module has no row for does not produce
-//! a quietly wrong image: it fails to compile, with a sentence saying which powers that module has.
-//! So this does no checking of its own beyond the ranges needed to build a command line, and hands
-//! the compiler's own words back when it refuses.
+//! Which radio module is on the board is a compile-time choice in the flight software: the power
+//! amplifier rows differ. Everything else a board is given lives in the settings block, which the
+//! caller patches into the built image exactly as it patches the image the app carries. So this
+//! runs the flight software's own build for the module, and hands the compiler's own words back
+//! when it refuses.
 
 use std::path::{Path, PathBuf};
-
-pub struct Settings {
-    pub csid: u16,
-    pub module: String,
-    pub sf: u16,
-    pub dbm: i16,
-    pub interval: Option<u32>,
-}
 
 /// The flight software's folder, the one holding build.sh. Looked for rather than configured,
 /// because the usual case is the dashboard and the flight software sitting in one repository:
@@ -60,57 +48,26 @@ fn is_tree(at: &Path) -> bool {
     at.join("build.sh").is_file() && at.join("V2_6_X_Code").is_dir()
 }
 
-/// Runs the build and returns the image and a label naming what was built. Takes about 13 s, because
-/// changing a -D forces a fresh configure rather than reusing the last build's objects.
-pub fn check(s: &Settings) -> Result<u8, String> {
-    let module = match s.module.as_str() {
+/// Runs the build for one radio module and returns the image. About 13 s, because changing a -D
+/// forces a fresh configure rather than reusing the last build's objects. The board's settings are
+/// not compiled in: the built image carries a settings block with the repo's defaults, and the
+/// caller patches that block, the same way it patches the image the app carries. One way of
+/// writing settings, so a damaged block always falls back to the same thing, the repo's defaults
+pub fn build(at: &Path, module: &str) -> Result<Vec<u8>, String> {
+    let module = match module {
         "le" => 1,
         "hp" => 2,
         other => return Err(format!("{:?} is not a radio module; it is le or hp", other)),
     };
-    if s.csid == 0 || s.csid > 255 {
-        return Err(String::from("the board id is 1 to 255, and 255 means nobody set it"));
-    }
-    if s.sf < 5 || s.sf > 12 {
-        return Err(String::from("the spreading factor is 5 to 12"));
-    }
-    Ok(module)
-}
-
-/// What the build will be called, before it has run, so a job can name what it is doing.
-pub fn words(s: &Settings) -> String {
-    format!(
-        "a flight image for board {} on the {} module, SF{} at {} dBm",
-        s.csid,
-        s.module.to_uppercase(),
-        s.sf,
-        s.dbm
-    )
-}
-
-pub fn build(at: &Path, s: &Settings) -> Result<(Vec<u8>, String), String> {
-    let module = check(s)?;
-
-    let mut args: Vec<String> = vec![
-        String::from("build"),
-        format!("-DCHIPSAT_ID={}", s.csid),
-        format!("-DCHIPSAT_RADIO_MODULE={}", module),
-        format!("-DCHIPSAT_SPREADING_FACTOR={}", s.sf),
-        format!("-DCHIPSAT_TARGET_DBM={}", s.dbm),
-    ];
-    if let Some(ms) = s.interval {
-        args.push(format!("-DCHIPSAT_TX_INTERVAL_MS={}", ms));
-    }
-
     let out = std::process::Command::new("./build.sh")
-        .args(&args)
+        .args(["build", &format!("-DCHIPSAT_RADIO_MODULE={}", module)])
         .current_dir(at)
         .output()
         .map_err(|e| format!("cannot run {}/build.sh: {}", at.display(), e))?;
 
     if !out.status.success() {
         return Err(format!(
-            "the flight software did not build with those settings.\n{}",
+            "the flight software did not build.\n{}",
             refusal(&out.stderr, &out.stdout)
         ));
     }
@@ -121,7 +78,7 @@ pub fn build(at: &Path, s: &Settings) -> Result<(Vec<u8>, String), String> {
     if bytes.is_empty() {
         return Err(format!("{} is empty", bin.display()));
     }
-    Ok((bytes, words(s)))
+    Ok(bytes)
 }
 
 /// The compiler's own reason, which for a setting it will not accept is a static_assert naming the
@@ -156,36 +113,12 @@ mod tests {
 
     #[test]
     fn a_module_that_is_not_le_or_hp_is_refused_before_anything_runs() {
-        let s = Settings { csid: 9, module: String::from("xp"), sf: 7, dbm: 14, interval: None };
-        assert!(check(&s).unwrap_err().contains("not a radio module"));
-        assert!(build(Path::new("/nonexistent"), &s).unwrap_err().contains("not a radio module"));
-    }
-
-    #[test]
-    fn a_spreading_factor_the_radio_does_not_have_is_refused_without_a_build() {
-        for sf in [4u16, 13, 24] {
-            let s = Settings { csid: 9, module: String::from("le"), sf, dbm: 14, interval: None };
-            assert!(check(&s).unwrap_err().contains("5 to 12"), "SF{}", sf);
-        }
-    }
-
-    #[test]
-    fn the_words_name_the_board_and_the_module_before_the_build_runs() {
-        let s = Settings { csid: 12, module: String::from("hp"), sf: 9, dbm: 20, interval: Some(0) };
-        let w = words(&s);
-        assert!(w.contains("board 12") && w.contains("HP") && w.contains("SF9") && w.contains("20 dBm"), "{}", w);
-    }
-
-    #[test]
-    fn board_id_0_is_refused_because_it_reads_as_a_board_that_exists() {
-        let s = Settings { csid: 0, module: String::from("le"), sf: 7, dbm: 14, interval: None };
-        assert!(check(&s).unwrap_err().contains("board id"));
+        assert!(build(Path::new("/nonexistent"), "xp").unwrap_err().contains("not a radio module"));
     }
 
     #[test]
     fn a_missing_tree_says_which_path_it_tried() {
-        let s = Settings { csid: 9, module: String::from("le"), sf: 7, dbm: 14, interval: None };
-        let e = build(Path::new("/nonexistent"), &s).unwrap_err();
+        let e = build(Path::new("/nonexistent"), "le").unwrap_err();
         assert!(e.contains("/nonexistent"), "{}", e);
     }
 
