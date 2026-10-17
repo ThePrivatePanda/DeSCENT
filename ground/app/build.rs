@@ -55,9 +55,10 @@ fn main() {
         .unwrap_or(0);
     println!("cargo:rustc-env=DG_BUILT={}", built);
 
-    // What the app carries for a ChipSat. Each file is optional: one that is missing
-    // compiles to None and the part of the app that wanted it says so, and dropping the
-    // file in later is all it takes.
+    // What the app carries for a ChipSat: the images the flight software publishes in
+    // fsw/firmware, read from there so there is one copy. Each file is optional: one that
+    // is missing compiles to None and the part of the app that wanted it says so, and a
+    // checkout of ground/ alone still builds.
     //
     // The folder is watched so that adding or removing a file is noticed, and each file
     // that exists is watched as well. The folder alone is not enough: replacing an image
@@ -65,7 +66,7 @@ fn main() {
     // would not reach the binary and the app would carry the old one while reporting the
     // new hash from flight.json. A file that does NOT exist is deliberately not watched,
     // because cargo reruns this script every time for a path it cannot find.
-    let chipsat = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chipsat/firmware");
+    let chipsat = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fsw/firmware");
     println!("cargo:rerun-if-changed={}", chipsat.display());
     for file in ["flash_dump.bin", "flight-le.bin", "flight-hp.bin", "flight.json", "radio.json"] {
         let at = chipsat.join(file);

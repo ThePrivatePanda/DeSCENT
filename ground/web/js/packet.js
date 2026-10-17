@@ -24,7 +24,7 @@
   ];
 
   // Every field in packet order.
-  // type: storage type; scale: raw / scale = value; group: validity bit key
+  // type: storage type; scale and base: raw / scale + base = value; group: validity bit key
   // that says whether the value can be trusted (null = always trusted).
   // csvDecimals: how the old CSV receiver prints it (used to rebuild bytes).
   const FIELDS = [
@@ -50,7 +50,9 @@
     { key: 'humidity', label: 'Humidity', unit: '%RH', type: 'u16', scale: 100, group: 'env', csvDecimals: 2 },
     { key: 'counter', label: 'Packet counter', unit: '', type: 'u16', scale: 1, group: null, csvDecimals: 0 },
     { key: 'csid', label: 'CSID', unit: '', type: 'u8', scale: 1, group: null, csvDecimals: 0 },
-    { key: 'battery', label: 'Battery', unit: '%', type: 'u8', scale: 2, group: 'soc', csvDecimals: 1 },
+    // Since 2026-10-17 the byte is the cell voltage above 2.5 V in 10 mV steps (2.5 to 5.05 V).
+    // Before that it was percent x2; logs from then read 4 % as 2.52 V, which is accepted.
+    { key: 'battery', label: 'Cell voltage', unit: 'V', type: 'u8', scale: 100, base: 2.5, group: 'soc', csvDecimals: 2 },
     { key: 'validity', label: 'Validity', unit: '', type: 'u8', scale: 1, group: null, csvDecimals: 0 },
   ];
 
@@ -86,6 +88,14 @@
     return s;
   }
 
+  // What the field's storage can hold: a value past it is pinned, as the firmware pins it,
+  // rather than wrapped by the DataView write. u8 fields are the ones this matters for
+  const LIMITS = { u8: [0, 255], i8: [-128, 127], u16: [0, 65535], i16: [-32768, 32767], u32: [0, 4294967295], i32: [-2147483648, 2147483647] };
+  function clampRaw(f, raw) {
+    const l = LIMITS[f.type];
+    return l ? Math.max(l[0], Math.min(l[1], raw)) : raw;
+  }
+
   function readRaw(view, f) {
     switch (f.type) {
       case 'i32': return view.getInt32(f.offset, true);
@@ -118,7 +128,7 @@
     }
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const values = {};
-    for (const f of FIELDS) values[f.key] = readRaw(view, f) / f.scale;
+    for (const f of FIELDS) values[f.key] = readRaw(view, f) / f.scale + (f.base || 0);
     const crcReceived = view.getUint16(DATA_LENGTH, true);
     const crcCalculated = crc16(bytes, DATA_LENGTH);
     const valid = validityFlags(values.validity);
@@ -138,7 +148,7 @@
   function encode(values, crc) {
     const bytes = new Uint8Array(PACKET_LENGTH);
     const view = new DataView(bytes.buffer);
-    for (const f of FIELDS) writeRaw(view, f, Math.round(values[f.key] * f.scale));
+    for (const f of FIELDS) writeRaw(view, f, clampRaw(f, Math.round((values[f.key] - (f.base || 0)) * f.scale)));
     view.setUint16(DATA_LENGTH, crc & 0xffff, true);
     return bytes;
   }

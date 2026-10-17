@@ -9,7 +9,7 @@ const BASE = P.decode(P.hexToBytes('00 00 00 00 00 00 00 00 98 BD FF FF 23 5B 00
 const HEADER = [
   'time_ms', 'time_utc', 'source', 'boot', 'uptime_ms', 'csid', 'counter', 'validity',
   'lat', 'lon', 'gps_alt_m', 'baro_alt_m', 'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'mx', 'my', 'mz',
-  'qi', 'qj', 'qk', 'qr', 'temp_c', 'pressure_hpa', 'humidity', 'cell_pct',
+  'qi', 'qj', 'qk', 'qr', 'temp_c', 'pressure_hpa', 'humidity', 'cell_v',
   'rssi', 'snr', 'freq_err',
 ];
 
@@ -51,7 +51,7 @@ test('a radio log row carries its time, receiver and link numbers', () => {
   assert.strictEqual(Number(r.ax), BASE.ax);
   assert.strictEqual(Number(r.temp_c), BASE.temp);
   assert.strictEqual(Number(r.pressure_hpa), BASE.pressure);
-  assert.strictEqual(Number(r.cell_pct), BASE.battery);
+  assert.strictEqual(Number(r.cell_v), BASE.battery);
   assert.strictEqual(Math.round(Number(r.qr) * 32767), Math.round(BASE.qr * 32767), 'a quaternion term survives the rounding');
   assert.strictEqual(r.rssi, '-50');
   assert.strictEqual(r.snr, '13.75');
@@ -95,15 +95,15 @@ test('a field whose validity bit is clear is an empty cell', () => {
   const { rows } = table([
     { t: 1, rx: 'rx1', text: pkt({ validity: 0x6f, lat: 42.5, lon: -76.5, gpsAlt: 120 }, ',-90.0,5.00,0') },
     { t: 2, rx: 'rx1', text: pkt({ validity: 0x7f, lat: 42.5, lon: -76.5, gpsAlt: 120 }, ',-90.0,5.00,0') },
-    { t: 3, rx: 'rx1', text: pkt({ validity: 0x7f & ~0x20, battery: 80 }, ',-90.0,5.00,0') },
+    { t: 3, rx: 'rx1', text: pkt({ validity: 0x7f & ~0x20, battery: 3.8 }, ',-90.0,5.00,0') },
   ]);
   assert.strictEqual(rows[0].validity, '6F');
   assert.deepStrictEqual([rows[0].lat, rows[0].lon, rows[0].gps_alt_m], ['', '', '']);
   assert.notStrictEqual(rows[0].ax, '', 'the accelerometer bit is set, so its value stays');
   assert.notStrictEqual(rows[0].temp_c, '');
   assert.deepStrictEqual([rows[1].lat, rows[1].lon, rows[1].gps_alt_m], ['42.5', '-76.5', '120']);
-  assert.strictEqual(rows[2].cell_pct, '');
-  assert.strictEqual(rows[1].cell_pct, String(BASE.battery));
+  assert.strictEqual(rows[2].cell_v, '');
+  assert.strictEqual(rows[1].cell_v, String(BASE.battery));
 });
 
 test('a line that fails its CRC, or is not a packet, is not exported', () => {

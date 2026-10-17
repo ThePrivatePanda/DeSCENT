@@ -9,7 +9,6 @@ logs/
 fsw/deps
 fsw/deps/
 fsw/build/
-fsw/data/
 fsw/tools/.venv/
 __pycache__/
 *.pyc

@@ -27,6 +27,7 @@ constexpr uint8_t kEnvAddress = 0x77;
 constexpr uint8_t kGaugeAddress = 0x36;
 
 // MAX17048 registers. All 16 bit, big endian
+constexpr uint8_t kGaugeRegVcell = 0x02;   // cell voltage, 78.125 uV per count
 constexpr uint8_t kGaugeRegSoc = 0x04;
 constexpr uint8_t kGaugeRegVersion = 0x08;
 constexpr uint8_t kGaugeRegStatus = 0x1A;
@@ -202,6 +203,7 @@ constexpr uint8_t  kRadioRegulatorDcDc = 0x01;
 constexpr uint8_t  kRadioCalibrateAll = 0x7F;
 constexpr uint8_t  kRadioRamp200Us = 0x04;
 constexpr uint8_t  kRadioHeaderExplicit = 0x00;
+constexpr uint8_t  kRadioHeaderImplicit = 0x01;   // SF5 and SF6: the T-Beam's SX127x has no header there
 constexpr uint8_t  kRadioCrcOn = 0x01;
 constexpr uint8_t  kRadioIqStandard = 0x00;
 constexpr uint8_t  kRadioSyncControlBits = 0x44;   // how RadioLib 7.1.2 turns 0x12 into 0x1424, SX126x.cpp:934

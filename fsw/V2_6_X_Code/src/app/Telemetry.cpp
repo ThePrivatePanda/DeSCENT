@@ -222,15 +222,15 @@ void encodePacket(
         100.0f),
       100.0f);
 
-  // State of charge:
-  // percent -> 0.5 percent increments
-  packet.cellPercentageX2 =
+  // Battery: the cell voltage above 2.5 V in 10 mV steps, so one byte spans 2.5 to 5.05 V. A
+  // cell never reads below 2.5 V while the board runs, and the gauge's own resolution is coarser
+  packet.cellVoltageByte =
     scaleToUint8(
       constrain(
-        source.stateOfCharge.cellPercentage,
+        source.stateOfCharge.cellVoltage - 2.5f,
         0.0f,
-        100.0f),
-      2.0f);
+        2.55f),
+      100.0f);
 
   packet.packetCounter = packetCounter;
   packet.CSID = chipsatID;

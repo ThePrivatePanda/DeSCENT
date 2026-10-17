@@ -216,6 +216,32 @@
     return ms === 0 ? 'back to back' : String(Number((ms / 1000).toFixed(2))) + ' s';
   }
 
+  const PHASE_NAMES = ['waiting', 'rising', 'falling', 'landed'];
+  // The phases the board actually enters, as the page shows them. Falling is never entered: the
+  // air phase (rising) runs from the climb through the release and the fall, until landed. Its
+  // slot in the block is written with rising's values.
+  const PHASE_CARDS = [0, 1, 3];
+  const PHASE_LABELS = { waiting: 'Waiting', rising: 'In the air', falling: 'Falling', landed: 'Landed' };
+  // A block from before the phases (layout 1) has one gap, used from switch-on to the end.
+  const NO_PHASES = 'no phases in this firmware';
+
+  // One phase's rate as the "On the board" column says it: "every 60 s", or what the phase
+  // follows on the battery and what it falls back to.
+  // A flash log gap in words. 0 is a record per IMU reading, the fastest anything changes.
+  function logWords(ms) {
+    return Number(ms) === 0 ? 'every reading' : 'every ' + intervalWords(ms);
+  }
+
+  function rateWords(r) {
+    if (!r) return NO_PHASES;
+    if (!r.follow) return r.fixedMs === 0 ? 'back to back' : 'every ' + intervalWords(r.fixedMs);
+    const p = r.percent, ms = r.intervalMs;
+    const parts = [intervalWords(ms[0]) + ' above ' + p[0] + ' %'];
+    for (let i = 1; i < p.length; i++) parts.push(intervalWords(ms[i]) + ' to ' + p[i] + ' %');
+    parts.push('then ' + intervalWords(ms[ms.length - 1]));
+    return 'by battery: ' + parts.join(', ') + ' (' + intervalWords(r.fixedMs) + ' when the gauge cannot be read)';
+  }
+
   // What a read with no block in it is told. The dump firmware never has one; any other image
   // without one is taken to be flight software from before the block existed.
   const NO_BLOCK = 'This board\'s firmware predates the settings block, so the id, spreading factor, power and interval ' +
@@ -231,8 +257,18 @@
       { key: 'csid', label: 'Board id', onBoard: s ? (Number(s.csid) === CSID_UNSET ? 'unconfigured (' + s.csid + ')' : String(s.csid)) : '—' },
       { key: 'sf', label: 'Spreading factor', onBoard: s ? 'SF' + s.sf : '—' },
       { key: 'dbm', label: 'Transmit power', onBoard: s ? dbmWords(s.dbm) : '—' },
-      { key: 'interval', label: 'Transmit interval', onBoard: s ? intervalWords(s.txIntervalMs) : '—' },
     ];
+    // One row per phase. A layout-1 board has one gap and no phases: it is shown under
+    // falling, which is the phase that gap was for, and the others say so.
+    // A block from before the log gaps (layout 2) has rates and no logs: the words say the gap only.
+    PHASE_NAMES.forEach((name, i) => {
+      const r = s && s.rates ? s.rates[i] : null;
+      const log = s && s.logMs ? ', log ' + logWords(s.logMs[i]) : '';
+      const onBoard = !s ? '—' : r ? rateWords(r) + log
+        : name === 'falling' ? 'every ' + intervalWords(s.txIntervalMs) + ' (' + NO_PHASES + ')' : NO_PHASES;
+      rows.push({ key: name, label: PHASE_LABELS[name], onBoard });
+    });
+    rows.push({ key: 'blind', label: 'No altitude source', onBoard: s && s.logBlindMs != null ? 'log ' + logWords(s.logBlindMs) : '—' });
     if (!s) {
       // What the app said about the block it could not give, as it said it.
       if (error) return { rows, module: '', setBy: '', disagree: '', line: String(error), damaged: /damaged/i.test(String(error)) };
@@ -253,20 +289,32 @@
   }
 
   // Which rows of the Build with column would replace what the board holds. Compared as
-  // numbers: the board's column reads "+14 dBm" and "1 s" where the controls hold 14 and
-  // 1000. A box that is empty or half typed is not what is on the board. With no block
-  // read there is nothing known to be replaced, so nothing differs.
+  // numbers: the board's column reads "+14 dBm" and "every 1 s" where the controls hold 14
+  // and 1 (seconds). A box that is empty or half typed is not what is on the board. With no
+  // block read there is nothing known to be replaced, so nothing differs. A board with no
+  // phases is always replaced in every phase: flashing gives it them.
   function buildDiffers(settings, remembered, draft) {
     const s = settings;
-    if (!s || !draft) return { module: false, csid: false, sf: false, dbm: false, interval: false };
-    const typed = (v) => (/^\s*-?\d+\s*$/.test(String(v)) ? Number(v) : NaN);
-    return {
+    const none = { module: false, csid: false, sf: false, dbm: false, waiting: false, rising: false, falling: false, landed: false };
+    if (!s || !draft) return none;
+    const typed = (v) => (/^\s*-?\d+(\.\d+)?\s*$/.test(String(v)) ? Number(v) : NaN);
+    const out = {
       module: !!remembered && !!s.module && remembered !== s.module,
       csid: typed(draft.csid) !== Number(s.csid),
       sf: typed(draft.sf) !== Number(s.sf),
       dbm: typed(draft.dbm) !== Number(s.dbm),
-      interval: typed(draft.interval) !== Number(s.txIntervalMs),
     };
+    // A board from before the log gaps is replaced in every phase too: flashing gives it them.
+    PHASE_NAMES.forEach((name, i) => {
+      const r = s.rates ? s.rates[i] : null;
+      const same = !!r && Math.round(typed(draft['p' + i + 's']) * 1000) === Number(r.fixedMs) && !!draft['p' + i + 'f'] === !!r.follow &&
+        r.percent.every((p, k) => typed(draft['p' + i + 'soc' + k]) === Number(p)) &&
+        r.intervalMs.every((ms, k) => Math.round(typed(draft['p' + i + 'ms' + k]) * 1000) === Number(ms)) &&
+        !!s.logMs && Math.round(typed(draft['p' + i + 'l']) * 1000) === Number(s.logMs[i]);
+      out[name] = !same;
+    });
+    if (s.logBlindMs == null || Math.round(typed(draft.lb) * 1000) !== Number(s.logBlindMs)) out.waiting = true;
+    return out;
   }
 
   // Who would hear a board on this spreading factor. receivers is receiverWords():
@@ -349,6 +397,6 @@
 
   return {
     MODULE, uidWords, sameBoard, chipName, firmwareWords, stillOnProbe, probesChanged, probeToRead, probeToAutoRead, swapSeen, readButton, readToast, dropChoice, chipList, stepList, powerOptions, sfOptions, dbmWords,
-    flashWay, settingsTable, buildDiffers, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal,
+    flashWay, settingsTable, buildDiffers, rateWords, PHASE_NAMES, PHASE_CARDS, PHASE_LABELS, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal,
   };
 });

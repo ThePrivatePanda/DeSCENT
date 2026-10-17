@@ -1,0 +1,39 @@
+name: Firmware images match the source
+
+# fsw/firmware holds built images the app embeds and flashes. Nothing but this checks that they
+# are what fsw/ builds, and an image behind its source is the one kind of stale that no screen
+# shows. The build is reproducible, so the check is a byte comparison.
+
+on:
+  push:
+    branches: [main]
+    paths: ['fsw/**', '.github/workflows/firmware.yml']
+  pull_request:
+    paths: ['fsw/**', '.github/workflows/firmware.yml']
+  workflow_dispatch:
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The toolchain, pinned by chipsat.cmake and kept between runs
+        uses: actions/cache@v4
+        with:
+          path: fsw/deps
+          key: fsw-deps-${{ runner.os }}-${{ hashFiles('fsw/cmake/chipsat.cmake') }}
+      - name: Rebuild everything firmware/ holds
+        run: ./tools/emit_firmware.sh
+        working-directory: fsw
+        env:
+          CHIPSAT_JOBS: 4
+      - name: Compare with what is committed
+        run: |
+          if ! git diff --exit-code --stat -- fsw/firmware; then
+            echo "::error::fsw/firmware is behind the source. Run fsw/tools/emit_firmware.sh and commit the result."
+            exit 1
+          fi
+          untracked=$(git status --porcelain --untracked-files=all -- fsw/firmware)
+          if [ -n "$untracked" ]; then
+            echo "::error::the build wrote files fsw/firmware does not track:"; echo "$untracked"; exit 1
+          fi

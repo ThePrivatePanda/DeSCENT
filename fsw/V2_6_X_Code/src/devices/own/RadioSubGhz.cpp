@@ -400,8 +400,11 @@ Status Radio::startTransmit(const uint8_t *data, size_t length)
   txModulation = static_cast<uint8_t>(kBandwidth500 ? (txModulation & ~0x04) : (txModulation | 0x04));
   writeRegisters(status, "txmodulation", kRadioRegTxModulation, &txModulation, 1);
 
+  // Below SF7 the receiver's SX127x cannot read a header, so none is sent and the length is
+  // the fixed 55 it is told. Measured 2026-10-17: with a header at SF6 it heard every packet at
+  // -75 dBm and failed every CRC
   const uint8_t packet[6] = {static_cast<uint8_t>(kRadioPreambleLength >> 8),
-                             static_cast<uint8_t>(kRadioPreambleLength), kRadioHeaderExplicit,
+                             static_cast<uint8_t>(kRadioPreambleLength), headerType(),
                              static_cast<uint8_t>(length), kRadioCrcOn, kRadioIqStandard};
   command(status, "packet", RADIO_SET_PACKETPARAMS, packet, sizeof packet);
 
@@ -475,11 +478,16 @@ Status Radio::finishTransmit()
   return status;
 }
 
+uint8_t Radio::headerType()
+{
+  return radioSettings().spreadingFactor <= 6 ? kRadioHeaderImplicit : kRadioHeaderExplicit;
+}
+
 uint32_t Radio::timeOnAirMs(size_t length)
 {
   constexpr uint32_t bandwidthHundredths = static_cast<uint32_t>(kRadioBandwidthKhz * 100.0f + 0.5f);
   return timeOnAirUs(radioSettings().spreadingFactor, bandwidthHundredths, kRadioCodingRate, kRadioPreambleLength,
-                     kRadioCrcOn != 0, kRadioHeaderExplicit == 0x00, length) / 1000;
+                     kRadioCrcOn != 0, headerType() == kRadioHeaderExplicit, length) / 1000;
 }
 
 } // namespace ChipSatDevices

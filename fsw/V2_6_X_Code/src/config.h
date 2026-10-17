@@ -81,25 +81,51 @@ constexpr uint32_t kGaugeIntervalMs = 1000;
 // How often the uptime is tied to GPS time in the log and on the console, once the receiver has it
 constexpr uint32_t kUtcAnchorIntervalMs = 10000;
 
-// Flash log. Every record is 64 bytes, so 20 Hz fills the 2 MB chip in about 27 minutes
-constexpr uint32_t kLogIntervalMs = 50;
-constexpr uint32_t kLogLandedIntervalMs = 1000;
+// Flash log. Every record is 64 bytes, so 20 Hz fills the 2 MB chip in about 27 minutes, which is
+// why only the air logs at that rate. The gaps are in the settings block (one per phase, and one for
+// when no altitude source is live); these are what a fresh image carries
 
-// Landing: all of these together for kLandingQuietMs drops the logging rate. Free fall looks like
-// sitting still to the IMU, so the pressure has to be steady too
-constexpr uint32_t kLandingQuietMs = 10000;
-constexpr uint32_t kLandingEarliestMs = 60000;   // never before this, so it can't trigger on the pad
-constexpr float    kLandingPressureHpa = 0.5f;
-constexpr float    kLandingAccelMps2 = 0.5f;
+// Flight phases (app/Phase.h): waiting on the ground, rising once it is in the air, landed once it
+// is still again below where it flew. Falling is not detected: on the 2026-10-13 drops the IMU's
+// linear acceleration read 0.3 to 28 m/s2 on the drone and the same during the release (motor
+// vibration, and a flat sat is at terminal speed in half a second), and the drone itself descended
+// 53 m before letting go, so neither a rate nor a drop from the peak tells a release from the drone
+constexpr uint32_t kLogIntervalMsDefault[4] = {1000, 50, 50, 1000};   // waiting, rising, (falling), landed
+constexpr uint32_t kLogBlindIntervalMs = 200;    // no altitude source: 5 Hz lasts 109 minutes
+constexpr uint32_t kPhaseRateWindowMs = 800;    // the vertical rate is over at least this long
+constexpr float    kPhaseBaselineRateMps = 0.3f; // the ground baseline only follows a sat this still
+constexpr float    kPhaseBaselineGain = 0.02f;   // per altitude reading, so about 10 s to settle on the barometer
+constexpr float    kRiseGainM = 15.0f;          // climbed this far above the baseline on the barometer: rising
+constexpr float    kRiseGainGpsM = 30.0f;       // on GPS altitude: it drifted 13 m on the ground on 2026-10-13
+constexpr uint32_t kAltitudeStaleMs = 3000;     // an altitude source older than this is not live
+constexpr float    kQuietAccelMps2 = 2.0f;      // at rest: lying in grass in some wind is not 0.5
+constexpr float    kQuietGyroRadPerSec = 0.35f; // about 20 degrees a second
+constexpr float    kQuietAltitudeM = 4.0f;      // about half a hectopascal
+constexpr float    kQuietAltitudeGpsM = 8.0f;   // GPS altitude wanders this much lying still
+constexpr uint32_t kLandedMs = 30000;           // this long at rest, below half of what it climbed, is landed
+constexpr uint32_t kLandedNoImuMs = 120000;     // on altitude alone, with the IMU dead
+constexpr uint32_t kMotionWindowMs = 10000;     // no altitude source: the IMU alone tells the air from the ground
+constexpr float    kMotionFraction = 0.8f;      // this much of the window not quiet is a running drone
+constexpr uint32_t kBlindLandedMs = 30000;      // and this long quiet after it is landed
 
-// How often a packet goes out
-// Battery data is read and sent every packet either way
-constexpr bool     kTxFromBattery = false;
+// How often a packet goes out: the gap after each, per flight phase (app/Phase.h), as a fresh image
+// carries them in its settings block; the dashboard writes a board's own. Each phase has a fixed gap
+// and may follow the battery instead, with its own table: one gap per state-of-charge band, so a
+// board running down spends its last charge on fewer packets. Off by default in every phase. A
+// phase that follows the battery still uses its fixed gap while the gauge cannot be read.
+// Battery data is read and sent every packet either way.
+// Order: waiting, rising, falling, landed. Rising is the whole flight (the falling slot is never
+// entered, see app/Phase.h) and its gap is the flight rate; CHIPSAT_TX_INTERVAL_MS sets it on the
+// build line, 0 sends back to back
 #ifndef CHIPSAT_TX_INTERVAL_MS
 #define CHIPSAT_TX_INTERVAL_MS 1000
 #endif
-// The gap after a transmission, not counting the transmission itself. 0 sends back to back
-constexpr uint32_t kTxIntervalMs = CHIPSAT_TX_INTERVAL_MS; // override battery percent table
+constexpr uint32_t kRateFixedMsDefault[4] = {60000, CHIPSAT_TX_INTERVAL_MS, CHIPSAT_TX_INTERVAL_MS, 60000};
+constexpr bool     kRateFromSocDefault[4] = {false, false, false, false};
+constexpr uint8_t  kSocPercentDefault[4] = {75, 50, 35, 20};
+constexpr uint32_t kSocIntervalMsDefault[5] = {10000, 30000, 60000, 120000, 180000};
+// The flight gap on its own, for the parts of the build that only know that one
+constexpr uint32_t kTxIntervalMs = CHIPSAT_TX_INTERVAL_MS;
 
 // Resets the board if the code hangs. Longest stretch with no wait in it is ~1.8 s (GPS setup with no
 // receiver), by reading, not measured. 32 s at most on this chip

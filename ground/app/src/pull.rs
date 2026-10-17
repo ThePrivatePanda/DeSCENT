@@ -15,7 +15,7 @@
 // report.json sets what was read against what the board counted, and the flight software
 // that was on the board is saved beside them.
 use crate::json::esc;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,6 +32,7 @@ const READ_LIMIT_MS: u128 = 20 * 60 * 1000;
 #[derive(Clone)]
 pub struct Pull {
     pub running: bool,
+    pub wipe: bool,       // clearing the chip rather than reading it
     pub keep_fsw: bool,
     pub board: String,
     pub started_ms: u128,
@@ -52,6 +53,7 @@ impl Pull {
     fn idle() -> Self {
         Pull {
             running: false,
+            wipe: false,
             keep_fsw: true,
             board: String::new(),
             started_ms: 0,
@@ -92,8 +94,9 @@ pub fn state_json(p: &Pull, now_ms: u128) -> String {
     };
     let steps: Vec<String> = p.steps.iter().map(|l| format!("\"{}\"", esc(l))).collect();
     format!(
-        "{{\"ok\":true,\"running\":{},\"keepFsw\":{},\"board\":\"{}\",\"seconds\":{},\"pct\":{},\"note\":\"{}\",\"steps\":[{}],\"savedFsw\":{},\"log\":{},\"dir\":{},\"raw\":{},\"report\":{},\"restored\":{},\"error\":{}}}",
+        "{{\"ok\":true,\"running\":{},\"wipe\":{},\"keepFsw\":{},\"board\":\"{}\",\"seconds\":{},\"pct\":{},\"note\":\"{}\",\"steps\":[{}],\"savedFsw\":{},\"log\":{},\"dir\":{},\"raw\":{},\"report\":{},\"restored\":{},\"error\":{}}}",
         p.running,
+        p.wipe,
         p.keep_fsw,
         esc(&p.board),
         secs,
@@ -133,6 +136,8 @@ struct Listener {
     stop: Arc<AtomicBool>,
     last_ms: Arc<Mutex<u128>>,
     gap_ms: Arc<AtomicU64>,
+    // The same port for writing, when there is one: a clear talks to the dump firmware.
+    writer: Mutex<Option<Box<dyn Write + Send>>>,
 }
 
 impl Listener {
@@ -141,7 +146,10 @@ impl Listener {
             .timeout(std::time::Duration::from_millis(200))
             .open()
             .map_err(|e| format!("{}: {}", port_name, e))?;
-        Ok(Listener::on(port))
+        let writer = port.try_clone().map_err(|e| format!("{}: cannot open it for writing: {}", port_name, e))?;
+        let l = Listener::on(port);
+        *l.writer.lock().unwrap() = Some(writer);
+        Ok(l)
     }
 
     fn on<R: Read + Send + 'static>(mut port: R) -> Listener {
@@ -174,7 +182,52 @@ impl Listener {
                 }
             }
         });
-        Listener { heard, stop, last_ms, gap_ms }
+        Listener { heard, stop, last_ms, gap_ms, writer: Mutex::new(None) }
+    }
+
+    // To the board. A port with no writer (a test's) takes the bytes and drops them.
+    fn send(&self, bytes: &[u8]) -> Result<(), String> {
+        if let Some(w) = self.writer.lock().unwrap().as_mut() {
+            w.write_all(bytes).and_then(|_| w.flush()).map_err(|e| format!("cannot write to the console: {}", e))?;
+        }
+        Ok(())
+    }
+
+    // Where a whole line holding `text` ends, looking at or after `from`. Whole, as for
+    // the found line: what matters on it may be the part still arriving.
+    // Where the first line at or after `from` that begins with `text` ends. The flash driver
+    // logs "I FLASH 416 c0: erase what=chip" while a chip is erasing, which contains "erase "
+    // but is not the firmware's verdict; that is the line that begins with it, and comes later
+    fn line_starting_after(&self, text: &str, from: usize) -> Option<usize> {
+        let heard = self.heard.lock().unwrap();
+        let mut at = from.min(heard.len());
+        while at < heard.len() {
+            let end = match heard[at..].iter().position(|b| *b == b'\n') {
+                Some(n) => at + n + 1,
+                None => return None,
+            };
+            if String::from_utf8_lossy(&heard[at..end]).trim_start().starts_with(text) {
+                return Some(end);
+            }
+            at = end;
+        }
+        None
+    }
+
+    fn line_with_after(&self, text: &str, from: usize) -> Option<usize> {
+        let heard = self.heard.lock().unwrap();
+        let mut at = from.min(heard.len());
+        while at < heard.len() {
+            let end = match heard[at..].iter().position(|b| *b == b'\n') {
+                Some(n) => at + n + 1,
+                None => return None,
+            };
+            if String::from_utf8_lossy(&heard[at..end]).contains(text) {
+                return Some(end);
+            }
+            at = end;
+        }
+        None
     }
 
     fn last_ms(&self) -> u128 {
@@ -294,6 +347,9 @@ pub struct Job {
     pub dir: PathBuf,
     pub port_name: String,
     pub probe: Option<String>,
+    // Clear the chip instead of reading it: the dump firmware is told to erase, and the
+    // flight software goes back on. The last thing done to a board before it flies.
+    pub wipe: bool,
     pub keep_fsw: bool,
     pub dump_image: &'static [u8],
     // The board this pull is meant for, when the page knows, and what the operator calls
@@ -314,6 +370,7 @@ pub fn start(job: Job, held: crate::stm32::Held) -> Result<(), String> {
         let mut p = job.shared.lock().unwrap();
         *p = Pull::idle();
         p.running = true;
+        p.wipe = job.wipe;
         p.keep_fsw = job.keep_fsw;
         p.board = job.port_name.clone();
         p.started_ms = crate::logfile::now_ms();
@@ -364,7 +421,14 @@ impl Bench for StLink<'_> {
 struct Limits {
     quiet_ms: u128,
     read_ms: u128,
+    // A clear: how long to wait for the dump firmware to ask "Y?", and then to say it erased.
+    // The firmware says 5 s typical and 25 s at most for the erase itself.
+    ask_ms: u128,
+    erase_ms: u128,
 }
+
+const ASK_LIMIT_MS: u128 = 30_000;
+const ERASE_LIMIT_MS: u128 = 45_000;
 
 fn put_back(bench: &dyn Bench, image: &Path) -> Result<(), String> {
     let bytes = std::fs::read(image).map_err(|e| format!("cannot read back {}: {}", image.display(), e))?;
@@ -378,17 +442,21 @@ fn run(job: Job) {
     match Listener::start(&job.port_name) {
         Ok(listener) => {
             let bench = StLink { probe: job.probe.as_deref(), broadcast: &job.broadcast };
-            pull(&job, &bench, listener, &Limits { quiet_ms: QUIET_MS, read_ms: READ_LIMIT_MS });
+            pull(&job, &bench, listener, &Limits { quiet_ms: QUIET_MS, read_ms: READ_LIMIT_MS, ask_ms: ASK_LIMIT_MS, erase_ms: ERASE_LIMIT_MS });
         }
         Err(e) => finish(&job.shared, &job.broadcast, None, Some(e), Board::Untouched, None),
     }
 }
 
 fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
-    let Job { shared, broadcast, dir, port_name, keep_fsw, dump_image, uid, name: board_name, .. } = job;
-    let keep_fsw = *keep_fsw;
+    let Job { shared, broadcast, dir, port_name, keep_fsw, dump_image, uid, name: board_name, wipe, .. } = job;
+    // A clear always puts the flight software back: the point is a board that flies with an
+    // empty chip, not a board on the dump firmware.
+    let wipe = *wipe;
+    let keep_fsw = *keep_fsw || wipe;
 
     let name = folder_name(board_name.as_deref().unwrap_or(port_name), SystemTime::now());
+    let name = if wipe { name.replacen("descent-pull-", "descent-clear-", 1) } else { name };
     // In full, because this is what the operator is shown to go and find it by.
     let folder = std::path::absolute(dir.join(&name)).unwrap_or_else(|_| dir.join(&name));
     if let Err(e) = std::fs::create_dir_all(&folder) {
@@ -436,6 +504,43 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
         reset_at = before;
         bench.reset()?;
 
+        if wipe {
+            // E until the firmware asks whether to go ahead: it reads the console every 32
+            // records while printing, and a byte sent while it was still booting is lost.
+            // Then Y, once, and its own word on how the erase went.
+            say(shared, broadcast, 45, "asking the dump firmware to erase the chip");
+            let reset_ms = crate::logfile::now_ms();
+            let asked = loop {
+                listener.send(b"E")?;
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                if let Some(end) = listener.line_with_after("send Y to go ahead", at) {
+                    break end;
+                }
+                if crate::logfile::now_ms().saturating_sub(reset_ms) > limits.ask_ms {
+                    return Err(String::from("the dump firmware never asked whether to erase: is the console port the board's?"));
+                }
+            };
+            say(shared, broadcast, 60, "erasing the chip, about 5 s");
+            listener.send(b"Y")?;
+            let sent_ms = crate::logfile::now_ms();
+            let said = loop {
+                if let Some(end) = listener.line_starting_after("erase ", asked) {
+                    let heard = listener.heard.lock().unwrap();
+                    let line = String::from_utf8_lossy(&heard[asked..end]);
+                    break line.lines().find(|l| l.trim_start().starts_with("erase ")).unwrap_or("").trim().to_string();
+                }
+                if crate::logfile::now_ms().saturating_sub(sent_ms) > limits.erase_ms {
+                    return Err(String::from("the dump firmware did not say whether the erase finished"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            };
+            if !said.starts_with("erase ok") {
+                return Err(format!("the chip was not erased: the board said {:?}", said.trim()));
+            }
+            shared.lock().unwrap().note = format!("{}, flight software going back on", said.trim());
+            return Ok(());
+        }
+
         say(shared, broadcast, 45, "reading the log off the chip");
         let reset_ms = crate::logfile::now_ms();
         loop {
@@ -474,7 +579,9 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
     }
 
     let mut read_as: Option<String> = None;
-    if error.is_none() {
+    if wipe && error.is_none() {
+        read_as = Some(String::from("flash cleared"));
+    } else if error.is_none() {
         // Only what arrived after the reset is read. What the port carried before it is
         // by definition not this printing: a board left on an older dump firmware is
         // still printing its log when the pull starts, and its records pair up and read
@@ -487,10 +594,18 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
                 raw.display()
             ));
         } else if parsed.records.is_empty() {
+            // The board's own word on its chip, when it gave one: "init ok=0 id=0xFFFFFF
+            // reason=noack" is a chip that did not answer, and that is the whole story
+            let said = text
+                .lines()
+                .find(|l| l.contains("FLASH") && l.contains("init"))
+                .map(|l| format!(" The board said: {}.", l.trim()))
+                .unwrap_or_default();
             error = Some(format!(
-                "nothing that reads as a log came off the board; the {} bytes it did send are in {}",
+                "nothing that reads as a log came off the board; the {} bytes it did send are in {}.{}",
                 heard.len(),
-                raw.display()
+                raw.display(),
+                said
             ));
         } else {
             say(shared, broadcast, 80, &format!("read {} records from {} boots", parsed.records.len(), parsed.boots().len()));
@@ -817,6 +932,7 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
             dir: dir.clone(),
             port_name: "/dev/ttyACM1".into(),
             probe: None,
+            wipe: what.starts_with("wipe"),
             keep_fsw,
             dump_image: DUMP,
             uid: None,
@@ -824,10 +940,61 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
         };
         job.shared.lock().unwrap().running = true;
         job.shared.lock().unwrap().keep_fsw = keep_fsw;
-        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000 });
+        job.shared.lock().unwrap().wipe = job.wipe;
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
         let state = job.shared.lock().unwrap().clone();
         let did = desk.did.lock().unwrap().clone();
         (state, did, dir)
+    }
+
+    #[test]
+    fn a_clear_asks_the_dump_firmware_to_erase_and_puts_the_flight_software_back() {
+        // The board boots, starts printing, hears the E, asks, hears the Y, erases.
+        let said = b"I Boot 3 c0: start test=flashdump\r\nraw 0 000000 AA\r\n\r\nstopped printing: E received\r\n\
+erase the WHOLE chip? the log on it is gone for good. send Y to go ahead, anything else cancels\r\n\
+erasing, 5 s typical, 25 s at most\r\nerase ok after 5012 ms\r\nsend D to print the log again, E to erase the whole chip\r\n";
+        let (p, did, dir) = pulled("wipe", said, false, None);
+        assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"], "saved and put back even when not asked to keep it");
+        assert_eq!(p.error, None);
+        assert!(p.restored && p.wipe);
+        let folder = PathBuf::from(p.dir.clone().unwrap());
+        let name = folder.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("descent-clear-"), "{}", name);
+        assert_eq!(p.note, format!("flash cleared, flight software back on the board; saved in {}", folder.display()));
+        assert_eq!(p.log, None, "nothing was read, so there is no log to open");
+        assert!(folder.join("dump.txt").is_file(), "what the board said is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_flash_drivers_own_erase_log_line_is_not_the_verdict() {
+        // Board 9, 2026-10-17: the driver logs "erase what=chip" while erasing, and the app took
+        // that for the firmware's word, read nothing off it, and reset the board mid-erase
+        let said = b"I BOOT 0 c0: start test=flashdump\r\nstopped printing: E received\r\n\
+erase the WHOLE chip? the log on it is gone for good. send Y to go ahead, anything else cancels\r\n\
+erasing, 5 s typical, 25 s at most\r\nI FLASH 416 c0: erase what=chip\r\nerase ok after 5012 ms\r\nsend D to print the log again, E to erase the whole chip\r\n";
+        let (p, _, dir) = pulled("wipe-logged", said, false, None);
+        assert_eq!(p.error, None, "{:?}", p.error);
+        assert!(p.restored && p.wipe);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clear_the_firmware_does_not_confirm_is_a_failure_with_the_board_put_back() {
+        let said = b"I Boot 3 c0: start test=flashdump\r\nstopped printing: E received\r\n\
+erase the WHOLE chip? the log on it is gone for good. send Y to go ahead, anything else cancels\r\nerase Timeout after 25000 ms\r\n";
+        let (p, did, dir) = pulled("wipe-failed", said, true, None);
+        assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"]);
+        let e = p.error.unwrap();
+        assert!(e.contains("was not erased") && e.contains("erase Timeout"), "{}", e);
+        assert!(p.restored);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Never asked: the console is not this board's.
+        let (p, did, dir) = pulled("wipe-silent", b"I TX 1 c1: something else talking\r\n", true, None);
+        assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"]);
+        assert!(p.error.unwrap().contains("never asked"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     const TWO: &str = "record 0 boot 0 ms 2517\r\n\
@@ -905,6 +1072,18 @@ record 1 boot 0 ms 2567\r\n\
     }
 
     #[test]
+    fn a_chip_that_did_not_answer_is_quoted_in_the_failure() {
+        // Board 000F0033 on 2026-10-16: the dump firmware printed its init line and nothing
+        // else, and the failure sent the operator hunting for a port problem instead
+        let said = b"I BOOT 0 c0: start test=flashdump\r\nI FLASH 0 c0: start\r\nI FLASH 2 c0: init ok=0 id=0xFFFFFF reason=noack\r\n";
+        let (p, _, dir) = pulled("noack", said, true, None);
+        let e = p.error.unwrap();
+        assert!(e.contains("nothing that reads as a log"), "{}", e);
+        assert!(e.contains("The board said: I FLASH 2 c0: init ok=0 id=0xFFFFFF reason=noack."), "{}", e);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_board_that_prints_nothing_is_a_failure_and_is_still_put_back() {
         let (p, did, dir) = pulled("nothing", b"I Boot 3 c0: start test=flashdump\r\n", true, None);
         assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"]);
@@ -976,12 +1155,13 @@ record 1 boot 0 ms 2567\r\n\
             dir: dir.clone(),
             port_name: "/dev/ttyACM1".into(),
             probe: None,
+            wipe: false,
             keep_fsw: true,
             dump_image: DUMP,
             uid: Some(uid.into()),
             name: name.map(String::from),
         };
-        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000 });
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
         let state = job.shared.lock().unwrap().clone();
         let did = desk.did.lock().unwrap().clone();
         let named = desk.named.lock().unwrap().clone();
@@ -1038,12 +1218,13 @@ record 1 boot 0 ms 2567\r\n\
             dir: dir.clone(),
             port_name: "/dev/ttyACM1".into(),
             probe: None,
+            wipe: false,
             keep_fsw: true,
             dump_image: DUMP,
             uid: None,
             name: None,
         };
-        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000 });
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
         assert!(!desk.did.lock().unwrap().contains(&"uid".to_string()));
         let named = desk.named.lock().unwrap().clone();
         assert!(named[0].starts_with("descent-ground-fsw-ttyACM1-") && named[0].ends_with(".bin"), "{}", named[0]);
@@ -1070,12 +1251,13 @@ record 1 boot 0 ms 2567\r\n\
             dir: dir.clone(),
             port_name: "/dev/ttyACM1".into(),
             probe: None,
+            wipe: false,
             keep_fsw: false,
             dump_image: DUMP,
             uid: None,
             name: None,
         };
-        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000 });
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
         let state = job.shared.lock().unwrap().clone();
         (state, dir)
     }
@@ -1183,12 +1365,13 @@ record 3113 boot 6 ms 23302\r\n\
             dir: dir.clone(),
             port_name: "/dev/ttyACM1".into(),
             probe: None,
+            wipe: false,
             keep_fsw: false,
             dump_image: DUMP,
             uid: None,
             name: None,
         };
-        pull(&job, &desk, listener, &Limits { quiet_ms: 2_000, read_ms: 5_000 });
+        pull(&job, &desk, listener, &Limits { quiet_ms: 2_000, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
         let p = job.shared.lock().unwrap().clone();
         let log = std::fs::read_to_string(PathBuf::from(p.dir.unwrap()).join("ground.log")).unwrap();
         assert!(log.contains("flash-boot4"), "the printing after the reset is the one taken: {}", log);

@@ -51,7 +51,7 @@ struct __attribute__((packed)) TelemetryPacket
   // Packet information: 5 bytes
   uint16_t packetCounter;
   uint8_t CSID;
-  uint8_t cellPercentageX2;
+  uint8_t cellVoltageByte;   // (V - 2.5) * 100: 2.5 to 5.05 V in 10 mV steps. Was percent x2 before 2026-10-17
   uint8_t sensorValidity;
 
   // CRC over the preceding 53 bytes

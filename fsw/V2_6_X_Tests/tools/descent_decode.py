@@ -99,7 +99,7 @@ def decode_packet(b):
      mx, my, mz,
      qi, qj, qk, qr,
      temp_cc, press_dhpa, hum_cpct,
-     counter, csid, soc_x2, validity, crc_rx) = f
+     counter, csid, cell_v_byte, validity, crc_rx) = f
 
     crc_calc = crc16_ccitt_false(b[:CRC_LEN])
 
@@ -117,7 +117,7 @@ def decode_packet(b):
         "humidity_pct": hum_cpct / 100.0,
         "counter": counter,
         "csid": csid,
-        "soc_pct": soc_x2 / 2.0,
+        "cell_v": cell_v_byte / 100.0 + 2.5,   # (V - 2.5) * 100 since 2026-10-17; was percent x2
         "validity": validity,
         "crc_rx": crc_rx,
         "crc_calc": crc_calc,
@@ -136,7 +136,7 @@ def decode_packet(b):
             "humidityCentiPercent": hum_cpct,
             "packetCounter": counter,
             "CSID": csid,
-            "cellPercentageX2": soc_x2,
+            "cellVoltageByte": cell_v_byte,
             "sensorValidity": validity,
             "crc16": crc_rx,
         },
@@ -284,7 +284,7 @@ COLUMNS = (
     ("temp_c", lambda p: "%.2f" % p["temp_c"]),
     ("press_hpa", lambda p: "%.1f" % p["pressure_hpa"]),
     ("hum_pct", lambda p: "%.2f" % p["humidity_pct"]),
-    ("soc_pct", lambda p: "%.1f" % p["soc_pct"]),
+    ("cell_v", lambda p: "%.2f" % p["cell_v"]),
     ("validity", lambda p: "0x%02X" % p["validity"]),
     ("crc", lambda p: "0x%04X" % p["crc_rx"]),
     ("crc_ok", lambda p: "1" if p["crc_ok"] else "0"),
@@ -329,7 +329,7 @@ def format_packet_detail(p):
         "  Temperature: %.2f deg C" % p["temp_c"],
         "  Pressure: %.1f hPa" % p["pressure_hpa"],
         "  Humidity: %.2f %%RH" % p["humidity_pct"],
-        "Cell state of charge: %.1f %%" % p["soc_pct"],
+        "Cell voltage: %.2f V" % p["cell_v"],
         "Sensor validity: 0x%02X" % v,
         "  Linear acceleration valid: %s" % ("YES" if p["valid_linacc"] else "NO"),
         "  Gyroscope valid: %s" % ("YES" if p["valid_gyro"] else "NO"),
@@ -379,7 +379,7 @@ def selftest(out=None):
         ("humidity_pct", p["humidity_pct"], 45.50),
         ("counter", p["counter"], 42),
         ("csid", p["csid"], 9),
-        ("soc_pct", p["soc_pct"], 75.0),
+        ("cell_v", p["cell_v"], 4.00),
         ("validity", p["validity"], 0xFF),
         ("crc_rx", p["crc_rx"], 0x9393),
         ("crc_calc", p["crc_calc"], 0x9393),

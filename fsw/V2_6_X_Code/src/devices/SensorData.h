@@ -55,6 +55,7 @@ struct GPSData
 struct StateOfChargeData
 {
   float cellPercentage = 0.0f;
+  float cellVoltage = 0.0f;   // V, what the packet carries since 2026-10-17; percent drives the TX tables
 
   bool valid = false;
   uint32_t updatedMs = 0;

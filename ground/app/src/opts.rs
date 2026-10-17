@@ -9,6 +9,9 @@ DeSCENT ChipSat: flashes and reads ChipSats and T-Beam receivers, and serves the
   descent-ground [options]
 
   --port <n>        listen on this port only, and stop if it is taken
+  --host <addr>     listen on this address instead of 127.0.0.1. 0.0.0.0 is every
+                    interface. Anything that can reach it can flash a board, so this
+                    is for a machine whose boards are plugged in somewhere else
   --no-browser      do not open a browser; just print the address
   --browser         open one, overriding the settings file
   --stop            ask a running copy to exit, and say what happened
@@ -81,6 +84,7 @@ pub struct Opts {
     pub open_browser: bool,
     pub help: bool,
     pub port: Option<u16>,
+    pub host: Option<String>,
     pub stop: bool,
 }
 
@@ -98,6 +102,7 @@ pub fn parse(args: &[String], conf: Option<&str>) -> Result<Opts, String> {
     };
     let mut help = false;
     let mut stop = false;
+    let mut host: Option<String> = None;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         match a.as_str() {
@@ -108,17 +113,50 @@ pub fn parse(args: &[String], conf: Option<&str>) -> Result<Opts, String> {
                 let v = rest.next().ok_or_else(|| String::from("--port wants a port number after it"))?;
                 port = Some(a_port(v)?);
             }
+            "--host" => {
+                let v = rest.next().ok_or_else(|| String::from("--host wants an address after it"))?;
+                host = Some(a_host(v)?);
+            }
             "-h" | "--help" => help = true,
             // --port=8900 is what a script tends to write, and dropping it silently
             // would put us on a port nobody asked for.
             _ => {
                 if let Some(v) = a.strip_prefix("--port=") {
                     port = Some(a_port(v)?);
+                } else if let Some(v) = a.strip_prefix("--host=") {
+                    host = Some(a_host(v)?);
                 }
             }
         }
     }
-    Ok(Opts { open_browser, help, port, stop })
+    Ok(Opts { open_browser, help, port, stop, host })
+}
+
+// An address rather than a name, because a name that resolves to somewhere unexpected is
+// a worse failure than one that is refused. Empty is refused too: --host with nothing
+// after it would otherwise bind every interface.
+fn a_host(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(String::from("--host wants an address, for example 0.0.0.0"));
+    }
+    if text.parse::<std::net::IpAddr>().is_err() {
+        return Err(format!("{:?} is not an address. Use 0.0.0.0 for every interface, or the one you want", text));
+    }
+    Ok(text.to_string())
+}
+
+// The address a browser on this machine is sent to for a bind on `bound`. Every
+// interface (0.0.0.0 or ::) is not an address a browser can open, so that is loopback;
+// anything else is itself, an IPv6 one in the brackets a URL wants.
+pub fn url_host(bound: &str) -> String {
+    use std::net::IpAddr;
+    match bound.parse::<IpAddr>() {
+        Ok(ip) if ip.is_unspecified() && ip.is_ipv6() => String::from("[::1]"),
+        Ok(ip) if ip.is_unspecified() => String::from("127.0.0.1"),
+        Ok(IpAddr::V6(ip)) => format!("[{}]", ip),
+        _ => bound.to_string(),
+    }
 }
 
 // Port 0 would get us any free port, which is the one thing a caller asking for a
@@ -247,6 +285,26 @@ mod tests {
         // A bad file is still an error when the flag would have overridden it: the file
         // is wrong whichever way this run goes.
         assert!(!refused(&["--port", "8790"], Some("port = nope")).is_empty());
+    }
+
+    #[test]
+    fn the_host_is_an_address_or_nothing() {
+        assert_eq!(ok(&[], None).host, None);
+        assert_eq!(ok(&["--host", "0.0.0.0"], None).host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(ok(&["--host=10.0.0.5"], None).host.as_deref(), Some("10.0.0.5"));
+        assert_eq!(ok(&["--host", "::"], None).host.as_deref(), Some("::"));
+        assert!(refused(&["--host", "rack"], None).contains("not an address"));
+        assert!(refused(&["--host", ""], None).contains("wants an address"));
+        assert!(refused(&["--host"], None).contains("wants an address"));
+    }
+
+    #[test]
+    fn the_browser_goes_to_loopback_when_every_interface_is_bound() {
+        assert_eq!(url_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(url_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(url_host("::"), "[::1]");
+        assert_eq!(url_host("192.168.4.20"), "192.168.4.20");
+        assert_eq!(url_host("fe80::1"), "[fe80::1]");
     }
 
     #[test]

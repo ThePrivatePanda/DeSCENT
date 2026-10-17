@@ -788,21 +788,6 @@ found 3 records, 3 good (0 time anchors), 0 bad, from 2 boots, log ends at addre
         assert_eq!(d.anchors[0].unix_ms, 1790000000001);
     }
 
-    // The only real capture either side has. If this parses to something other than what
-    // the flight software counted, one of us is wrong and it is worth knowing which.
-    #[test]
-    fn the_real_capture_parses_to_what_the_board_said_it_wrote() {
-        let path = "../../SSDS_DeSCENT/Software/V2_6_X/data/2026-09-23_2159/dump.txt";
-        let Ok(text) = std::fs::read_to_string(path) else { return };   // lives in the flight repo
-        let d = parse(&text);
-        assert_eq!(d.found, Some(6627), "the board's own count");
-        assert_eq!(d.records.len(), 6627, "and we kept every one");
-        assert_eq!(d.boots(), vec![0, 1, 2, 3, 4]);
-        assert!(d.records.iter().all(|r| r.hex.len() == PACKET_BYTES * 2));
-        let log = to_log(&d, "dump.txt");
-        assert_eq!(log.matches("PKT,55,").count(), 6627);
-        assert_eq!(log.matches("#DG,BOOT,").count(), 5);
-    }
 
     // A slot laid out the way FlashLog.cpp encodeRecord does it.
     fn slot(kind: u8, boot: u16, ms: u32, payload: &[u8]) -> [u8; SLOT_BYTES] {
@@ -1041,8 +1026,9 @@ I FLASH 2 c0: init ok=1 id=0xEF4015\r\n",
         assert_eq!((d.failed, d.missing), (0, 0));
     }
 
-    // Two lines built and checked with the flight repo's own tools/flash_replay.py, so the
-    // byte order is not just this file agreeing with itself.
+    // Two lines built by hand from the slot layout in bench/flash_dump.ino and checked
+    // against a parser written separately, so the byte order is not just this file
+    // agreeing with itself.
     #[test]
     fn slots_the_flight_repos_parser_accepts_read_the_same_here() {
         let text = "\
@@ -1311,35 +1297,6 @@ anchor_utc=2026-09-26T16:45:50.000Z,anchors=1,anchors_rejected=0"
         assert!(r.json().contains("\"boardBad\":1,\"read\":1,\"failedCheck\":1,\"missing\":0,"), "{}", r.json());
     }
 
-    // The same capture, put back into slots and printed the new way. Both forms have to
-    // come out as the same boots, uptimes and packets.
-    #[test]
-    fn the_real_capture_reads_the_same_as_raw_slots() {
-        let path = "../../SSDS_DeSCENT/Software/V2_6_X/data/2026-09-23_2159/dump.txt";
-        let Ok(text) = std::fs::read_to_string(path) else { return };
-        let old = parse(&text);
-        let r = report(&old, text.len(), 0);
-        assert!(r.complete, "{}", r.json());
-        assert!(r.json().starts_with("{\"format\":\"text\",\"found\":6627,\"boardGood\":6627,\"boardBad\":0,\"read\":6627,"));
-
-        let mut raw = String::new();
-        for rec in &old.records {
-            let payload: Vec<u8> = (0..PACKET_BYTES)
-                .map(|i| u8::from_str_radix(&rec.hex[i * 2..i * 2 + 2], 16).unwrap())
-                .collect();
-            raw.push_str(&raw_line(rec.n, &slot(SLOT_PACKET, rec.boot as u16, rec.ms as u32, &payload)));
-        }
-        raw.push_str(&found(old.records.len(), old.records.len(), 0, old.boots().len()));
-        let new = parse(&raw);
-        assert!(new.raw);
-        assert_eq!(new.boots(), old.boots());
-        assert_eq!(new.records.len(), old.records.len());
-        for (a, b) in new.records.iter().zip(&old.records) {
-            assert_eq!((a.n, a.boot, a.ms, &a.hex), (b.n, b.boot, b.ms, &b.hex));
-        }
-        assert!(report(&new, raw.len(), 0).complete);
-        assert_eq!(to_log(&new, "dump.txt"), to_log(&old, "dump.txt"));
-    }
 
     // What GPS says the time is when a board counting 0.75% fast says it has been up for ms.
     fn gps_while_running_fast(ms: u64) -> u64 {

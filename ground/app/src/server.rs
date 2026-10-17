@@ -123,9 +123,14 @@ pub enum Bound {
 // A port that was asked for is the only one tried: a script that said 8900 and quietly
 // got 8765 has no way to notice. Our own copy already on it is still worth reporting as
 // that rather than as a failure.
-pub fn bind(want: Option<u16>) -> Result<Bound, String> {
+//
+// host is 127.0.0.1 unless --host says otherwise, and it should stay that way on a laptop:
+// this app flashes boards and writes files, so anything that can reach it can do both
+// without asking. The flag exists for a machine in a rack with the boards plugged into it,
+// where the person using it is somewhere else.
+pub fn bind(host: &str, want: Option<u16>) -> Result<Bound, String> {
     if let Some(port) = want {
-        return match Server::http(("127.0.0.1", port)) {
+        return match Server::http((host, port)) {
             Ok(s) => Ok(Bound::Ours(s, port)),
             Err(e) => {
                 if ours_is_listening(port) {
@@ -138,7 +143,7 @@ pub fn bind(want: Option<u16>) -> Result<Bound, String> {
     }
     let mut last = String::new();
     for port in FIRST_PORT..=LAST_PORT {
-        match Server::http(("127.0.0.1", port)) {
+        match Server::http((host, port)) {
             Ok(s) => return Ok(Bound::Ours(s, port)),
             Err(e) => {
                 last = e.to_string();
@@ -451,6 +456,13 @@ fn answer(request: Request, text: String) {
     );
 }
 
+// The drone's flight controller is on the same USB hub as the ChipSat consoles and gets picked
+// by mistake. Whatever was asked of it as a console is refused by name, before anything opens it
+fn flight_controller(ctx: &Ctx, port: &str) -> Option<String> {
+    let is = ctx.hub.lock().unwrap().boards().iter().any(|b| b.port == port && crate::serial::is_flight_controller(&b.usb));
+    is.then(|| format!("{} is the drone's flight controller (ArduPilot), not a ChipSat console: pick the board's own serial port", port))
+}
+
 fn failed(e: &str) -> String {
     format!("{{\"ok\":false,\"error\":\"{}\"}}", esc(e))
 }
@@ -473,22 +485,91 @@ fn post_only(request: Request) -> Option<Request> {
 // say what is wrong with it, and not enough to fill memory with one.
 const MAX_UPLOAD: u64 = 512 * 1024;
 
-// The four settings a carried image is to be given, when the request has them. They go
-// together: an image with some of them changed and the rest as built is nobody's intent.
+// The settings an image is to be given, when the request has them. They go together: an
+// image with some of them changed and the rest as built is nobody's intent. Per phase,
+// in the block's order (waiting, rising, falling, landed): fixed0..3 in ms, follow0..3 as
+// 0 or 1, soc0..3 as four thresholds and socms0..3 as five intervals, comma separated,
+// log0..3 as the flash log gap in ms, and logblind the gap with no altitude source.
 fn settings_asked(q: &[(String, String)]) -> Result<Option<crate::radio::Request>, String> {
-    const KEYS: [(&str, &str); 4] = [("csid", "board id"), ("sf", "spreading factor"), ("dbm", "transmit power"), ("interval", "transmit interval")];
-    if KEYS.iter().all(|(key, _)| asked(q, key).is_none()) {
+    let mut keys: Vec<(String, String)> = vec![
+        ("csid".into(), "board id".into()),
+        ("sf".into(), "spreading factor".into()),
+        ("dbm".into(), "transmit power".into()),
+    ];
+    for (p, name) in crate::settings::PHASE_NAMES.iter().enumerate() {
+        keys.push((format!("fixed{}", p), format!("{} gap", name)));
+        keys.push((format!("follow{}", p), format!("{} battery flag", name)));
+        keys.push((format!("soc{}", p), format!("{} battery thresholds", name)));
+        keys.push((format!("socms{}", p), format!("{} battery intervals", name)));
+        keys.push((format!("log{}", p), format!("{} log gap", name)));
+    }
+    keys.push(("logblind".into(), "log gap with no altitude source".into()));
+    if keys.iter().all(|(key, _)| asked(q, key).is_none()) {
         return Ok(None);
     }
-    let number = |n: usize| {
-        let (key, words) = KEYS[n];
-        match asked(q, key).map(|v| v.trim().parse::<i64>()) {
-            Some(Ok(v)) => Ok(v),
-            Some(Err(_)) => Err(format!("the {} has to be a whole number, and {:?} is not", words, asked(q, key).unwrap_or(""))),
-            None => Err(format!("no {} given", words)),
+    // A page loaded before the log gaps existed sends everything but them. That is a stale
+    // tab, not a half-filled form, and the fix is a reload, so say that and not "no gap"
+    let log_keys = keys.iter().filter(|(key, _)| key.starts_with("log"));
+    if log_keys.clone().count() > 0 && log_keys.clone().all(|(key, _)| asked(q, key).is_none()) {
+        return Err(String::from(
+            "the page in this tab is older than the app and sent no flash log gaps: reload the page (Ctrl+Shift+R) and try again",
+        ));
+    }
+    let text = |key: &str, words: &str| asked(q, key).map(str::to_string).ok_or_else(|| format!("no {} given", words));
+    let number = |key: &str, words: &str| -> Result<i64, String> {
+        let t = text(key, words)?;
+        t.trim().parse::<i64>().map_err(|_| format!("the {} has to be a whole number, and {:?} is not", words, t.trim()))
+    };
+    let list = |key: &str, words: &str| -> Result<Vec<i64>, String> {
+        text(key, words)?
+            .split(',')
+            .map(|v| v.trim().parse::<i64>().map_err(|_| format!("the {} have to be whole numbers, and {:?} is not", words, v.trim())))
+            .collect()
+    };
+    let flag = |key: &str, words: &str| -> Result<bool, String> {
+        match text(key, words)?.trim() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            other => Err(format!("the {} is 0 or 1, and {:?} is neither", words, other)),
         }
     };
-    Ok(Some(crate::radio::Request { csid: number(0)?, sf: number(1)?, dbm: number(2)?, tx_interval_ms: number(3)? }))
+    let (csid, sf, dbm) = (number("csid", "board id")?, number("sf", "spreading factor")?, number("dbm", "transmit power")?);
+    let mut rates = Vec::new();
+    for (p, name) in crate::settings::PHASE_NAMES.iter().enumerate() {
+        rates.push(crate::radio::RateRequest {
+            fixed_ms: number(&format!("fixed{}", p), &format!("{} gap", name))?,
+            follow: flag(&format!("follow{}", p), &format!("{} battery flag", name))?,
+            percent: list(&format!("soc{}", p), &format!("{} battery thresholds", name))?,
+            interval_ms: list(&format!("socms{}", p), &format!("{} battery intervals", name))?,
+        });
+    }
+    let mut logs = Vec::new();
+    for (p, name) in crate::settings::PHASE_NAMES.iter().enumerate() {
+        logs.push(number(&format!("log{}", p), &format!("{} log gap", name))?);
+    }
+    let log_blind_ms = number("logblind", "log gap with no altitude source")?;
+    Ok(Some(crate::radio::Request { csid, sf, dbm, rates, logs, log_blind_ms }))
+}
+
+// "set for board 9, SF12 at 15 dBm; waiting every 60 s, rising every 10 s, falling back to
+// back, landed by battery: ...; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s".
+fn settings_words(asked: &crate::settings::Asked) -> String {
+    let phases: Vec<String> = crate::settings::PHASE_NAMES
+        .iter()
+        .zip(asked.rates.iter())
+        .map(|(name, r)| format!("{} {}", name, r.words()))
+        .collect();
+    let secs = |ms: u32| format!("{} s", ms as f64 / 1000.0);
+    let logs: Vec<String> = asked.logs.iter().map(|ms| secs(*ms)).collect();
+    format!(
+        "set for board {}, SF{} at {} dBm; {}; log every {}, blind {}",
+        asked.csid,
+        asked.sf,
+        asked.dbm,
+        phases.join(", "),
+        logs.join(", "),
+        secs(asked.log_blind_ms)
+    )
 }
 
 // A carried flight image with a board's settings written into its block, and the words
@@ -499,8 +580,7 @@ fn set_for(image: &[u8], module: &str, radio: &crate::radio::Radio, wanted: &cra
     let asked = radio.check(wanted, module)?;
     let (at, _) = crate::settings::writable(image)?;
     let patched = crate::settings::patch(image, at, &asked)?;
-    let every = if asked.tx_interval_ms == 0 { String::from("back to back") } else { format!("every {} ms", asked.tx_interval_ms) };
-    Ok((patched, format!("set for board {}, SF{} at {} dBm, {}", asked.csid, asked.sf, asked.dbm, every)))
+    Ok((patched, settings_words(&asked)))
 }
 
 // The image a flash was asked to write, what to call it in the steps, and anything about
@@ -574,22 +654,18 @@ fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
                  V2_6_X_Code, usually fsw/ in the same repository, or set CHIPSAT_FSW to it",
             )
         })?;
-        let number = |key: &str| asked(&q, key).and_then(|v| v.parse::<i64>().ok());
         let stored = ctx.chips.lock().unwrap().get(&uid).and_then(|c| c.module);
         let module = asked(&q, "module")
             .map(String::from)
             .or(stored.map(String::from))
             .ok_or_else(|| String::from("no radio module given and none remembered for this board"))?;
-        let settings = crate::fswbuild::Settings {
-            csid: number("csid").ok_or_else(|| String::from("no board id given"))? as u16,
-            module,
-            sf: number("sf").ok_or_else(|| String::from("no spreading factor given"))? as u16,
-            dbm: number("dbm").ok_or_else(|| String::from("no transmit power given"))? as i16,
-            interval: number("interval").map(|v| v.max(0) as u32),
-        };
-        crate::fswbuild::check(&settings)?;
-        let label = crate::fswbuild::words(&settings);
-        (Vec::new(), label, None, Some(crate::chipflash::BuildPlan { at, settings }))
+        // Checked here by the same rules as the carried image, so a build is never started
+        // for settings the block cannot hold.
+        let wanted = settings_asked(&q)?.ok_or_else(|| String::from("no settings given to build with"))?;
+        let asked = crate::radio::carried()?.check(&wanted, &module)?;
+        let words = format!("a flight image for board {} on the {} module, {}", asked.csid, module.to_uppercase(), settings_words(&asked).trim_start_matches(&format!("set for board {}, ", asked.csid)));
+        let label = words.clone();
+        (Vec::new(), label, None, Some(crate::chipflash::BuildPlan { at, module, asked, words }))
     } else {
         let (i, l, n) = chip_image(&q, body, &uid, ctx)?;
         (i, l, n, None)
@@ -871,6 +947,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
         let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
         let text = match crate::json::str_field(&body, "port") {
             None => String::from("{\"ok\":false,\"error\":\"no port in the request\"}"),
+            Some(p) if flight_controller(&ctx, &p).is_some() => failed(&flight_controller(&ctx, &p).unwrap()),
             Some(p) => {
                 // The hub lock is let go before the read, or poll() stops for five seconds.
                 let held = ctx.hub.lock().unwrap().begin_probe(&p);
@@ -1025,7 +1102,8 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
         let mut body = String::new();
         let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
         let board = crate::json::str_field(&body, "port").unwrap_or_default();
-        let keep_fsw = crate::json::int_field(&body, "keepFsw").unwrap_or(1) != 0;
+        let wipe = crate::json::int_field(&body, "wipe").unwrap_or(0) != 0;
+        let keep_fsw = wipe || crate::json::int_field(&body, "keepFsw").unwrap_or(1) != 0;
         let probe = crate::json::str_field(&body, "probe").filter(|p| !p.is_empty());
         // Which board the page thinks is on the probe, when it has read one. The pull
         // then checks, and names what it saves after the board and not the port.
@@ -1039,10 +1117,11 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
         let text = match crate::flash::CHIPSAT_DUMP {
             None => String::from("{\"ok\":false,\"error\":\"this build carries no dump firmware\"}"),
             Some(_) if board.is_empty() => String::from("{\"ok\":false,\"error\":\"no board in the request\"}"),
+            Some(_) if flight_controller(&ctx, &board).is_some() => failed(&flight_controller(&ctx, &board).unwrap()),
             Some(_) if asked_uid.is_some() && uid.is_none() => {
                 failed(&format!("{:?} is not a board id, which is 24 hex characters", asked_uid.unwrap_or_default()))
             }
-            Some(image) => match ctx.gate.take(&format!("pulling the log from {}", board)) {
+            Some(image) => match ctx.gate.take(&format!("{} {}", if wipe { "clearing the flash log on" } else { "pulling the log from" }, board)) {
                 Err(e) => failed(&e),
                 Ok(held) => {
                     // The board is taken off discovery the same way a flash takes it, so
@@ -1056,6 +1135,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
                                 dir: ctx.data.clone(),
                                 port_name: board.clone(),
                                 probe,
+                                wipe,
                                 keep_fsw,
                                 dump_image: image,
                                 uid,
@@ -1120,7 +1200,10 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
     if path == "/api/flash" {
         let mut body = String::new();
         let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
-        let text = flash::handle_request(&body, &ctx);
+        let text = match crate::json::str_field(&body, "port").and_then(|p| flight_controller(&ctx, &p)) {
+            Some(e) => failed(&e),
+            None => flash::handle_request(&body, &ctx),
+        };
         let _ = request.respond(
             Response::from_string(text).with_header(header("Content-Type", "application/json")),
         );
@@ -1248,8 +1331,12 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
 
     match assets::get(&path) {
         Some((body, ct)) => {
+            // Revalidated on every load, so a restarted app never serves a page that a tab
+            // cached from the build before it. Local and small: the cost is nothing
             let _ = request.respond(
-                Response::from_data(body).with_header(header("Content-Type", ct)),
+                Response::from_data(body)
+                    .with_header(header("Content-Type", ct))
+                    .with_header(header("Cache-Control", "no-cache")),
             );
         }
         None => {
@@ -1348,29 +1435,55 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_for_a_carried_image_come_all_four_or_not_at_all() {
+    fn the_settings_for_a_carried_image_come_all_or_not_at_all() {
         assert_eq!(settings_asked(&pairs(&[("uid", "x"), ("embedded", "flight")])).unwrap(), None);
-        assert_eq!(
-            settings_asked(&pairs(&[("csid", "9"), ("sf", "12"), ("dbm", "15"), ("interval", "0")])).unwrap(),
-            Some(crate::radio::Request { csid: 9, sf: 12, dbm: 15, tx_interval_ms: 0 })
-        );
-        let e = settings_asked(&pairs(&[("csid", "9"), ("sf", "12"), ("dbm", "15")])).unwrap_err();
-        assert!(e.contains("no transmit interval"), "{}", e);
-        let e = settings_asked(&pairs(&[("csid", ""), ("sf", "12"), ("dbm", "15"), ("interval", "0")])).unwrap_err();
+        let mut all: Vec<(&str, &str)> = vec![("csid", "9"), ("sf", "12"), ("dbm", "15")];
+        let per = [("fixed0", "60000"), ("follow0", "0"), ("soc0", "75,50,35,20"), ("socms0", "10000,30000,60000,120000,180000"),
+            ("fixed1", "10000"), ("follow1", "0"), ("soc1", "75,50,35,20"), ("socms1", "10000,30000,60000,120000,180000"),
+            ("fixed2", "0"), ("follow2", "1"), ("soc2", "90, 60,30,5"), ("socms2", "1,2,3,4,5"),
+            ("fixed3", "60000"), ("follow3", "0"), ("soc3", "75,50,35,20"), ("socms3", "10000,30000,60000,120000,180000"),
+            ("log0", "1000"), ("log1", "50"), ("log2", "50"), ("log3", "1000"), ("logblind", "200")];
+        all.extend_from_slice(&per);
+        let got = settings_asked(&pairs(&all)).unwrap().unwrap();
+        assert_eq!((got.csid, got.sf, got.dbm, got.rates.len()), (9, 12, 15, 4));
+        assert_eq!((got.logs.clone(), got.log_blind_ms), (vec![1000, 50, 50, 1000], 200));
+        let e = settings_asked(&pairs(&all[..all.len() - 1])).unwrap_err();
+        assert!(e.contains("no log gap with no altitude source"), "{}", e);
+        let e = settings_asked(&pairs(&all[..all.len() - 3])).unwrap_err();
+        assert!(e.contains("no falling log gap"), "{}", e);
+        assert_eq!(got.rates[2], crate::radio::RateRequest { fixed_ms: 0, follow: true, percent: vec![90, 60, 30, 5], interval_ms: vec![1, 2, 3, 4, 5] });
+        assert_eq!(got.rates[0].fixed_ms, 60000);
+        let e = settings_asked(&pairs(&all[..3])).unwrap_err();
+        assert!(e.contains("older than the app") && e.contains("reload"), "{}", e);
+        // Half a form with the log gaps present is a missing field, named.
+        let mut half: Vec<(&str, &str)> = all[..7].to_vec();
+        half.extend_from_slice(&[("log0", "1000"), ("log1", "50"), ("log2", "50"), ("log3", "1000"), ("logblind", "200")]);
+        let e = settings_asked(&pairs(&half)).unwrap_err();
+        assert!(e.contains("no rising gap"), "{}", e);
+        let mut bad = all.clone();
+        bad[0] = ("csid", "");
+        let e = settings_asked(&pairs(&bad)).unwrap_err();
         assert!(e.contains("board id") && e.contains("whole number"), "{}", e);
+        let mut bad = all.clone();
+        bad[12] = ("follow2", "yes");
+        assert!(settings_asked(&pairs(&bad)).unwrap_err().contains("falling battery flag is 0 or 1"));
+        let mut bad = all.clone();
+        bad[13] = ("soc2", "90,6x,30,5");
+        assert!(settings_asked(&pairs(&bad)).unwrap_err().contains("whole numbers"));
     }
 
     #[test]
     fn a_carried_image_is_given_a_boards_settings_and_is_still_that_image() {
-        // Whatever chipsat/firmware held at build time. With no images there is nothing to try.
+        // Whatever fsw/firmware held at build time. With no images there is nothing to try.
         let flight = crate::flight::carried();
         let Ok(radio) = crate::radio::carried() else { return };
         let known = crate::chipflash::Known::carried();
+        let rr = |fixed_ms: i64| crate::radio::RateRequest { fixed_ms, follow: false, percent: vec![75, 50, 35, 20], interval_ms: vec![10_000, 30_000, 60_000, 120_000, 180_000] };
         for image in flight.usable() {
             let power = if image.module == "hp" { 22 } else { 15 };
-            let wanted = crate::radio::Request { csid: 9, sf: 12, dbm: power, tx_interval_ms: 500 };
+            let wanted = crate::radio::Request { csid: 9, sf: 12, dbm: power, rates: vec![rr(60_000), rr(500), rr(500), rr(60_000)], logs: vec![1000, 50, 50, 1000], log_blind_ms: 200 };
             let (bytes, words) = set_for(image.bytes, image.module, &radio, &wanted).unwrap();
-            assert_eq!(words, format!("set for board 9, SF12 at {} dBm, every 500 ms", power));
+            assert_eq!(words, format!("set for board 9, SF12 at {} dBm; waiting every 60 s, rising every 0.5 s, falling every 0.5 s, landed every 60 s; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power));
             assert_eq!(bytes.len(), image.bytes.len());
             match crate::settings::find_at(&bytes).unwrap() {
                 (crate::settings::Found::Block(s), Some(_)) => {
@@ -1378,6 +1491,13 @@ mod tests {
                 }
                 other => panic!("{}: {:?}", image.file, other),
             }
+            // With a phase on the battery, the words say what that phase will follow.
+            let mut on = wanted.clone();
+            on.rates[3].follow = true;
+            assert_eq!(
+                set_for(image.bytes, image.module, &radio, &on).unwrap().1,
+                format!("set for board 9, SF12 at {} dBm; waiting every 60 s, rising every 0.5 s, falling every 0.5 s, landed by battery: 10 s above 75 %, 30 s to 50 %, 60 s to 35 %, 120 s to 20 %, then 180 s (60 s when the gauge cannot be read); log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power)
+            );
             // A read of the board still says which image it is and which module it is for.
             let seen = crate::chipflash::recognise(&bytes, &known);
             assert_eq!((seen.kind, seen.module, seen.id.as_deref()), ("flight", Some(image.module), Some(image.id())));
@@ -1387,8 +1507,10 @@ mod tests {
             let e = set_for(image.bytes, image.module, &radio, &crate::radio::Request { dbm: other_modules, ..wanted.clone() }).unwrap_err();
             assert!(e.contains(&image.module.to_uppercase()) && e.contains("dBm"), "{}", e);
             assert!(set_for(image.bytes, image.module, &radio, &crate::radio::Request { csid: 0, ..wanted.clone() }).is_err());
-            assert_eq!(set_for(image.bytes, image.module, &radio, &crate::radio::Request { tx_interval_ms: 0, ..wanted.clone() }).unwrap().1,
-                format!("set for board 9, SF12 at {} dBm, back to back", power));
+            let mut btb = wanted.clone();
+            btb.rates[2].fixed_ms = 0;
+            assert_eq!(set_for(image.bytes, image.module, &radio, &btb).unwrap().1,
+                format!("set for board 9, SF12 at {} dBm; waiting every 60 s, rising every 0.5 s, falling back to back, landed every 60 s; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power));
         }
     }
 

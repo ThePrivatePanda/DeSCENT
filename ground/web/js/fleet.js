@@ -18,7 +18,7 @@
     dedupeMs: 1500,           // same bytes within this window = same over-the-air packet
     retainMin: 0,             // drop history older than this (0 = keep everything)
     maxPoints: 20000,         // history points kept per unit
-    lowBatteryPct: 20,
+    lowBatteryV: 3.5,   // a lithium cell under load; the packet carries volts since 2026-10-17
     weakRssiDbm: -115,
     saturationMps2: 75,       // BNO085 accelerometer range is ±8 g (≈78 m/s²)
   };
@@ -448,7 +448,7 @@
       const out = [];
       const d = u.latest;
       if (!d) return out;
-      if (d.valid.soc && d.values.battery < this.cfg.lowBatteryPct) out.push('low battery');
+      if (d.valid.soc && d.values.battery < this.cfg.lowBatteryV) out.push('low battery');
       for (const v of P.VALIDITY_BITS) if (v.bit < 7 && !d.valid[v.key]) out.push(v.name + ' invalid');
       if (Number.isFinite(u.bestRssi) && u.bestRssi < this.cfg.weakRssiDbm) out.push('weak RF');
       if (d.saturated) out.push('accel saturated');
@@ -489,7 +489,7 @@
         const st = this.state(u, now);
         if (st === 'OK') s.active++; else if (st === 'STALE') s.stale++; else s.lost++;
         const d = u.latest;
-        if (d.valid.soc && d.values.battery < this.cfg.lowBatteryPct) s.lowBattery++;
+        if (d.valid.soc && d.values.battery < this.cfg.lowBatteryV) s.lowBattery++;
         if ((d.values.validity & 0x7f) !== 0x7f) s.validityIssues++;
         if (Number.isFinite(u.bestRssi) && u.bestRssi < this.cfg.weakRssiDbm) s.weakRf++;
         if (d.saturated) s.saturated++;
