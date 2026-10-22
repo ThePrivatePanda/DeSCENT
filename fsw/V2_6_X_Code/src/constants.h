@@ -18,7 +18,7 @@ constexpr uint32_t kI2cSclPin = PB15;
 constexpr uint32_t kGpsRxPin = PC1;   // (rx, tx) is right, the core swaps the LPUART pins itself
 constexpr uint32_t kGpsTxPin = PC0;
 
-// Wire timeouts in a row before the bus gets started again
+// failed probes in a row before the bench scan gives up
 constexpr uint8_t kI2cStuckTransfers = 3;
 
 // I2C addresses, set by the parts themselves
@@ -168,6 +168,13 @@ constexpr uint8_t kNavPvtFixGnssDeadReckoning = 4;   // 5 is time only, its posi
 // start and would cost minutes of acquisition. Reset mode 0x02 restarts navigation, not the chip
 constexpr uint16_t kUbxBbrMaskPositionOnly = 0x0010;
 constexpr uint8_t kUbxResetModeGnssOnly = 0x02;
+constexpr uint16_t kUbxBbrMaskHotStart = 0x0000;
+constexpr uint8_t kUbxResetModeSoftware = 0x01;    // whole receiver, UART too (u-blox M10 interface description, UBX-CFG-RST)
+
+// I2C bus clear
+constexpr uint32_t kI2cHalfClockUs = 5;      // 100 kHz
+constexpr uint16_t kI2cStretchWaits = 200;   // half clocks, 1 ms
+constexpr uint8_t kI2cClearPulses = 9;       // UM10204 3.1.16
 
 // What the position fields can physically hold. Outside these is corruption, not a poor fix
 constexpr int32_t kMaxLatitudeE7 = 900000000;

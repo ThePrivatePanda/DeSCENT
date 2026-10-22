@@ -82,31 +82,45 @@ constexpr uint32_t kGaugeIntervalMs = 1000;
 constexpr uint32_t kUtcAnchorIntervalMs = 10000;
 
 // Flash log. Every record is 64 bytes, so 20 Hz fills the 2 MB chip in about 27 minutes, which is
-// why only the air logs at that rate. The gaps are in the settings block (one per phase, and one for
-// when no altitude source is live); these are what a fresh image carries
+// why only the air is logged at that rate. Records are made at the air's gap in every phase and go
+// into a RAM ring first; on the ground only one per ground gap reaches the chip, so a take-off still
+// writes the 30 s before it. The gaps are in the settings block, these are what a fresh image carries.
+// Only slots 0 (ground) and 1 (air) are read, the rest stay so old blocks still parse
+//
+// Flight phases (app/Phase.h): the ground, and the air from a climb until it is at rest
+// again. Falling is not detected: on the 2026-10-13 drops the IMU's linear acceleration read 0.3
+// to 28 m/s2 on the drone and the same during the release (motor vibration, and a flat sat is at
+// terminal speed in half a second), and the drone itself descended 53 m before letting go, so
+// neither a rate nor a drop from the peak tells a release from the drone
+// ms. A ground gap of 0 writes nothing on the ground (before 2026-10-22 it meant every IMU reading),
+// an air gap of 0 still means every IMU reading
+constexpr uint32_t kLogIntervalMsDefault[4] = {10000, 50, 50, 10000};   // ground, air, then two unused
+constexpr uint32_t kLogBlindIntervalMs = 200;    // unused since 2026-10-22, kept in the block
 
-// Flight phases (app/Phase.h): waiting on the ground, rising once it is in the air, landed once it
-// is still again below where it flew. Falling is not detected: on the 2026-10-13 drops the IMU's
-// linear acceleration read 0.3 to 28 m/s2 on the drone and the same during the release (motor
-// vibration, and a flat sat is at terminal speed in half a second), and the drone itself descended
-// 53 m before letting go, so neither a rate nor a drop from the peak tells a release from the drone
-constexpr uint32_t kLogIntervalMsDefault[4] = {1000, 50, 50, 1000};   // waiting, rising, (falling), landed
-constexpr uint32_t kLogBlindIntervalMs = 200;    // no altitude source: 5 Hz lasts 109 minutes
+// 30 s at 50 ms, 38.4 KB of static RAM. A full chip overwrites its oldest sector, so a board nobody
+// cleared still logs (decided 2026-10-19, was stop-when-full)
+constexpr uint32_t kLogRingRecords = 600;
+constexpr uint8_t  kLogDrainPerCall = 4;    // per call, so sampling and the radio keep going
+constexpr uint32_t kLogRingSlackRecords = 20;   // 1 s of margin on the ground for an erase
+
+// What decides the phase
 constexpr uint32_t kPhaseRateWindowMs = 800;    // the vertical rate is over at least this long
 constexpr float    kPhaseBaselineRateMps = 0.3f; // the ground baseline only follows a sat this still
 constexpr float    kPhaseBaselineGain = 0.02f;   // per altitude reading, so about 10 s to settle on the barometer
-constexpr float    kRiseGainM = 15.0f;          // climbed this far above the baseline on the barometer: rising
+constexpr float    kRiseGainM = 15.0f;          // climbed this far above the baseline on the barometer: the air
 constexpr float    kRiseGainGpsM = 30.0f;       // on GPS altitude: it drifted 13 m on the ground on 2026-10-13
 constexpr uint32_t kAltitudeStaleMs = 3000;     // an altitude source older than this is not live
 constexpr float    kQuietAccelMps2 = 2.0f;      // at rest: lying in grass in some wind is not 0.5
 constexpr float    kQuietGyroRadPerSec = 0.35f; // about 20 degrees a second
 constexpr float    kQuietAltitudeM = 4.0f;      // about half a hectopascal
 constexpr float    kQuietAltitudeGpsM = 8.0f;   // GPS altitude wanders this much lying still
-constexpr uint32_t kLandedMs = 30000;           // this long at rest, below half of what it climbed, is landed
+constexpr uint32_t kLandedMs = 30000;           // this long at rest, below half of what it climbed, is the ground
 constexpr uint32_t kLandedNoImuMs = 120000;     // on altitude alone, with the IMU dead
+constexpr uint32_t kGroundQuietMs = 180000;     // the IMU quiet this long is the ground at any height
 constexpr uint32_t kMotionWindowMs = 10000;     // no altitude source: the IMU alone tells the air from the ground
 constexpr float    kMotionFraction = 0.8f;      // this much of the window not quiet is a running drone
-constexpr uint32_t kBlindLandedMs = 30000;      // and this long quiet after it is landed
+constexpr uint32_t kBlindLandedMs = 30000;      // and this long quiet after it is the ground
+constexpr uint32_t kBootAirMaxMs = 300000;      // ms of uptime, boot-air logging ends here at the latest
 
 // How often a packet goes out: the gap after each, per flight phase (app/Phase.h), as a fresh image
 // carries them in its settings block; the dashboard writes a board's own. Each phase has a fixed gap
@@ -114,8 +128,8 @@ constexpr uint32_t kBlindLandedMs = 30000;      // and this long quiet after it 
 // board running down spends its last charge on fewer packets. Off by default in every phase. A
 // phase that follows the battery still uses its fixed gap while the gauge cannot be read.
 // Battery data is read and sent every packet either way.
-// Order: waiting, rising, falling, landed. Rising is the whole flight (the falling slot is never
-// entered, see app/Phase.h) and its gap is the flight rate; CHIPSAT_TX_INTERVAL_MS sets it on the
+// Order: ground, air, then two unused slots (were falling and landed).
+// The air is the whole flight and its gap is the flight rate; CHIPSAT_TX_INTERVAL_MS sets it on the
 // build line, 0 sends back to back
 #ifndef CHIPSAT_TX_INTERVAL_MS
 #define CHIPSAT_TX_INTERVAL_MS 1000
@@ -158,8 +172,6 @@ constexpr uint16_t kImuReplyWaitMs = 250;     // product id and each enable's re
 constexpr uint16_t kImuPollMs = 5;            // between reads while waiting for an answer
 
 // IMU health checks
-constexpr uint8_t  kImuStuckCycles = 3;         // cycles with a silent report before a soft reset
-constexpr uint8_t  kImuMaxSoftResets = 3;       // per boot
 constexpr uint8_t  kImuMaxServicePasses = 16;   // I2C reads per IMU update
 constexpr uint32_t kImuSoftResetSettleMs = 300;   // after a soft reset, library driver only
 
@@ -220,6 +232,43 @@ constexpr uint8_t  kRadioCodingRate = 7;   // 4/7
 constexpr uint8_t  kRadioSyncWord = 0x12;
 constexpr uint16_t kRadioPreambleLength = 8;
 constexpr float    kRadioCurrentLimitMa = 140.0f;   // 0 to 140. applyPaConfig overwrites it, see Radio.h
+
+// HP IMU wake after TX, ms, plus up to 325 ms for a try already started. Unbounded it could take
+// 9.7 s with a hub that takes writes and never answers. A guess, not measured
+constexpr uint32_t kImuWakeBudgetMs = 1500;
+
+// Sensor watchdogs (app/Health.h), all ms
+constexpr uint32_t kHealthGapMs = 200;                 // between any two recovery steps
+constexpr uint32_t kRecoverBackoffMs = 1000;           // first set-aside, doubles
+constexpr uint32_t kRecoverBackoffAirMs = 5000;        // ceiling in the air, a fall is ~15 s
+constexpr uint32_t kRecoverBackoffGroundMs = 30000;    // ceiling on the ground
+constexpr uint32_t kImuSilentMs = 1000;        // a report not moving this long is silent
+constexpr uint32_t kImuGraceMs = 2000;         // after a wake or restart
+constexpr uint32_t kImuWatchRetryMs = 1000;
+constexpr uint32_t kImuWatchSettleMs = 5000;   // a restart can take ~2.5 s plus four enables
+constexpr uint32_t kEnvStaleMs = 2000;
+constexpr uint32_t kEnvWatchRetryMs = 2000;
+constexpr uint32_t kEnvWatchSettleMs = 1000;
+constexpr uint32_t kGaugeStaleMs = 5000;
+constexpr uint32_t kGaugeWatchRetryMs = 5000;
+constexpr uint32_t kGaugeWatchSettleMs = 3000;
+constexpr uint32_t kGpsSilentMs = 10000;       // no NAV-PVT at all, fix or not
+constexpr uint32_t kGpsWatchRetryMs = 0;       // the driver's own poll and reconfig already ran for kGpsSilentMs
+constexpr uint32_t kGpsWatchSettleMs = 5000;
+
+// I2C bus watchdog (platform/I2cWatch.h)
+constexpr uint32_t kBusSlowMs = 20;             // ms, a failed transfer this slow spun in the HAL (100 ms, twi.c I2C_TIMEOUT_TICK)
+constexpr uint32_t kBusFaultWindowMs = 1000;    // ms, timeouts on two parts within this = bus fault
+constexpr uint8_t  kBusTimeoutsToHold = 2;      // in a row on one part
+constexpr uint32_t kBusHoldMs = 1000;           // ms, doubles
+constexpr uint32_t kBusHoldMaxMs = 30000;       // ms
+constexpr uint8_t  kBusJamsToQuarantine = 2;
+constexpr uint32_t kBusJamWindowMs = 60000;     // ms
+constexpr uint32_t kBusQuarantineMs = 30000;    // ms, doubles
+constexpr uint32_t kBusQuarantineMaxMs = 300000;   // ms
+constexpr uint32_t kBusClearRetryMs = 1000;     // ms after a failed clear, doubles
+constexpr uint32_t kBusClearRetryMaxMs = 30000; // ms
+constexpr uint32_t kBusSettleMs = 1000;         // ms, sensor steps wait this long after a clear
 
 // Sensor retries
 // A sensor that fails its first try gets tried hard for the first half minute, then backs off to its

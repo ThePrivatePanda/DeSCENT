@@ -36,6 +36,11 @@ public:
   // Clears the flags so the next boot only shows its own reset cause
   ResetCause readAndClearResetCause();
 
+  // Stack high-water mark. paintStack fills the free RAM with a pattern at boot, stackUntouchedBytes
+  // counts what's still the pattern. A few hundred us, fine once a packet
+  void paintStack();
+  uint32_t stackUntouchedBytes() const;
+
 private:
   void (*idle_)() = nullptr;
 };

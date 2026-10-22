@@ -22,6 +22,17 @@ Gps::Gps(ChipSatPlatform::Uart &port, ChipSatPlatform::System &system)
 {
 }
 
+// lastPvtMs_ isn't kept by this driver, so the watchdog will keep firing here. Not tested
+void Gps::restartPort()
+{
+  port_.end();
+  port_.begin(kGpsBaud);
+}
+
+void Gps::hotStart()
+{
+}
+
 Status Gps::begin()
 {
   LOG_I(Gps, "start");

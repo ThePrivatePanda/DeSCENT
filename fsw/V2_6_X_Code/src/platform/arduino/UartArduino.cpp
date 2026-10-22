@@ -28,6 +28,11 @@ Status Uart::begin(uint32_t baud)
   return Status::Ok;
 }
 
+void Uart::end()
+{
+  serialFor(port_).end();
+}
+
 size_t Uart::write(const uint8_t *data, size_t length)
 {
   return serialFor(port_).write(data, length);

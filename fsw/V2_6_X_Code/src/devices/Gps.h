@@ -44,6 +44,14 @@ public:
   uint32_t utcUptimeMs() const { return utcUptimeMs_; }
   bool invalidLlh() const { return invalidLlh_; }
 
+  // for the watchdog, fix or no fix
+  bool pvtSeen() const { return pvtSeen_; }
+  uint32_t lastPvtMs() const { return lastPvtMs_; }
+  bool byteSeen() const { return byteSeen_; }
+  uint32_t lastByteMs() const { return lastByteMs_; }
+  void restartPort();   // UART closed and opened, settings resent without waiting for acks
+  void hotStart();      // UBX-CFG-RST, nothing cleared, not acknowledged
+
 private:
   bool configureAirborne();
   bool configureNormalContinuous();
@@ -71,6 +79,8 @@ private:
   bool outputOkay_ = false;
   bool pvtSeen_ = false;
   uint32_t lastPvtMs_ = 0;
+  bool byteSeen_ = false;
+  uint32_t lastByteMs_ = 0;
   uint32_t lastConfigMs_ = 0;
   bool inRange_ = true;
   bool utcValid_ = false;

@@ -201,7 +201,7 @@ bool EnvSensor::start()
   return true;
 }
 
-// One try only, read() tries again every kEnvRetryMs
+// One try only, startMeasurement() and read() retry every kEnvRetryMs
 Status EnvSensor::begin()
 {
   LOG_I(Env, "start");
@@ -236,10 +236,33 @@ uint8_t EnvSensor::measControl(uint8_t mode)
   return static_cast<uint8_t>(kEnvOversampling << 5 | kEnvOversampling << 2 | mode);
 }
 
+// Both, since the flight loop only calls read() after a start that worked. With the retry in read()
+// alone a BME280 that failed at boot stayed dead all flight
+bool EnvSensor::retryStart()
+{
+  const uint32_t now = system_.nowMs();
+  if (ready_ || now - lastStartMs_ < sensorRetryMs(now, kEnvRetryMs) || !start()) {
+    return ready_;
+  }
+  LOG_I(Env, "init") {
+    line.field("ok", true);
+    line.field("retry", true);
+  }
+  return true;
+}
+
+bool EnvSensor::restart()
+{
+  ready_ = false;
+  measuring_ = false;
+  data_.valid = false;
+  return start();
+}
+
 // Forced mode: one measurement on demand, then the sensor goes back to sleep by itself
 Status EnvSensor::startMeasurement()
 {
-  if (!ready_) {
+  if (!retryStart()) {
     return Status::NotReady;
   }
   // ctrl_hum every time too, a chip that reset mid-flight has lost it
@@ -254,15 +277,7 @@ Status EnvSensor::startMeasurement()
 
 Status EnvSensor::read()
 {
-  // An absent chip only costs one unanswered address here
-  const uint32_t now = system_.nowMs();
-  if (!ready_ && now - lastStartMs_ >= sensorRetryMs(now, kEnvRetryMs) && start()) {
-    LOG_I(Env, "init") {
-      line.field("ok", true);
-      line.field("retry", true);
-    }
-  }
-  if (!ready_) {
+  if (!retryStart()) {
     data_.valid = false;
     LOG_W(Env, "refused") {
       line.field("call", "read");

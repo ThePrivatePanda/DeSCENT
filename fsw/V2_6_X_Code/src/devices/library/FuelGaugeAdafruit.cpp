@@ -51,6 +51,13 @@ Status FuelGauge::begin()
   return Status::NoAck;
 }
 
+// not begin(), it sends a reset (Adafruit_MAX1704X.cpp begin)
+bool FuelGauge::restart()
+{
+  ready_ = gauge.isDeviceReady();
+  return ready_;
+}
+
 Status FuelGauge::read()
 {
   if (!ready_) {
