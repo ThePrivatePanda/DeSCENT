@@ -4,7 +4,7 @@
   "dbm": 14,
   "csid": 255,
   "images": [
-    {"file": "flight-le.bin", "module": "le", "bytes": 69140, "sha256": "d1d9ace63eb2c14b6bdb7e43630a2113da31bb6f9228559b78378edff04cf90f"},
-    {"file": "flight-hp.bin", "module": "hp", "bytes": 69140, "sha256": "0bc85b2448ad3662d86af9738ce5d2a9a7bfe499a0db0dfb437c065f0d1d1247"}
+    {"file": "flight-le.bin", "module": "le", "bytes": 75976, "sha256": "4fea5bf00f3c0ff5279ca58d81336f59ff1d4b45d0517537ae263634ca23803b"},
+    {"file": "flight-hp.bin", "module": "hp", "bytes": 75976, "sha256": "e3786698ccf70d6f90363543c1e2612516a7822d284d3309b9d01d03fa52fa8c"}
   ]
 }
