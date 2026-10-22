@@ -51,6 +51,12 @@ Status EnvSensor::begin()
   return Status::NoAck;
 }
 
+bool EnvSensor::restart()
+{
+  ready_ = bme.begin(kEnvAddress, &bus_.arduinoWire());
+  return ready_;
+}
+
 // library runs the chip in normal mode
 Status EnvSensor::startMeasurement()
 {

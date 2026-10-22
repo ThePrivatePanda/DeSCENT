@@ -18,6 +18,7 @@ public:
   explicit Uart(UartPort port);
 
   Status begin(uint32_t baud);
+  void end();
 
   // Blocks when the 64 byte TX buffer is full
   size_t write(const uint8_t *data, size_t length);

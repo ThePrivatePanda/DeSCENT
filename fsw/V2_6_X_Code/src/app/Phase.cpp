@@ -61,7 +61,7 @@ void FlightPhase::sample(Track &t, uint32_t nowMs, float altitudeM)
     t.baselineM = altitudeM;
     t.peakM = altitudeM;
     t.have = true;
-  } else if (phase_ == Phase::Rising) {
+  } else if (phase_ == Phase::Air) {
     if (altitudeM > t.peakM) {
       t.peakM = altitudeM;
     }
@@ -81,6 +81,14 @@ void FlightPhase::imuSample(uint32_t nowMs, float accelMps2, float gyroRadPerSec
   accel_ = accelMps2;
   gyro_ = gyroRadPerSec;
   imuValid_ = true;
+
+  // Any moving reading breaks it
+  if (!imuQuiet()) {
+    imuQuietRun_ = false;
+  } else if (!imuQuietRun_) {
+    imuQuietRun_ = true;
+    imuQuietSinceMs_ = nowMs;
+  }
 
   // one bit per reading: moving or not, over the last window
   const bool moving = !imuQuiet();
@@ -106,6 +114,7 @@ void FlightPhase::imuSample(uint32_t nowMs, float accelMps2, float gyroRadPerSec
 void FlightPhase::imuLost(uint32_t nowMs)
 {
   imuValid_ = false;
+  imuQuietRun_ = false;
   resetMotion();
   judge(nowMs);
 }
@@ -126,6 +135,13 @@ bool FlightPhase::changed()
 {
   const bool was = changed_;
   changed_ = false;
+  return was;
+}
+
+bool FlightPhase::logChanged()
+{
+  const bool was = logChanged_;
+  logChanged_ = false;
   return was;
 }
 
@@ -182,47 +198,83 @@ void FlightPhase::enter(Phase next, uint32_t nowMs)
   if (next == phase_) {
     return;
   }
+  const bool logged = logsAir();
   phase_ = next;
   changed_ = true;
-  inQuiet_ = false;
+  bootAir_ = false;
   quietSinceMs_ = nowMs;
-  resetMotion();
-  if (next == Phase::Rising) {
+  if (next == Phase::Air) {
+    inQuiet_ = false;
+    imuQuietRun_ = false;   // only counts what it read in the air
+    resetMotion();
     baro_.peakM = baro_.altM;
     gps_.peakM = gps_.altM;
   } else {
-    // the ground is where it came to rest, on every source that has a reading
-    baro_.baselineM = baro_.altM;
-    gps_.baselineM = gps_.altM;
+    settle();
   }
+  logChanged_ = logChanged_ || logsAir() != logged;
+}
+
+// the ground is where it came to rest
+void FlightPhase::settle()
+{
+  inQuiet_ = false;
+  imuQuietRun_ = false;
+  resetMotion();
+  baro_.baselineM = baro_.altM;
+  gps_.baselineM = gps_.altM;
 }
 
 void FlightPhase::judge(uint32_t nowMs)
 {
   Track *t = deciding(nowMs);
 
-  if (phase_ != Phase::Rising) {
-    // Waiting and Landed end the same way: by climbing. With an altitude, kRiseGain above the
-    // ground. Without one, the IMU reading a running drone for most of the last window
+  if (phase_ != Phase::Air) {
+    // With an altitude, kRiseGain above the ground. Without one, the IMU reading a running drone
+    // for most of the last window
+    bool climbed = false;
     if (t != nullptr) {
-      if (t->altM - t->baselineM >= t->riseGainM) {
-        enter(Phase::Rising, nowMs);
-      }
-    } else if (imuValid_ && motionCount_ == kMotionSamples &&
-               static_cast<float>(moving_) >= kMotionFraction * static_cast<float>(kMotionSamples)) {
-      enter(Phase::Rising, nowMs);
+      climbed = t->altM - t->baselineM >= t->riseGainM;
+    } else {
+      climbed = imuValid_ && motionCount_ == kMotionSamples &&
+                static_cast<float>(moving_) >= kMotionFraction * static_cast<float>(kMotionSamples);
+    }
+    if (climbed) {
+      enter(Phase::Air, nowMs);
+      return;
+    }
+    // nothing climbed since the reset, so no halfway. Without this it might never end and the chip
+    // would wrap over older flights
+    if (bootAir_ && (atRest(nowMs, t, false) || nowMs >= kBootAirMaxMs)) {
+      bootAir_ = false;
+      logChanged_ = true;
+      quietSinceMs_ = nowMs;
+      settle();
     }
     return;
   }
 
-  // Rising ends by coming to rest below half of what it climbed, for long enough. A drone hovering
-  // dead still is above that line, so it is never landed; a drone that lands with the sat still on
-  // it is, and the next take-off is rising again from there
+  if (atRest(nowMs, t, true)) {
+    enter(Phase::Ground, nowMs);
+  }
+}
+
+// without a climb every height counts as low
+bool FlightPhase::atRest(uint32_t nowMs, Track *t, bool climbed)
+{
+  // Any height. The rule below never brings down a board that stopped above half its climb (roof,
+  // hill), and left in the air it goes round the chip in 27 minutes
+  if (imuValid_ && imuQuietRun_ && nowMs - imuQuietSinceMs_ >= kGroundQuietMs) {
+    return true;
+  }
+
+  // A drone hovering dead still is above half the climb, so this never lands it. A drone that lands
+  // with the sat still on it is below
   bool still;
   uint32_t need;
   if (t != nullptr) {
     const float halfway = t->baselineM + 0.5f * (t->peakM - t->baselineM);
-    const bool low = t->altM <= halfway;
+    const bool low = !climbed || t->altM <= halfway;
     const bool altStill = fabsf(t->altM - quietAltM_) < t->stillM;
     still = low && altStill && (!imuValid_ || imuQuiet());
     need = imuValid_ ? kLandedMs : kLandedNoImuMs;
@@ -230,23 +282,21 @@ void FlightPhase::judge(uint32_t nowMs)
       inQuiet_ = low && (!imuValid_ || imuQuiet());
       quietSinceMs_ = nowMs;
       quietAltM_ = t->altM;
-      return;
+      return false;
     }
   } else {
     if (!imuValid_) {
-      return;   // nothing to judge by: stays as it is
+      return false;   // nothing to judge by: stays as it is
     }
     still = imuQuiet();
     need = kBlindLandedMs;
     if (!inQuiet_ || !still) {
       inQuiet_ = still;
       quietSinceMs_ = nowMs;
-      return;
+      return false;
     }
   }
-  if (nowMs - quietSinceMs_ >= need) {
-    enter(Phase::Landed, nowMs);
-  }
+  return nowMs - quietSinceMs_ >= need;
 }
 
 } // namespace ChipSatApp

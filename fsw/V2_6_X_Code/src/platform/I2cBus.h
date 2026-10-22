@@ -22,6 +22,11 @@ public:
   Status writeThenRead(uint8_t address, const uint8_t *txData, size_t txLength,
                        uint8_t *rxBuffer, size_t rxLength);   // repeated start
 
+  // Watchdog (I2cWatch.h): held bus gives BusError at once, quarantined part gives NotReady.
+  // recover() runs a due clear, true if it did. Health calls it at most once a pass
+  bool recover(uint32_t nowMs);
+  bool faulted(uint32_t nowMs) const;
+
   // The libraries need the Wire object itself
   TwoWire &arduinoWire();
 };

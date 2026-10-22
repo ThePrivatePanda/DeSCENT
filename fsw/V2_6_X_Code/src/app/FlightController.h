@@ -13,6 +13,7 @@
 #include "../platform/Uart.h"
 #include "../devices/Flash.h"
 #include "FlashLog.h"
+#include "Health.h"
 #include "Phase.h"
 #include "Telemetry.h"
 
@@ -86,6 +87,7 @@ private:
   ChipSatTelemetry::TelemetryPacket packet_{};
   ChipSatTelemetry::TelemetryPacket logPacket_{};   // kept apart, the radio has the other one
   FlightPhase phase_;
+  Health health_;
   uint32_t imuSeenMs_ = 0;   // the IMU reading last handed to the phase
   uint32_t envSeenMs_ = 0;   // and the barometer reading
   uint32_t gpsSeenMs_ = 0;
@@ -102,14 +104,10 @@ private:
   uint16_t sentCounter_ = 0;   // the counter on the last packet that actually went out
   uint32_t previousReadMs_ = 0;
   uint32_t txIntervalMs_;
+  uint32_t resetCsr_ = 0;
   uint32_t cycle_ = 0;   // for logging
   bool radioReady_ = false;
   uint32_t lastTxMs_ = 0;
-
-  // IMU stuck check
-  uint32_t imuCountsLastCycle_[4] = {0, 0, 0, 0};
-  uint8_t imuStuckCycles_ = 0;
-  uint8_t imuSoftResets_ = 0;
 };
 
 } // namespace ChipSatApp

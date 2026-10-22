@@ -19,6 +19,7 @@ public:
   ChipSatPlatform::Status begin();
   ChipSatPlatform::Status startMeasurement();   // read() collects it, waiting only for what's left
   ChipSatPlatform::Status read();    // a failed or out of range reading leaves the old values, marked invalid
+  bool restart();   // watchdog reset, the whole start at once, ~70 ms with the chip there
 
   bool ready() const { return ready_; }
   const ChipSatSensors::EnvironmentalData &data() const { return data_; }
@@ -30,6 +31,7 @@ private:
   ChipSatPlatform::Status waitForStatus(uint8_t mask, uint16_t timeoutMs);
   static uint8_t measControl(uint8_t mode);
   bool start();
+  bool retryStart();
 
   ChipSatPlatform::I2cBus &bus_;
   ChipSatPlatform::System &system_;

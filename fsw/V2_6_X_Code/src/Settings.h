@@ -35,8 +35,9 @@ constexpr uint8_t kMagic[16] = {
 // layout byte first and only then knows where the CRC is: layout 1 had it at byte 30
 constexpr uint8_t kLayoutVersion = 3;
 
-// The flight phases (app/Phase.h), in the order their rates sit in the block
-constexpr size_t kPhases = 4;      // waiting, rising, falling, landed
+// Slots per phase in the block. Only 0 (ground) and 1 (air) are used since 2026-10-22, but 2 and 3
+// (were falling and landed) and the blind log gap are still checked, so they need sane values
+constexpr size_t kPhases = 4;      // ground, air, then two unused
 constexpr size_t kSocBands = 5;    // one interval per state-of-charge band: four thresholds between
 
 // byte offsets inside the block, after the magic
@@ -57,9 +58,9 @@ constexpr size_t kRateFixed      = 0;
 constexpr size_t kRateFromSoc    = 4;
 constexpr size_t kRatePercent    = 5;
 constexpr size_t kRateInterval   = 9;
-// The gap between flash log records, ms (uint32), one per phase in the same order, then the one
-// used while no altitude source is live, whatever the phase. 0 is a record per IMU reading (the
-// IMU reports every 50 ms, so that is the fastest anything changes); 1 to 19 is refused
+// The gap between flash log records, ms (uint32), one per slot in the same order, then the old
+// blind gap (unused). Air: 0 is a record per IMU reading (every 50 ms). Ground: what's kept on the
+// ground, 0 keeps nothing. 1 to 19 is refused
 constexpr size_t kOffLogs        = 138;
 constexpr size_t kOffLogBlind    = 154;
 constexpr uint32_t kLogMinMs     = 20;
@@ -87,7 +88,7 @@ struct Settings
   uint8_t  spreadingFactor;
   int8_t   targetDbm;
   uint8_t  setBy;
-  Rate     rate[kPhases];   // waiting, rising, falling, landed
+  Rate     rate[kPhases];   // ground, air, then two unused
   uint32_t logMs[kPhases];  // the flash log gap in each, same order
   uint32_t logBlindMs;      // and with no altitude source live
 };

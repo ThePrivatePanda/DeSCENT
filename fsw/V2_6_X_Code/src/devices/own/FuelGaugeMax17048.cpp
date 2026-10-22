@@ -79,6 +79,14 @@ Status FuelGauge::begin()
   return Status::NoAck;
 }
 
+// no POR, it would wipe the gauge's model of the cell
+bool FuelGauge::restart()
+{
+  ready_ = false;
+  data_.valid = false;
+  return start();
+}
+
 Status FuelGauge::read()
 {
   // An absent gauge only costs one unanswered address here

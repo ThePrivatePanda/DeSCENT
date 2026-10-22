@@ -17,6 +17,7 @@ public:
 
   ChipSatPlatform::Status begin();
   ChipSatPlatform::Status read();    // clamped to 0-100. A failed read leaves the old value, marked invalid
+  bool restart();   // watchdog reset, never a POR
 
   bool ready() const { return ready_; }
   const ChipSatSensors::StateOfChargeData &data() const { return data_; }

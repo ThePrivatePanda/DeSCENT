@@ -84,7 +84,7 @@ static Status readPacket(I2cBus &bus)
   }
   if (length > kShtpPacketMax) {
     // A garbled header (0xFFFF from a dead bus lands here too), or more than the IMU should ever send.
-    // Not read out, reading 32 kB would take seconds. If the IMU keeps offering it, the stuck check soft resets it
+    // Not read out, reading 32 kB would take seconds. If the IMU keeps offering it, the watchdog (app/Health.h) resets it
     if (!headerWarned) {
       LOG_W(Imu, "packet") {
         line.field("dropped", static_cast<unsigned int>(length));
@@ -620,8 +620,11 @@ void Imu::restartStep()
   }
 }
 
-bool Imu::configureReports(uint16_t startupDelayMs)
+// budgetMs includes the settle. No try starts once it's spent, so it can run over by one try
+// (kImuReplyWaitMs + kImuEnableRetryDelayMs). An untried report counts as not sent
+bool Imu::configureReports(uint16_t startupDelayMs, uint32_t budgetMs)
 {
+  const uint32_t startMs = system_.nowMs();
   if (startupDelayMs > 0) {
     system_.waitMs(startupDelayMs);
   }
@@ -633,6 +636,9 @@ bool Imu::configureReports(uint16_t startupDelayMs)
   for (uint8_t i = 0; i < 4; ++i) {
     Enable result = Enable::NotSent;
     for (uint8_t attempt = 0; attempt < kImuEnableAttempts && result != Enable::Confirmed; ++attempt) {
+      if (budgetMs != 0 && system_.nowMs() - startMs >= budgetMs) {
+        break;
+      }
       const Enable tried = enableReport(bus_, system_, i, intervalUs);
       if (tried != Enable::NotSent) {
         result = tried;
@@ -715,8 +721,8 @@ Status Imu::waitForFresh(uint16_t timeoutMs)
     writeReportNames(line, missing_);
   }
 
-  // A hub that takes our writes but sends nothing would cost this whole wait every cycle, and the
-  // stuck check's soft resets run out. After a few waits with no report at all it's restarted
+  // A hub that takes our writes but sends nothing would cost this whole wait every cycle. After a
+  // few waits with no report at all it's restarted, without waiting for the watchdog
   emptyWaits_ = freshReports == 0 ? static_cast<uint8_t>(emptyWaits_ + 1) : 0;
   if (emptyWaits_ >= kImuLostAfterEmptyWaits) {
     LOG_W(Imu, "lost") { line.field("emptywaits", emptyWaits_); }
@@ -849,8 +855,10 @@ Status Imu::wake()
   sleeping_ = false;
 
   // The BNO085 datasheet says on brings the reports back by itself (1.3.1). Not checked yet, so they're
-  // turned on again like before. Unlike the reset path, a failure here doesn't mark the IMU lost
-  if (!configureReports(kImuWakeSettleMs)) {
+  // turned on again like before. Unlike the reset path, a failure here doesn't mark the IMU lost,
+  // the watchdog catches the silent reports. Unbounded this was up to 9.7 s a TX with a mute hub
+  const uint32_t spentMs = system_.nowMs() - startMs;
+  if (!configureReports(kImuWakeSettleMs, spentMs < kImuWakeBudgetMs ? kImuWakeBudgetMs - spentMs : 1)) {
     LOG_W(Imu, "wake") {
       line.field("ok", false);
       line.field("step", "reports");
@@ -858,7 +866,9 @@ Status Imu::wake()
     return Status::Failed;
   }
 
-  if (waitForFresh(kImuFreshWaitWakeMs) != Status::Ok) {
+  const uint32_t usedMs = system_.nowMs() - startMs;
+  const uint32_t leftMs = usedMs < kImuWakeBudgetMs ? kImuWakeBudgetMs - usedMs : 0;
+  if (waitForFresh(static_cast<uint16_t>(leftMs < kImuFreshWaitWakeMs ? leftMs : kImuFreshWaitWakeMs)) != Status::Ok) {
     LOG_W(Imu, "wake") {
       line.field("ok", false);
       line.field("step", "fresh");
@@ -872,6 +882,15 @@ Status Imu::wake()
     line.field("fresh", true);
     line.field("ms", system_.nowMs() - startMs);
   }
+  return Status::Ok;
+}
+
+Status Imu::fullRestart()
+{
+  if (!ready_) {
+    return Status::NotReady;   // restartStep() already has it
+  }
+  lose(false);
   return Status::Ok;
 }
 

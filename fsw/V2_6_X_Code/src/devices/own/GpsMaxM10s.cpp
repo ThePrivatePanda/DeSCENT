@@ -329,6 +329,8 @@ void Gps::service()
   int next;
   while ((next = port_.read()) >= 0) {
     ++bytesIn;
+    byteSeen_ = true;
+    lastByteMs_ = system_.nowMs();
     const bool wasIdle = step == Step::Sync1;
     const bool complete = feedUbx(static_cast<uint8_t>(next));
     if (wasIdle && step == Step::Sync2) {
@@ -424,6 +426,25 @@ void Gps::takeUtc()
   utcAccNs_ = static_cast<uint32_t>(readS32(&frame[kNavPvtTimeAcc]));
   utcUptimeMs_ = frameStartMs;
   utcValid_ = true;
+}
+
+// for an LPUART stuck in an overrun or framing error, might not be the case we ever hit
+void Gps::restartPort()
+{
+  port_.end();
+  port_.begin(kGpsBaud);
+  dropQueued(port_);
+  resendConfig();
+  lastConfigMs_ = system_.nowMs();
+}
+
+// settings survive in the BBR layer, and read() resends them if they don't
+void Gps::hotStart()
+{
+  const uint8_t payload[4] = {static_cast<uint8_t>(kUbxBbrMaskHotStart),
+                              static_cast<uint8_t>(kUbxBbrMaskHotStart >> 8),
+                              kUbxResetModeSoftware, 0x00};
+  sendUbx(kUbxClassCfg, kUbxIdReset, payload, sizeof payload);
 }
 
 // Never waits

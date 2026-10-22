@@ -36,6 +36,9 @@ public:
   // in update() (library) or in the background from service() (own driver)
   ChipSatPlatform::Status resetHub();
 
+  // watchdog's second step. Own driver: hands it to the background restart. Library: begin()
+  ChipSatPlatform::Status fullRestart();
+
   bool ready() const { return ready_; }
   bool sleeping() const { return sleeping_; }
   const ChipSatSensors::IMUData &data() const { return data_; }
@@ -43,7 +46,7 @@ public:
   const uint32_t *eventCounts() const { return events_; }   // reports received since boot
 
 private:
-  bool configureReports(uint16_t startupDelayMs);
+  bool configureReports(uint16_t startupDelayMs, uint32_t budgetMs = 0);   // 0: no limit
   void restartStep();   // own driver only
   void lose(bool resetSent);   // own driver only
   bool update();

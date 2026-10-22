@@ -162,7 +162,8 @@ void Imu::service()
   }
 }
 
-bool Imu::configureReports(uint16_t startupDelayMs)
+// budget ignored here, not bounded
+bool Imu::configureReports(uint16_t startupDelayMs, uint32_t)
 {
   // modeOn might ack before the IMU is ready for report commands, the settle is there to be safe
   if (startupDelayMs > 0) {
@@ -468,6 +469,11 @@ Status Imu::resetHub()
 
   LOG_W(Imu, "softreset") { line.field("ok", ok); }
   return ok ? Status::Ok : Status::Failed;
+}
+
+Status Imu::fullRestart()
+{
+  return begin(reportIntervalMs_);
 }
 
 void Imu::invalidate()

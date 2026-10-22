@@ -6,27 +6,32 @@ namespace ChipSatApp
 {
 
 // Where the sat is in its flight, from an altitude source and the IMU. A board is switched on
-// mounted on the drone, often long before it flies, so the phases are what set how fast it logs and
-// transmits: slowly while it waits and after it lands, fast while it is in the air
+// mounted on the drone, often long before it flies, so the phase sets how fast it transmits and how
+// much the flash log keeps: slow and a trickle on the ground, fast and everything in the air
 //
-//   Waiting  switched on, on the ground or on the drone. Handling it does not move it out of here:
-//            only climbing does. The altitude baseline it climbs from tracks slowly while quiet
-//   Rising   in the air: climbed kRiseGain above the baseline. Stays through the release and the
-//            fall, because a release cannot be told from the drone (see config.h). Fast logging
-//   Landed   still, for kLandedMs, below half of what it climbed. A hovering drone is not landed:
-//            it is still up there. Landed re-arms: the next climb from where it lies is rising again
-//   Falling  never entered. Kept because the settings block and the ground have a slot for it
+//   Ground  switched on, and again once it has come to rest. Handling it doesn't move it out of
+//           here, only climbing does. The baseline it climbs from tracks slowly while quiet
+//   Air     climbed kRiseGain above the baseline. Stays through the release and the fall, a release
+//           can't be told from the drone (see config.h). Ends at rest: kLandedMs still below half
+//           the climb, or kGroundQuietMs of a quiet IMU at any height (roof, hill, car ride). A
+//           flying drone never read quiet that long (0.3 to 28 m/s2 on 2026-10-13)
+//
+// Same values as the old Waiting (0) and Rising (1) so old records still read. An old 3 (Landed) is
+// the ground, an old 2 (Falling, never entered) the air
 //
 // Altitude comes from the barometer when it is live, else GPS (3D fix), each with its own baseline,
-// thresholds and noise. With neither, the IMU alone tells a running drone from the ground, and the
-// controller logs at the blind rate whatever the phase says
+// thresholds and noise. With neither, the IMU alone tells a running drone from the ground. It never
+// declares the air by itself while an altitude source is live
 enum class Phase : uint8_t
 {
-  Waiting = 0,
-  Rising = 1,
-  Falling = 2,
-  Landed = 3,
+  Ground = 0,
+  Air = 1,
 };
+
+// After a reset the log starts in the air so a reset mid-flight still keeps the fall (decided
+// 2026-10-22), the radio on the ground. Boot-air ends at rest, on a climb or at kBootAirMaxMs
+constexpr Phase kPhaseAtBoot = Phase::Ground;
+constexpr bool kLogAirAtBoot = true;
 
 enum class AltitudeSource : uint8_t
 {
@@ -52,10 +57,13 @@ public:
   // rules that need it can do without it rather than wait for it
   void imuLost(uint32_t nowMs);
 
-  Phase phase() const { return phase_; }
+  Phase phase() const { return phase_; }   // what the radio follows
 
   // True once after each change of phase, so the controller can act on it (transmit at once)
   bool changed();
+
+  bool logsAir() const { return phase_ == Phase::Air || bootAir_; }   // what the flash log follows
+  bool logChanged();   // true once after each change
 
   // Which altitude is deciding, as of the last sample. None means the IMU alone is
   AltitudeSource altitudeSource() const { return source_; }
@@ -90,11 +98,15 @@ private:
   Track *deciding(uint32_t nowMs);
   void judge(uint32_t nowMs);
   void enter(Phase next, uint32_t nowMs);
+  bool atRest(uint32_t nowMs, Track *t, bool climbed);
+  void settle();
   bool imuQuiet() const;
   void resetMotion();
 
-  Phase phase_ = Phase::Waiting;
+  Phase phase_ = kPhaseAtBoot;
   bool changed_ = false;
+  bool bootAir_ = kLogAirAtBoot;
+  bool logChanged_ = false;
   AltitudeSource source_ = AltitudeSource::None;
 
   Track baro_;
@@ -115,6 +127,10 @@ private:
   uint32_t quietSinceMs_ = 0;
   float quietAltM_ = 0.0f;
   bool inQuiet_ = false;
+
+  // for kGroundQuietMs, altitude ignored
+  uint32_t imuQuietSinceMs_ = 0;
+  bool imuQuietRun_ = false;
 };
 
 } // namespace ChipSatApp

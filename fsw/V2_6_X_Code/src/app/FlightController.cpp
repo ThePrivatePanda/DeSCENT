@@ -35,7 +35,7 @@ FlightController::FlightController(ChipSatPlatform::System &system,
                                    FlashLog &flashLog)
   : system_(system), i2c_(i2c), console_(console), gpsPort_(gpsPort), imu_(imu), gps_(gps), env_(env),
     gauge_(gauge), radio_(radio), led_(led), flash_(flash), flashLog_(flashLog),
-    txIntervalMs_(kTxIntervalMs)
+    health_(system, i2c, imu, gps, env, gauge), txIntervalMs_(kTxIntervalMs)
 {
 }
 
@@ -45,6 +45,7 @@ FlightController::FlightController(ChipSatPlatform::System &system,
 
 void FlightController::setup()
 {
+  system_.paintStack();   // first, so the high-water mark covers everything after
   led_.begin();
 
   console_.begin(kConsoleBaud);
@@ -82,10 +83,11 @@ void FlightController::setup()
   // Radio before the sensors, so a sensor that hangs at boot still leaves one packet on air.
   // Never halts, a missing sensor just goes out invalid
   radioReady_ = configRadio();
-  txIntervalMs_ = ChipSatSettings::active().rate[0].fixedMs;   // it starts waiting
+  txIntervalMs_ = ChipSatSettings::active().rate[static_cast<size_t>(phase_.phase())].fixedMs;   // the boot phase's
   sendStatusPacket();
 
   beginSensors();
+  health_.begin();
 
   LOG_BOOT(Boot, "setup") {
     line.field("done", true);
@@ -97,6 +99,7 @@ void FlightController::setup()
 void FlightController::logResetCause()
 {
   const ChipSatPlatform::ResetCause cause = system_.readAndClearResetCause();
+  resetCsr_ = cause.csr;   // the flash log isn't up yet
 
   LOG_BOOT(Rst, "cause") {
     line.fieldHex("csr", cause.csr, 8);
@@ -118,6 +121,11 @@ void FlightController::beginSensors()
 
   if (flash_.begin() == Status::Ok) {
     flashLog_.begin();
+    flashLog_.setGroundGapMs(ChipSatSettings::active().logMs[static_cast<size_t>(Phase::Ground)]);
+    flashLog_.setAir(phase_.logsAir());   // boot-air, whatever the radio does
+    const uint8_t csr[4] = {static_cast<uint8_t>(resetCsr_), static_cast<uint8_t>(resetCsr_ >> 8),
+                            static_cast<uint8_t>(resetCsr_ >> 16), static_cast<uint8_t>(resetCsr_ >> 24)};
+    flashLog_.appendEvent(kLogEventBoot, system_.nowMs(), csr, sizeof csr);
     // two erases at boot, so the first records aren't held: the end sector, then the next
     for (uint8_t i = 0; i < 2; ++i) {
       flashLog_.ensureSpace();
@@ -225,6 +233,7 @@ void FlightController::loop()
   gps_.service();
   sampleSensors();
   logIfDue();
+  health_.service(phase_.logsAir());   // never inside the TX wait
 
   if (transmitDue()) {
     runCycle();
@@ -295,6 +304,11 @@ void FlightController::followPhase()
     txIntervalMs_ = phaseTxIntervalMs(gauge_.data().valid);
     previousReadMs_ = now - txIntervalMs_;   // due now
   }
+  // boot-air can end without a phase change
+  if (phase_.logChanged()) {
+    flashLog_.setAir(phase_.logsAir());   // into the air this writes the ring's last 30 s
+    LOG_I(Phase, "log") { line.field("air", phase_.logsAir()); }
+  }
 }
 
 // The gap after a packet in this phase: its fixed gap, or its battery table when it follows the
@@ -335,7 +349,8 @@ void FlightController::buildPacket(ChipSatTelemetry::TelemetryPacket &into, bool
   ChipSatTelemetry::encodePacket(data_, counter, ChipSatSettings::active().csid, allFresh, into);
 }
 
-// One record per log gap: fast in the air, slow on the ground either side
+// A record per air gap in every phase, the flash log's ring decides what gets written (FlashLog.h).
+// The writer runs every call so the ring keeps emptying between records
 void FlightController::logIfDue()
 {
   // A full chip is the end of the mission's logging, not a fault. Stop building records for it and
@@ -351,38 +366,34 @@ void FlightController::logIfDue()
     return;
   }
 
-  // The gap this phase was given, or the blind one while nothing says what the phase is: the IMU
-  // alone cannot tell a hover from the ground, and a chip full on the drone is a flight lost
   const uint32_t now = system_.nowMs();
-  const ChipSatSettings::Settings &settings = ChipSatSettings::active();
-  const uint32_t interval = phase_.altitudeSource() == AltitudeSource::None
-    ? settings.logBlindMs
-    : settings.logMs[static_cast<size_t>(phase_.phase())];
+  const uint32_t interval = ChipSatSettings::active().logMs[static_cast<size_t>(Phase::Air)];
+  bool due;
   if (interval == 0) {
     // every reading: a record each time the IMU delivers a new one, or at its rate with it dead
     const uint32_t imuMs = imu_.data().linearAccelerationUpdatedMs;
     const bool fresh = imu_.data().linearAccelerationValid && imuMs != logImuMs_;
-    if (!fresh && now - logWrittenMs_ < kImuReportIntervalMs) {
-      return;
+    due = fresh || now - logWrittenMs_ >= kImuReportIntervalMs;
+    if (due) {
+      logImuMs_ = imuMs;
     }
-    logImuMs_ = imuMs;
-  } else if (now - logWrittenMs_ < interval) {
-    return;
+  } else {
+    due = now - logWrittenMs_ >= interval;
   }
-  logWrittenMs_ = now;
 
-  // the counter of the packet that last went out, not the one being built next: the counter only
-  // moves on a transmission, and a record carrying the next one can't be lined up against a radio log
-  bool allFresh = false;
-  buildPacket(logPacket_, allFresh, sentCounter_);
-
-  anchorUtc(now);
-
-  if (flashLog_.ready()) {
-    flashLog_.append(logPacket_, now);
-    if (!flash_.paused()) {
-      flashLog_.ensureSpace();
+  if (due) {
+    logWrittenMs_ = now;
+    // the counter of the packet that last went out, not the one being built next: the counter only
+    // moves on a transmission, and a record carrying the next one can't be lined up against a radio log
+    bool allFresh = false;
+    buildPacket(logPacket_, allFresh, sentCounter_);
+    anchorUtc(now);
+    if (flashLog_.ready()) {
+      flashLog_.append(logPacket_, now);
     }
+  }
+  if (flashLog_.ready() && !flash_.paused()) {
+    flashLog_.ensureSpace();
   }
 }
 
@@ -480,30 +491,8 @@ void FlightController::runCycle()
     flash_.resume();
   }
   if (imuSleeps) {
-    imu_.wake();
-  }
-
-  // Soft reset the IMU if a report stays silent for a few cycles
-  const uint8_t silent = silentImuReports(imu_.eventCounts(), imuCountsLastCycle_);
-  for (uint8_t i = 0; i < 4; ++i) {
-    imuCountsLastCycle_[i] = imu_.eventCounts()[i];
-  }
-  if (imu_.ready() && !imu_.sleeping() && silent != 0) {
-    ++imuStuckCycles_;
-  } else {
-    imuStuckCycles_ = 0;
-  }
-  if (imuStuckCycles_ >= kImuStuckCycles) {
-    LOG_W(Imu, "stuck") {
-      line.fieldBits("silent", silent, 4);
-      line.field("cycles", imuStuckCycles_);
-      line.field("resets", imuSoftResets_);
-    }
-    if (imuSoftResets_ < kImuMaxSoftResets) {
-      imu_.resetHub();
-      ++imuSoftResets_;
-    }
-    imuStuckCycles_ = 0;
+    imu_.wake();   // bounded by kImuWakeBudgetMs
+    health_.imuWoke();
   }
 
   txIntervalMs_ = phaseTxIntervalMs(reads.socOkay);
@@ -515,6 +504,7 @@ void FlightController::runCycle()
     line.field("phase", static_cast<unsigned int>(phase_.phase()));
     line.field("battery", ChipSatSettings::active().rate[static_cast<size_t>(phase_.phase())].fromSoc && reads.socOkay);
     line.field("durms", previousReadMs_ - reads.gateMs);
+    line.field("stackfree", system_.stackUntouchedBytes());   // the least ever free between heap and stack
   }
 }
 
