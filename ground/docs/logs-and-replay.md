@@ -12,7 +12,15 @@ opened in replay or saved as a log or a CSV; a pull's raw dump and an image can 
 
 Picking a pull shows its report: one row per boot with how many records it holds, how long it ran,
 when it started (in UTC, or "not dated" for a boot that never got GPS time), how many GPS anchors
-were used to date it, and how fast the board's clock ran. Beside it is how the transfer went.
+were used to date it, and how fast the board's clock ran. Firmware from 2026-10-22 on also logs
+each boot's reset cause and how many records it dropped, and those get two more columns. Beside it
+is how the transfer went, and a line when the log had gone round the chip and the oldest records
+were written over.
+
+Saves are filed by local day and kind under the data folder: `2026-10-18/pulls/1432-board9/`,
+`2026-10-18/images/`, `2026-10-18/logs/`, and `receiver-images/` for a T-Beam's firmware, which is
+never offered for a ChipSat. Saves from before that sit flat under `descent-…` names and are still
+listed.
 
 ## Recording
 
@@ -79,8 +87,15 @@ A dump that names its boots with `#DG,BOOT,v1,n=<n>` is split into one run per b
 counter alone could never do. Otherwise a chip log is not split into runs at all, nothing in
 it is discarded as a duplicate reception, and the columns that are read off the transmission
 counter — missed, restarts, Rx %, interval — show nothing rather than something wrong. The board
-logs at its own gap per phase (20 Hz in the air, 1 Hz on the ground as shipped) while the counter moves once per transmission, and every boot in a dump starts at the
-same time, so the counter tells you nothing about runs here.
+logs at its own gap per phase (20 Hz in the air, one record per 10 s on the ground as shipped) while
+the counter moves once per transmission, and every boot in a dump starts at the same time, so the
+counter tells you nothing about runs here.
+
+The log on the chip is a ring, so a chip that has gone round no longer starts at its first
+sector. The dump firmware prints sectors oldest first, by the boot count and uptime of each
+sector's first good record, and the app reads them in that order. A chip that never went round
+prints in address order, as before. On a chip that has gone round the first boot in the dump is
+not boot 0: the boots before it were written over.
 
 A replay says so on the line under its bar, with how many boots it holds and how many of them have
 GPS time, so a replayed dump cannot be mistaken for live reception. Records off a chip carry no
@@ -158,6 +173,7 @@ This is the Live screen, and Replay is the same screen over a log.
 | `web/js/tbeams.js` | The T-Beams screen. |
 | `web/js/chipsats.js` | The ChipSats screen. |
 | `web/js/datascreen.js` | The Data screen. |
+| `web/js/bench.js`, `web/js/benchscreen.js` | Reading the sensor bench's console, and the Bench screen. |
 | `web/js/boardmodel.js`, `web/js/datamodel.js` | What those screens say, as plain functions with tests. |
 | `web/js/serial_native.js` | Talks to the app when the page came from it. |
 | `web/sw.js` | Offline copy for the hosted site. |

@@ -55,7 +55,7 @@
 
 ## Layout
 
-- Screens are tabs in the top bar: ChipSats, T-Beams, Live, Data, and Replay once a log is open. The first, second and fourth need the app; a page from anywhere else has Live and Replay. Settings is a drawer over whichever screen is up.
+- Screens are tabs in the top bar: ChipSats, Bench, T-Beams, Live, Data, and Replay once a log is open. All but Live and Replay need the app; a page from anywhere else has only those two. Settings is a drawer over whichever screen is up.
 - The strip sits at the right of the bar on every screen: the receivers being read with their spreading factor and a state word, the file being logged to with `Save a copy` and `New file`, and a button for a running pull or flash that goes to it. On Live the receiver chips with their controls stand in for the first part.
 - Each pane scrolls on its own. The page never scrolls sideways.
 
@@ -71,6 +71,7 @@ Live and Replay, the dashboard:
 - List and sheet (ChipSats, T-Beams): a 290 px list on the left, one row per board with its name, then its state in words. The picked row has the accent edge. Its sheet is on the right: a head with the name in an input at title size, state and identity, then one pane per job. Anything that writes to a board takes a second click in an `--accent-soft` row that says what will be overwritten. No dialogs.
 - On the board / write table (`.kv`): three columns, the setting, what was read off the board, and the control for what will be written. A control that cannot write yet is disabled under one plain line saying why.
 - Step list of a running job (`.steps`): the steps as the app reports them, finished ones ticked in `--ink-2`, the current one bold with its latest note at the right, then a 4 px bar. A step it failed on is marked and stays on screen.
+- Bench: the same list and sheet, the sheet a grid of part cards in the order the board starts them, then the receivers' tally, the starts and the raw console. A card's head is the part and the last `ok=` the board printed, in a mark; a part with no line for a while gets a `bad` mark saying how long. Event tags (the I2C bus) show their newest lines as printed, not parsed. Values are shown as the board gave them, never judged.
 - Data table: the fleet table's grid. One row per file, newest first: what it is, where it came from, when, size, then its actions as buttons at the end of the row. A pull's report opens under the table. There is no delete.
 - Settings drawer: sections are a heading over a rule with space above. A field is its label with the hint under it on the left, and its control in one 150 px column on the right.
 - A receiver is called by the name it reports, else the name kept for its id, else `T-Beam` and its id. The port order (rx1, rx2) is shown only when nothing else is known.

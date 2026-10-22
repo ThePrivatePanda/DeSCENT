@@ -7,13 +7,13 @@ halves live together because they are used together, and either builds without t
 * fsw - the flight software that runs on the ChipSat. `cd fsw && ./build.sh setup` once, then
   `./build.sh flash` over an ST-Link. Per-board settings go on the build command, so
   `./build.sh flash -DCHIPSAT_ID=12 -DCHIPSAT_SPREADING_FACTOR=9` is a board of its own
-* ground - the dashboard: receives telemetry, configures and flashes ChipSats and T-Beams, and
-  pulls a board's flash log. `cd ground/app && cargo run --release`
+* ground - the dashboard: receives telemetry, configures and flashes ChipSats and T-Beams, pulls a
+  board's flash log and runs the sensor bench on a board. `cd ground/app && cargo run --release`
 
 A board built with no `-DCHIPSAT_ID` reports 255, which is not a board, so an unconfigured one says
 so instead of impersonating a real one.
 
-Pulled logs and session logs are written outside the repo, under `~/DeSCENT`.
+Pulled logs and session logs are written outside the repo, under `~/DeSCENT`, one folder per day.
 
 ## Licence
 
