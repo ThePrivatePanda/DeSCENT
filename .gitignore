@@ -19,8 +19,15 @@ ground/app/target/
 ground/node_modules/
 ground/web/version.json
 ground/.playwright-mcp/
+.playwright-mcp/
 
 # Build leftovers either half can produce
 *.o
 *.obj
 *.elf.map
+
+# Private working notes, never published
+docs/internals/BATON.md
+docs/internals/notes/
+docs/internals/HANDOFF.md
+docs/internals/PROGRESS.md
