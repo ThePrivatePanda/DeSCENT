@@ -10,7 +10,7 @@
 // Layout 3, 160 bytes, what every image built since 2026-10-16 carries:
 //   0..16   magic
 //   16      layout version
-//   17      ChipSat id, 1..254, 255 = unconfigured
+//   17      ChipSat id, 1..253, 254 = the sensor bench (refused for a flight board), 255 = unconfigured
 //   18      module, 1 = LE, 2 = HP
 //   19      spreading factor, 5..12
 //   20      target dBm, signed
@@ -23,9 +23,12 @@
 //           A phase that follows the battery uses its fixed gap while the gauge cannot be read.
 //   138..154 the gap between flash log records in ms, one per phase in the same order
 //   154..158 the same while no altitude source is live (barometer and GPS both dead),
-//            whatever the phase. 0 is a record per IMU reading; 1 to 19 ms the firmware refuses
+//            whatever the phase. 0 is a record per IMU reading in the air and nothing at all on
+//            the ground; 1 to 19 ms the firmware refuses
 //   158..160 CRC16 over 0..158, low byte first, the same way dump.rs reads a slot's
 // Layout 2 (2026-10) was the same with 138..158 reserved and zero: read, shown as a block
+// Since 2026-10-22 the board only has ground and air. The page writes ground into waiting and
+// landed and air into rising and falling, so older firmware still works
 // with no log gaps, and rewritten as layout 3 when patched.
 // Layout 1 was 32 bytes: the same through byte 22, one gap in ms at 22, reserved to 30,
 // CRC at 30. Boards flashed before the phases still carry it, so it is read, and shown
@@ -216,9 +219,9 @@ fn decode_rate(b: &[u8], phase: usize) -> Result<Rate, String> {
 
 // The rule the firmware's usable() applies to a log gap.
 pub fn log_trouble(ms: u32) -> Option<String> {
-    // 0 is a record per IMU reading, the fastest anything changes; 1 to 19 is a slip
+    // 0 is fine in any phase (every IMU reading in the air, nothing on the ground)
     if ms != 0 && ms < LOG_MIN_MS {
-        return Some(format!("a flash log gap of {} ms, which has to be 0 (every reading) or at least {}", ms, LOG_MIN_MS));
+        return Some(format!("a flash log gap of {} ms, which has to be 0 or at least {}", ms, LOG_MIN_MS));
     }
     None
 }
@@ -792,7 +795,7 @@ mod tests {
         let mut bad = asked();
         bad.log_blind_ms = 7;
         assert!(patch(&before, at, &bad).unwrap_err().contains("no altitude source"));
-        // 0 is every reading, so it is written as it is.
+        // 0 stays 0
         let mut zero = asked();
         zero.logs[1] = 0;
         zero.log_blind_ms = 0;

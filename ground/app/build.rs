@@ -68,7 +68,7 @@ fn main() {
     // because cargo reruns this script every time for a path it cannot find.
     let chipsat = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fsw/firmware");
     println!("cargo:rerun-if-changed={}", chipsat.display());
-    for file in ["flash_dump.bin", "flight-le.bin", "flight-hp.bin", "flight.json", "radio.json"] {
+    for file in ["flash_dump.bin", "flight-le.bin", "flight-hp.bin", "bench-le.bin", "bench-hp.bin", "flight.json", "radio.json"] {
         let at = chipsat.join(file);
         if at.is_file() {
             println!("cargo:rerun-if-changed={}", at.display());
@@ -88,6 +88,10 @@ fn main() {
         let (decl, sha) = image(&chipsat, file, name);
         flight.push_str(&decl);
         flight.push_str(&format!("pub static {}_SHA256: &str = {:?};\n", name, sha));
+    }
+    // sensor bench sketch, one per module like the flight images
+    for (file, name) in [("bench-le.bin", "CHIPSAT_BENCH_LE"), ("bench-hp.bin", "CHIPSAT_BENCH_HP")] {
+        flight.push_str(&image(&chipsat, file, name).0);
     }
     let flight_json = text(&chipsat, "flight.json", "CHIPSAT_FLIGHT_JSON");
     let radio = text(&chipsat, "radio.json", "CHIPSAT_RADIO");

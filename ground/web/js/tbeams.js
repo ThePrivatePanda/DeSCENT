@@ -34,7 +34,7 @@
     timer: null,
   };
   const optsFor = (port) => {
-    if (!state.opts.has(port)) state.opts.set(port, { sf: 9, backup: true, confirm: false });
+    if (!state.opts.has(port)) state.opts.set(port, { sf: 9, backup: false, confirm: false });
     return state.opts.get(port);
   };
   const boards = () => hub.boards || [];

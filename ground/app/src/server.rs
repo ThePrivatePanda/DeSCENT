@@ -83,14 +83,14 @@ pub fn newer_on_disk(started: std::time::SystemTime, modified: Option<std::time:
     modified.map(|m| m > started).unwrap_or(false)
 }
 
-pub fn health_json(version: &str, port: u16, log: Option<&str>, boards: usize, receivers: usize, built: u64, newer: bool, fsw: bool) -> String {
+pub fn health_json(version: &str, port: u16, log: Option<&str>, boards: usize, receivers: usize, built: u64, newer: bool, fsw: bool, local: bool) -> String {
     // The dump firmware has no version of its own and does change, so the build says
     // which copy it is carrying rather than leaving a stale one to be guessed at. The id
     // is the first 16 characters of the image's sha256, which the flight repo publishes
     // in full. The flight images are listed the same way, each with the module it is for.
     let flight = crate::flight::carried();
     format!(
-        "{{\"ok\":true,\"version\":\"{}\",\"built\":{},\"newerOnDisk\":{},\"port\":{},\"dumpFirmware\":\"{}\",\"flightImages\":{},\"flightBuild\":{},\"fswTree\":{},\"log\":{},\"boards\":{},\"receivers\":{}}}",
+        "{{\"ok\":true,\"version\":\"{}\",\"built\":{},\"newerOnDisk\":{},\"port\":{},\"dumpFirmware\":\"{}\",\"flightImages\":{},\"flightBuild\":{},\"fswTree\":{},\"fswLocal\":{},\"log\":{},\"boards\":{},\"receivers\":{}}}",
         esc(version),
         built,
         newer,
@@ -99,6 +99,7 @@ pub fn health_json(version: &str, port: u16, log: Option<&str>, boards: usize, r
         flight.images_json(),
         flight.build_json(),
         fsw,
+        local,
         match log {
             Some(l) => format!("\"{}\"", esc(l)),
             None => String::from("null"),
@@ -240,30 +241,55 @@ pub fn logs_json(dir: &Path, chips: &crate::chips::Registry) -> String {
         let board = board.map(|tail| chips.whole_uid(&tail).unwrap_or(tail));
         rows.push((when, name, size, kind, board));
     };
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.ends_with(".log") {
-                add(name, e.metadata().ok(), "session", None);
-            } else if name.starts_with(PULL_FOLDER) {
-                let mut board = None;
-                for inside in std::fs::read_dir(e.path()).into_iter().flatten().flatten() {
-                    let file = format!("{}/{}", name, inside.file_name().to_string_lossy());
-                    if is_image(&file) {
-                        let off = crate::stm32::uid_in_name(&file);
-                        board = board.or(off.clone());
-                        add(file, inside.metadata().ok(), "image", off);
-                    }
-                }
-                // A pull that read nothing has a folder and no log in it, and may still
-                // have saved what was on the board.
-                if let Ok(meta) = std::fs::metadata(e.path().join("ground.log")) {
-                    add(format!("{}/ground.log", name), Some(meta), "pull", board);
-                }
-            } else if is_image(&name) {
-                let off = crate::stm32::uid_in_name(&name);
-                add(name, e.metadata().ok(), "image", off);
+    // board from board.txt, else the image in the folder, else (older pulls) a list name in the folder name
+    let pull_folder = |name: &str, path: &Path, add: &mut dyn FnMut(String, Option<std::fs::Metadata>, &'static str, Option<String>)| {
+        let mut board = crate::layout::board_in(path).map(|uid| crate::stm32::uid_tail(&uid).to_string());
+        for inside in std::fs::read_dir(path).into_iter().flatten().flatten() {
+            let file = format!("{}/{}", name, inside.file_name().to_string_lossy());
+            if is_image(&file) {
+                let off = crate::stm32::uid_in_name(&file);
+                board = board.or(off.clone());
+                add(file, inside.metadata().ok(), "image", off);
             }
+        }
+        let leaf = name.rsplit('/').next().unwrap_or("");
+        let board = board.or_else(|| {
+            crate::layout::board_of_folder(leaf).and_then(|w| chips.named(w)).map(|uid| crate::stm32::uid_tail(&uid).to_string())
+        });
+        // a pull that read nothing has no log but may still have saved an image
+        if let Ok(meta) = std::fs::metadata(path.join("ground.log")) {
+            add(format!("{}/ground.log", name), Some(meta), "pull", board);
+        }
+    };
+    let entries = |d: &Path| std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| (e.file_name().to_string_lossy().to_string(), e));
+    for (name, e) in entries(dir) {
+        if crate::layout::is_day(&name) {
+            // day folder (layout.rs). Clears have no log to open
+            for (file, f) in entries(&e.path().join(crate::layout::LOGS)) {
+                if file.ends_with(".log") {
+                    add(format!("{}/{}/{}", name, crate::layout::LOGS, file), f.metadata().ok(), "session", None);
+                }
+            }
+            // a clear's image can still be a board's newest
+            for kind in [crate::layout::PULLS, crate::layout::CLEARS] {
+                for (folder, f) in entries(&e.path().join(kind)) {
+                    pull_folder(&format!("{}/{}/{}", name, kind, folder), &f.path(), &mut add);
+                }
+            }
+            for (file, f) in entries(&e.path().join(crate::layout::IMAGES)) {
+                let rel = format!("{}/{}/{}", name, crate::layout::IMAGES, file);
+                if is_image(&rel) {
+                    let off = crate::stm32::uid_in_name(&rel);
+                    add(rel, f.metadata().ok(), "image", off);
+                }
+            }
+        } else if name.ends_with(".log") {
+            add(name, e.metadata().ok(), "session", None);
+        } else if name.starts_with(PULL_FOLDER) {
+            pull_folder(&name, &e.path(), &mut add);
+        } else if is_image(&name) {
+            let off = crate::stm32::uid_in_name(&name);
+            add(name, e.metadata().ok(), "image", off);
         }
     }
     rows.sort_by(|a, b| b.0.cmp(&a.0));   // newest first: it is the one just written
@@ -329,23 +355,27 @@ fn asked<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
 }
 
 // The file a /api/log/<name> request means, relative to the data folder, or None to
-// refuse it. Decoded before it is checked, or %2e%2e walks straight past the check. A
-// name is a file in the data folder, or a file directly inside one pull's folder, and
-// nothing deeper or anywhere else.
+// refuse it. Decoded before it is checked, or %2e%2e walks straight past the check
 fn log_name(asked: &str) -> Option<String> {
     let name = percent_decoded(asked.trim_start_matches('/'))?;
     if data_file(&name) { Some(name) } else { None }
 }
 
 fn data_file(name: &str) -> bool {
-    if name.contains("..") || name.contains('\\') || name.chars().any(|c| c.is_control()) {
+    // A colon is a drive (D:x replaces the base when joined) or an NTFS stream on Windows.
+    if name.contains("..") || name.contains('\\') || name.contains(':') || name.chars().any(|c| c.is_control()) {
         return false;
     }
-    let mut parts = name.split('/');
-    let (Some(first), second, third) = (parts.next(), parts.next(), parts.next()) else { return false };
-    match (second, third) {
-        (None, _) => !first.is_empty(),
-        (Some(file), None) => first.starts_with(PULL_FOLDER) && !file.is_empty(),
+    use crate::layout::{CLEARS, IMAGES, LOGS, PULLS};
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return false;
+    }
+    match parts.as_slice() {
+        [_] => true,
+        [folder, _] => folder.starts_with(PULL_FOLDER),
+        [day, kind, _] => crate::layout::is_day(day) && (*kind == LOGS || *kind == IMAGES),
+        [day, kind, _, _] => crate::layout::is_day(day) && (*kind == PULLS || *kind == CLEARS),
         _ => false,
     }
 }
@@ -358,9 +388,13 @@ fn is_image(name: &str) -> bool {
     if !name.ends_with(".bin") {
         return false;
     }
-    match name.split_once('/') {
-        Some((folder, _)) => folder.starts_with(PULL_FOLDER),
-        None => name.starts_with(crate::stm32::IMAGE_PREFIX) || name.starts_with(crate::stm32::OLDER_IMAGE_PREFIX),
+    let parts: Vec<&str> = name.split('/').collect();
+    match parts.as_slice() {
+        [file] => file.starts_with(crate::stm32::IMAGE_PREFIX) || file.starts_with(crate::stm32::OLDER_IMAGE_PREFIX),
+        [folder, _] => folder.starts_with(PULL_FOLDER),
+        [day, kind, _] => crate::layout::is_day(day) && *kind == crate::layout::IMAGES,
+        [day, kind, _, _] => crate::layout::is_day(day) && (*kind == crate::layout::PULLS || *kind == crate::layout::CLEARS),
+        _ => false,
     }
 }
 
@@ -410,6 +444,7 @@ pub struct Ctx {
     pub gate: crate::stm32::Gate,
     pub exe: Option<PathBuf>,             // the file this process was started from
     pub started: std::time::SystemTime,
+    pub local: crate::localfw::Shared,    // fsw tree on this laptop, if any
 }
 
 // The one way out, whoever asked. The log is flushed before the url file goes, because
@@ -553,13 +588,29 @@ fn settings_asked(q: &[(String, String)]) -> Result<Option<crate::radio::Request
 
 // "set for board 9, SF12 at 15 dBm; waiting every 60 s, rising every 10 s, falling back to
 // back, landed by battery: ...; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s".
+// If the slots pair up as the page writes them (waiting = landed, rising = falling) it's
+// "ground every 60 s, air every 1 s; log ground every 10 s, air every 0.05 s, blind 0.2 s"
 fn settings_words(asked: &crate::settings::Asked) -> String {
+    let secs = |ms: u32| format!("{} s", ms as f64 / 1000.0);
+    let (r, l) = (&asked.rates, &asked.logs);
+    if r[0] == r[3] && r[1] == r[2] && l[0] == l[3] && l[1] == l[2] {
+        return format!(
+            "set for board {}, SF{} at {} dBm; ground {}, air {}; log ground every {}, air every {}, blind {}",
+            asked.csid,
+            asked.sf,
+            asked.dbm,
+            r[0].words(),
+            r[1].words(),
+            secs(l[0]),
+            secs(l[1]),
+            secs(asked.log_blind_ms)
+        );
+    }
     let phases: Vec<String> = crate::settings::PHASE_NAMES
         .iter()
         .zip(asked.rates.iter())
         .map(|(name, r)| format!("{} {}", name, r.words()))
         .collect();
-    let secs = |ms: u32| format!("{} s", ms as f64 / 1000.0);
     let logs: Vec<String> = asked.logs.iter().map(|ms| secs(*ms)).collect();
     format!(
         "set for board {}, SF{} at {} dBm; {}; log every {}, blind {}",
@@ -608,6 +659,19 @@ fn chip_image(
                 }
             }
         }
+        // sensor bench: no settings block, sends as board 254 so it can't pass for a flight board
+        (Some("bench"), None) => {
+            let stored = ctx.chips.lock().unwrap().get(uid).and_then(|c| c.module);
+            let module = asked(q, "module").and_then(crate::chips::module_word).or(stored).ok_or_else(|| {
+                String::from("no radio module given and none remembered for this board: read it first, or say le or hp")
+            })?;
+            let bytes = crate::chipflash::bench_images()
+                .into_iter()
+                .find(|(m, _)| *m == module)
+                .map(|(_, b)| b)
+                .ok_or_else(|| format!("this build carries no {} bench firmware: fsw/tools/emit_firmware.sh makes it", module.to_uppercase()))?;
+            (bytes.to_vec(), format!("the {} sensor bench firmware", module.to_uppercase()), None)
+        }
         (Some(other), None) => return Err(format!("this build carries no image called {:?}", other)),
         (None, Some(name)) => {
             if !data_file(name) || !is_image(name) {
@@ -638,17 +702,27 @@ fn chip_image(
     Ok((image, label, note))
 }
 
+fn from_tree(ctx: &Ctx, part: &'static str) -> crate::chipflash::Make {
+    let local = ctx.local.clone();
+    Box::new(move |say: &dyn Fn(&str)| {
+        let (bytes, id) = local.get_or_refuse(part, say)?;
+        Ok((bytes, id.words((crate::logfile::now_ms() / 1000) as u64)))
+    })
+}
+
 fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
     let q = query(url).ok_or_else(|| String::from("the request's query string does not read"))?;
     let uid = asked(&q, "uid").ok_or_else(|| String::from("no uid in the request, so there is no saying which board this is for"))?;
     let uid = crate::stm32::a_uid(uid).ok_or_else(|| format!("{:?} is not a board id, which is 24 hex characters", uid))?;
-    // Saved unless told otherwise, as a receiver is: skipping is a choice, never the quiet path.
-    let backup = asked(&q, "backup") != Some("0");
+    // off by default, same as receivers (decided 2026-10-21)
+    let backup = asked(&q, "backup") == Some("1");
     let probe = asked(&q, "probe").filter(|p| !p.is_empty()).map(String::from);
-    // An image compiled for this board, or one that already exists. The compile is the job's first
-    // step, so only what can be judged without running it is judged here.
-    let (image, label, note, build) = if asked(&q, "embedded") == Some("built") {
-        let at = crate::fswbuild::tree(ctx.exe.as_deref()).ok_or_else(|| {
+    // The compile runs in the job, so only what can be checked without it is checked here.
+    // With the tree switch on, flight and bench images come from the tree too (localfw.rs)
+    let embedded = asked(&q, "embedded");
+    let on = ctx.local.on();
+    let (image, label, note, build) = if embedded == Some("built") || (on && embedded == Some("flight")) {
+        ctx.local.tree().ok_or_else(|| {
             String::from(
                 "no flight software tree beside this program. It is the folder holding build.sh and \
                  V2_6_X_Code, usually fsw/ in the same repository, or set CHIPSAT_FSW to it",
@@ -656,16 +730,25 @@ fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
         })?;
         let stored = ctx.chips.lock().unwrap().get(&uid).and_then(|c| c.module);
         let module = asked(&q, "module")
-            .map(String::from)
-            .or(stored.map(String::from))
+            .and_then(crate::chips::module_word)
+            .or(stored)
             .ok_or_else(|| String::from("no radio module given and none remembered for this board"))?;
-        // Checked here by the same rules as the carried image, so a build is never started
-        // for settings the block cannot hold.
+        // checked against the tree's own radio table before any build
         let wanted = settings_asked(&q)?.ok_or_else(|| String::from("no settings given to build with"))?;
-        let asked = crate::radio::carried()?.check(&wanted, &module)?;
+        let (radio, radio_note) = ctx.local.radio(true)?;
+        let asked = radio.check(&wanted, module)?;
         let words = format!("a flight image for board {} on the {} module, {}", asked.csid, module.to_uppercase(), settings_words(&asked).trim_start_matches(&format!("set for board {}, ", asked.csid)));
+        let part = crate::localfw::part_for("flight", module).ok_or_else(|| format!("{:?} is not a radio module", module))?;
         let label = words.clone();
-        (Vec::new(), label, None, Some(crate::chipflash::BuildPlan { at, module, asked, words }))
+        (Vec::new(), label, radio_note, Some(crate::chipflash::BuildPlan { make: from_tree(ctx, part.name), asked: Some(asked), words }))
+    } else if on && embedded == Some("bench") {
+        let stored = ctx.chips.lock().unwrap().get(&uid).and_then(|c| c.module);
+        let module = asked(&q, "module").and_then(crate::chips::module_word).or(stored).ok_or_else(|| {
+            String::from("no radio module given and none remembered for this board: read it first, or say le or hp")
+        })?;
+        let part = crate::localfw::part_for("bench", module).ok_or_else(|| format!("{:?} is not a radio module", module))?;
+        let words = format!("the {} sensor bench firmware", module.to_uppercase());
+        (Vec::new(), words.clone(), None, Some(crate::chipflash::BuildPlan { make: from_tree(ctx, part.name), asked: None, words }))
     } else {
         let (i, l, n) = chip_image(&q, body, &uid, ctx)?;
         (i, l, n, None)
@@ -689,7 +772,7 @@ fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
             image,
             label,
             note,
-            known: crate::chipflash::Known::carried(),
+            known: crate::chipflash::Known::with(&ctx.local),
             build,
         },
         held,
@@ -738,9 +821,9 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
             receivers,
             crate::opts::built(),
             newer_on_disk(ctx.started, modified),
-            // Decides which way the page puts flight software on a board: built here, or
-            // the carried image with the board's settings patched into it.
-            crate::fswbuild::tree(ctx.exe.as_deref()).is_some(),
+            // the second one decides build-and-flash vs patching the carried image
+            ctx.local.tree().is_some(),
+            ctx.local.on(),
         );
         let _ = request.respond(
             Response::from_string(body).with_header(header("Content-Type", "application/json")),
@@ -1105,8 +1188,9 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
         let wipe = crate::json::int_field(&body, "wipe").unwrap_or(0) != 0;
         let keep_fsw = wipe || crate::json::int_field(&body, "keepFsw").unwrap_or(1) != 0;
         let probe = crate::json::str_field(&body, "probe").filter(|p| !p.is_empty());
-        // Which board the page thinks is on the probe, when it has read one. The pull
-        // then checks, and names what it saves after the board and not the port.
+        // anyConsole is Pull anyway
+        let check_console = crate::json::int_field(&body, "anyConsole").unwrap_or(0) == 0;
+        // board the page thinks is on the probe. The pull checks it and names saves after it
         let asked_uid = crate::json::str_field(&body, "uid").filter(|u| !u.is_empty());
         let uid = asked_uid.as_deref().and_then(crate::stm32::a_uid);
         let name = uid
@@ -1114,7 +1198,10 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
             .and_then(|u| ctx.chips.lock().unwrap().get(u).map(|c| c.name.clone()))
             .filter(|n| !n.is_empty());
 
-        let text = match crate::flash::CHIPSAT_DUMP {
+        // tree's dump is fetched inside the job, it may need building
+        let on = ctx.local.on();
+        let dump = if on { Some(&[][..]) } else { crate::flash::CHIPSAT_DUMP };
+        let text = match dump {
             None => String::from("{\"ok\":false,\"error\":\"this build carries no dump firmware\"}"),
             Some(_) if board.is_empty() => String::from("{\"ok\":false,\"error\":\"no board in the request\"}"),
             Some(_) if flight_controller(&ctx, &board).is_some() => failed(&flight_controller(&ctx, &board).unwrap()),
@@ -1137,9 +1224,23 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
                                 probe,
                                 wipe,
                                 keep_fsw,
-                                dump_image: image,
+                                dump_image: image.to_vec(),
+                                dump_from: if on { String::new() } else { ctx.local.use_json(&crate::localfw::Use::Carried(image, None), "flash_dump") },
+                                prepare: on.then(|| {
+                                    let local = ctx.local.clone();
+                                    Box::new(move |say: &dyn Fn(&str)| {
+                                        let u = local.pick("flash_dump", true, say)?;
+                                        let note = match &u {
+                                            crate::localfw::Use::Carried(_, why) => why.clone(),
+                                            crate::localfw::Use::Tree(_, id) => Some(format!("using the {}", id.words((crate::logfile::now_ms() / 1000) as u64))),
+                                        };
+                                        Ok((u.bytes().to_vec(), local.use_json(&u, "flash_dump"), note))
+                                    }) as crate::pull::Prepare
+                                }),
+                                known: Some(crate::chipflash::Known::with(&ctx.local)),
                                 uid,
                                 name,
+                                check_console,
                             },
                             held,
                         )
@@ -1172,6 +1273,37 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
             Response::from_string(text).with_header(header("Content-Type", "application/json")),
         );
         return;
+    }
+
+    // R toggles the sensor bench radio. Only ever sends that one byte
+    if path == "/api/bench/radio" {
+        let Some(request) = post_only(request) else { return };
+        let port = query(&url).and_then(|q| asked(&q, "port").map(String::from)).unwrap_or_default();
+        let text = {
+            let mut hub = ctx.hub.lock().unwrap();
+            let key = hub.boards().into_iter().find(|b| b.port == port).map(|b| b.key);
+            match key {
+                None => failed(&format!("{:?} is not plugged in", port)),
+                Some(key) => match hub.send(&key, "R") {
+                    Ok(()) => String::from("{\"ok\":true}"),
+                    Err(e) => failed(&format!("{}: is the port being read? {}", port, e)),
+                },
+            }
+        };
+        return answer(request, text);
+    }
+
+    // ends like a failed pull. A pull told not to keep the flight software stays on the dump firmware
+    if path == "/api/pull/stop" {
+        let Some(request) = post_only(request) else { return };
+        let text = match crate::pull::stop(&ctx.pull) {
+            Ok(()) => {
+                println!("stop asked for on the pull from {}", ctx.pull.lock().unwrap().board);
+                String::from("{\"ok\":true}")
+            }
+            Err(e) => failed(&e),
+        };
+        return answer(request, text);
     }
 
     // Asked for, not pushed: a reloaded page or a reopened panel picks the job back up.
@@ -1274,7 +1406,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
                 &ctx.chip,
                 &ctx.chips,
                 &crate::chipflash::StLink { probe: probe.as_deref() },
-                &crate::chipflash::Known::carried(),
+                &crate::chipflash::Known::with(&ctx.local),
             ),
         };
         return answer(request, text);
@@ -1317,16 +1449,48 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
     }
 
     // What the flight software will accept for a radio, as its own build wrote it down.
+    // tree's table when the switch is on
     if path == "/api/radio" {
-        match crate::flash::CHIPSAT_RADIO {
-            Some(table) => answer(request, table.to_string()),
-            None => {
-                let _ = request.respond(
-                    Response::from_string("this build carries no radio table").with_status_code(404),
-                );
+        match ctx.local.radio_text(ctx.local.on()) {
+            Ok((table, _)) => answer(request, table),
+            Err(e) => {
+                let _ = request.respond(Response::from_string(e).with_status_code(404));
             }
         }
         return;
+    }
+
+    if path == "/api/fsw" {
+        return answer(request, ctx.local.state_json());
+    }
+
+    if path == "/api/fsw/mode" {
+        let Some(mut request) = post_only(request) else { return };
+        let mut body = String::new();
+        let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
+        let text = match crate::json::int_field(&body, "on") {
+            None => failed("no on in the request: 1 to use this computer's flight software, 0 for the copies the app carries"),
+            Some(on) => match ctx.local.set_on(on != 0) {
+                Ok(()) => {
+                    println!("{}", if on != 0 { "using this computer's flight software" } else { "using the flight software this app carries" });
+                    ctx.local.state_json()
+                }
+                Err(e) => failed(&e),
+            },
+        };
+        return answer(request, text);
+    }
+
+    if path == "/api/fsw/rebuild" {
+        let Some(request) = post_only(request) else { return };
+        let text = match ctx.local.rebuild() {
+            Ok(()) => {
+                println!("building every part of the flight software in {}", ctx.local.tree().map(|t| t.display().to_string()).unwrap_or_default());
+                ctx.local.state_json()
+            }
+            Err(e) => failed(&e),
+        };
+        return answer(request, text);
     }
 
     match assets::get(&path) {
@@ -1483,7 +1647,7 @@ mod tests {
             let power = if image.module == "hp" { 22 } else { 15 };
             let wanted = crate::radio::Request { csid: 9, sf: 12, dbm: power, rates: vec![rr(60_000), rr(500), rr(500), rr(60_000)], logs: vec![1000, 50, 50, 1000], log_blind_ms: 200 };
             let (bytes, words) = set_for(image.bytes, image.module, &radio, &wanted).unwrap();
-            assert_eq!(words, format!("set for board 9, SF12 at {} dBm; waiting every 60 s, rising every 0.5 s, falling every 0.5 s, landed every 60 s; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power));
+            assert_eq!(words, format!("set for board 9, SF12 at {} dBm; ground every 60 s, air every 0.5 s; log ground every 1 s, air every 0.05 s, blind 0.2 s", power));
             assert_eq!(bytes.len(), image.bytes.len());
             match crate::settings::find_at(&bytes).unwrap() {
                 (crate::settings::Found::Block(s), Some(_)) => {
@@ -1515,22 +1679,33 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_are_said_as_two_phases_only_when_the_slots_are_paired() {
+        let rate = |fixed_ms: u32| crate::settings::Rate { fixed_ms, follow: false, percent: [75, 50, 35, 20], interval_ms: [10_000, 30_000, 60_000, 120_000, 180_000] };
+        let asked = crate::settings::Asked { csid: 9, sf: 7, dbm: 14, rates: [rate(60_000), rate(1000), rate(1000), rate(60_000)], logs: [10_000, 50, 50, 10_000], log_blind_ms: 200 };
+        assert_eq!(settings_words(&asked), "set for board 9, SF7 at 14 dBm; ground every 60 s, air every 1 s; log ground every 10 s, air every 0.05 s, blind 0.2 s");
+        // landed log gap differs from waiting, so slot by slot
+        let apart = crate::settings::Asked { logs: [10_000, 50, 50, 1000], ..asked.clone() };
+        assert_eq!(settings_words(&apart), "set for board 9, SF7 at 14 dBm; waiting every 60 s, rising every 1 s, falling every 1 s, landed every 60 s; log every 10 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s");
+    }
+
+    #[test]
     fn health_is_shaped_the_way_a_launcher_reads_it() {
         let id = crate::flash::CHIPSAT_DUMP_ID;
         let flight = |fsw: bool| {
             format!(
-                "\"flightImages\":{},\"flightBuild\":{},\"fswTree\":{}",
+                "\"flightImages\":{},\"flightBuild\":{},\"fswTree\":{},\"fswLocal\":{}",
                 crate::flight::carried().images_json(),
                 crate::flight::carried().build_json(),
+                fsw,
                 fsw
             )
         };
         assert_eq!(
-            health_json("0.4.0", 8790, Some("/tmp/a.log"), 2, 1, 1_791_216_000, false, true),
+            health_json("0.4.0", 8790, Some("/tmp/a.log"), 2, 1, 1_791_216_000, false, true, true),
             format!("{{\"ok\":true,\"version\":\"0.4.0\",\"built\":1791216000,\"newerOnDisk\":false,\"port\":8790,\"dumpFirmware\":\"{}\",{},\"log\":\"/tmp/a.log\",\"boards\":2,\"receivers\":1}}", id, flight(true))
         );
         assert_eq!(
-            health_json("0.4.0", 8765, None, 0, 0, 1_791_216_000, true, false),
+            health_json("0.4.0", 8765, None, 0, 0, 1_791_216_000, true, false, false),
             format!("{{\"ok\":true,\"version\":\"0.4.0\",\"built\":1791216000,\"newerOnDisk\":true,\"port\":8765,\"dumpFirmware\":\"{}\",{},\"log\":null,\"boards\":0,\"receivers\":0}}", id, flight(false))
         );
         // The build time is the one compiled into this binary.
@@ -1538,7 +1713,7 @@ mod tests {
         // A build that carries a dump image says which one, so a stale copy is visible.
         assert!(!id.is_empty(), "the dump firmware should be compiled in");
         // The version is the crate's, not a string typed twice.
-        assert!(health_json(env!("CARGO_PKG_VERSION"), 1, None, 0, 0, 0, false, false)
+        assert!(health_json(env!("CARGO_PKG_VERSION"), 1, None, 0, 0, 0, false, false, false)
             .contains(&format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))));
     }
 
@@ -1725,6 +1900,94 @@ mod tests {
     }
 
     #[test]
+    fn the_log_list_reads_the_day_folders_beside_the_older_flat_names() {
+        let dir = scratch("days");
+        written(&dir.join("descent-ground-2026-10-17T18-02-58.log"), "old", 1_790_000_000);
+        let day = dir.join("2026-10-18");
+        for kind in ["logs", "pulls/1432-board9", "images", "clears/1125-board9", "receiver-images"] {
+            std::fs::create_dir_all(day.join(kind)).unwrap();
+        }
+        written(&day.join("logs/1402-ground.log"), "ab", 1_790_100_000);
+        written(&day.join("pulls/1432-board9/ground.log"), "abcde", 1_790_200_000);
+        written(&day.join("pulls/1432-board9/1432-board9-0027003A.bin"), "abc", 1_790_199_000);
+        std::fs::write(day.join("pulls/1432-board9/dump.txt"), "x").unwrap();
+        written(&day.join("images/1101-2-board9-0027003A.bin"), "abcd", 1_790_150_000);
+        // not listed: a clear's dump.txt, a receiver image, a folder that only looks like a day
+        written(&day.join("clears/1125-board9/dump.txt"), "x", 1_790_160_000);
+        written(&day.join("receiver-images/1647-ttyACM0.bin"), "x", 1_790_300_000);
+        std::fs::create_dir_all(dir.join("2026-10-1x/logs")).unwrap();
+        written(&dir.join("2026-10-1x/logs/1402-ground.log"), "x", 1_790_400_000);
+
+        assert_eq!(
+            logs_json(&dir, &crate::chips::Registry::empty()),
+            "{\"logs\":[\
+{\"name\":\"2026-10-18/pulls/1432-board9/ground.log\",\"bytes\":5,\"when\":1790200000,\"kind\":\"pull\",\"uid\":\"0027003A\"},\
+{\"name\":\"2026-10-18/pulls/1432-board9/1432-board9-0027003A.bin\",\"bytes\":3,\"when\":1790199000,\"kind\":\"image\",\"uid\":\"0027003A\"},\
+{\"name\":\"2026-10-18/images/1101-2-board9-0027003A.bin\",\"bytes\":4,\"when\":1790150000,\"kind\":\"image\",\"uid\":\"0027003A\"},\
+{\"name\":\"2026-10-18/logs/1402-ground.log\",\"bytes\":2,\"when\":1790100000,\"kind\":\"session\"},\
+{\"name\":\"descent-ground-2026-10-17T18-02-58.log\",\"bytes\":3,\"when\":1790000000,\"kind\":\"session\"}]}"
+        );
+
+        for yes in [
+            "2026-10-18/logs/1402-ground.log",
+            "2026-10-18/pulls/1432-board9/ground.log",
+            "2026-10-18/pulls/1432-board9/dump.txt",
+            "2026-10-18/clears/1125-board9/dump.txt",
+            "2026-10-18/images/1101-2-board9-0027003A.bin",
+        ] {
+            assert_eq!(log_name(yes).as_deref(), Some(yes), "{}", yes);
+        }
+        assert_eq!(log_name("2026-10-18%2Fpulls%2F1432-board9%2Fground.log").as_deref(), Some("2026-10-18/pulls/1432-board9/ground.log"));
+        for no in [
+            "2026-10-18/pulls/1432-board9/x/y",
+            "2026-10-18/logs/a/b",
+            "2026-10-18/receiver-images/1647-ttyACM0.bin",
+            "2026-10-18/tiles/a",
+            "2026-10-1x/logs/1402-ground.log",
+            "2026-10-18/pulls/../../descent-ground.conf",
+            "2026-10-18//logs/a.log",
+            "D:descent-ground.conf",
+            "2026-10-18/logs/1402-ground.log:stream",
+        ] {
+            assert_eq!(log_name(no), None, "{:?} should have been refused", no);
+        }
+        assert!(is_image("2026-10-18/images/1101-2-board9-0027003A.bin"));
+        assert!(is_image("2026-10-18/pulls/1432-board9/1432-board9-0027003A.bin"));
+        assert!(!is_image("2026-10-18/receiver-images/1647-ttyACM0.bin"));
+        assert!(is_image("2026-10-18/clears/1125-board9/1125-board9-0027003A.bin"), "a clear's image can be a board's newest");
+        assert!(!is_image("2026-10-18/logs/1402-ground.log"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pull_with_no_image_left_beside_it_still_says_which_board() {
+        let dir = scratch("pullboard");
+        let day = dir.join("2026-10-18");
+        for d in ["pulls/1432-board9", "pulls/1437-x", "pulls/1440-ttyUSB0", "clears/1125-board12"] {
+            std::fs::create_dir_all(day.join(d)).unwrap();
+        }
+        // board from board.txt, from a list name, and none
+        written(&day.join("pulls/1437-x/ground.log"), "a", 1_790_300_000);
+        std::fs::write(day.join("pulls/1437-x/board.txt"), "2032374555435010002C002E\n").unwrap();
+        written(&day.join("pulls/1432-board9/ground.log"), "a", 1_790_200_000);
+        written(&day.join("pulls/1440-ttyUSB0/ground.log"), "a", 1_790_100_000);
+        written(&day.join("clears/1125-board12/1125-board12-002C002E.bin"), "ab", 1_790_000_000);
+        let mut chips = crate::chips::Registry::empty();
+        chips.saw("20343542323250010027003A", "dump", 1).unwrap();
+        chips.set_name("20343542323250010027003A", "9").unwrap();
+        chips.saw("2032374555435010002C002E", "flight", 1).unwrap();
+        assert_eq!(
+            logs_json(&dir, &chips),
+            "{\"logs\":[\
+{\"name\":\"2026-10-18/pulls/1437-x/ground.log\",\"bytes\":1,\"when\":1790300000,\"kind\":\"pull\",\"uid\":\"2032374555435010002C002E\"},\
+{\"name\":\"2026-10-18/pulls/1432-board9/ground.log\",\"bytes\":1,\"when\":1790200000,\"kind\":\"pull\",\"uid\":\"20343542323250010027003A\"},\
+{\"name\":\"2026-10-18/pulls/1440-ttyUSB0/ground.log\",\"bytes\":1,\"when\":1790100000,\"kind\":\"pull\"},\
+{\"name\":\"2026-10-18/clears/1125-board12/1125-board12-002C002E.bin\",\"bytes\":2,\"when\":1790000000,\"kind\":\"image\",\"uid\":\"2032374555435010002C002E\"}]}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn every_image_the_list_offers_can_be_fetched_and_put_back_and_nothing_else_can() {
         for yes in [
             "descent-image-20393256-Flight-spare-2-2026-09-28T10-00-00.bin",
@@ -1780,7 +2043,7 @@ mod tests {
         let dump = crate::flash::CHIPSAT_DUMP.expect("the dump firmware should be compiled in");
         let id = &sha256(dump)[..16];
         assert_eq!(crate::flash::CHIPSAT_DUMP_ID, id);
-        let health = health_json("0.4.0", 8765, None, 0, 0, 0, false, false);
+        let health = health_json("0.4.0", 8765, None, 0, 0, 0, false, false, false);
         assert!(health.contains(&format!("\"dumpFirmware\":\"{}\",", id)), "{}", health);
 
         for image in &crate::flight::carried().images {

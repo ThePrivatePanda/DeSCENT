@@ -198,6 +198,9 @@ impl Radio {
         if !(1..=255).contains(&r.csid) {
             return Err(format!("{} is not a board id: it has to be 1 to 255, and 255 means nobody set it", r.csid));
         }
+        if r.csid == 254 {
+            return Err(String::from("254 is the sensor bench's id, kept so its packets are never taken for a flight board's: pick another"));
+        }
         if !(self.sf_min..=self.sf_max).contains(&r.sf) {
             return Err(format!(
                 "SF{} is not a spreading factor the firmware takes: it has to be {} to {}",
@@ -419,6 +422,8 @@ mod tests {
             let e = t.check(&asking(no, 9, 14, 1000), "le").unwrap_err();
             assert!(e.contains(&no.to_string()) && e.contains("1 to 255"), "{}", e);
         }
+        assert!(t.check(&asking(254, 9, 14, 1000), "le").unwrap_err().contains("bench"));
+        assert!(t.check(&asking(253, 9, 14, 1000), "le").is_ok());
     }
 
     #[test]

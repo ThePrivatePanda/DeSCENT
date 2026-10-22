@@ -95,6 +95,8 @@ test('the folder everything is kept in comes from the path of the log being writ
   assert.equal(D.keptIn('/home/op/DeSCENT/descent-2026-10-04_19-12.log'), '/home/op/DeSCENT');
   assert.equal(D.keptIn('C:\\Users\\op\\DeSCENT\\a.log'), 'C:\\Users\\op\\DeSCENT');
   assert.equal(D.keptIn(null), '');
+  assert.equal(D.keptIn('/home/op/DeSCENT/2026-10-18/logs/1402-ground.log'), '/home/op/DeSCENT');
+  assert.equal(D.keptIn('C:\\Users\\op\\DeSCENT\\2026-10-18\\logs\\1402-ground.log'), 'C:\\Users\\op\\DeSCENT');
   assert.equal(D.keptIn('a.log'), '');
 });
 
@@ -201,4 +203,44 @@ test('local day and time for the table, with the year only when it is not this o
   assert.equal(D.dayTime(new Date(2025, 0, 3, 9, 5), now), '3 Jan 2025, 09:05');
   assert.equal(D.dayTime(new Date(NaN), now), '—');
   assert.equal(D.day(new Date(2026, 8, 29, 1, 2), now), '29 Sep');
+});
+
+test('names in the day folders give the board and the log being written now', () => {
+  assert.equal(D.boardPart('2026-10-18/pulls/1432-board9/ground.log'), 'board9');
+  assert.equal(D.boardPart('2026-10-18/pulls/1432-2-board9/ground.log'), 'board9');
+  assert.equal(D.boardPart('2026-10-18/pulls/1432-Flight-spare-2/ground.log'), 'Flight-spare-2');
+  assert.equal(D.boardPart('2026-10-18/pulls/1432-CS-12/ground.log'), 'CS-12');
+  assert.equal(D.boardPart('2026-10-18/pulls/1432-board9/1432-board9-0027003A.bin'), 'board9');
+  assert.equal(D.boardPart('2026-10-18/images/1101-2-Flight-spare-2-20393256.bin'), 'Flight-spare-2');
+  assert.equal(D.boardPart('2026-10-18/pulls/1432-ttyACM1/1432-ttyACM1.bin'), 'ttyACM1');
+  assert.equal(D.boardPart('2026-10-18/logs/1402-ground.log'), '');
+  const rows = D.rows([
+    { name: '2026-10-18/logs/1402-ground.log', bytes: 9, when: 2, kind: 'session' },
+    { name: '2026-10-17/logs/1402-ground.log', bytes: 9, when: 1, kind: 'session' },
+    { name: '2026-10-18/pulls/1432-board9/ground.log', bytes: 9, when: 3, kind: 'pull' },
+  ], { current: '/home/op/DeSCENT/2026-10-18/logs/1402-ground.log' });
+  assert.deepStrictEqual(rows.map((r) => r.current), [false, true, false]);
+  assert.deepStrictEqual(rows.map((r) => r.from), ['board9', 'Receivers', 'Receivers']);
+  assert.equal(rows[0].raw, '2026-10-18/pulls/1432-board9/dump.txt');
+});
+
+test('a pull whose boots carry events shows the reset flags and what was dropped, an older one does not', () => {
+  const report = { boots: [
+    { n: 18, records: 1663, firstMs: 0, lastMs: 10, timeSource: 'none', resetCsr: 67108864, reset: 'PIN' },
+    { n: 19, records: 271, firstMs: 0, lastMs: 10, timeSource: 'none', resetCsr: 201326592, reset: 'PIN+BOR', dropped: 4200 },
+    { n: 20, records: 3, firstMs: 0, lastMs: 10, timeSource: 'none' },
+  ] };
+  assert.equal(D.events(report), true);
+  const rows = D.bootRows(report);
+  assert.deepStrictEqual(rows.map((r) => [r.reset, r.dropped]), [['PIN', '—'], ['PIN, BOR', '4,200'], ['—', '—']]);
+  const old = { boots: [{ n: 1, records: 2, firstMs: 0, lastMs: 10, timeSource: 'none' }] };
+  assert.equal(D.events(old), false);
+  assert.equal('reset' in D.bootRows(old)[0], false);
+});
+
+test('a chip that went round says so in how the transfer went, and only then', () => {
+  const keys = (r) => D.transferRows(r).map((x) => x.key);
+  assert.equal(keys(REPORT).includes('wrapped'), false);
+  const went = Object.fromEntries(D.transferRows(Object.assign({}, REPORT, { wrapped: true })).map((r) => [r.key, r]));
+  assert.equal(went.wrapped.value, 'yes');
 });

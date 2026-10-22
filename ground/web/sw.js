@@ -1,11 +1,11 @@
 // Offline copy of the hosted dashboard. Network first so updates arrive as
 // soon as there is a connection; the cache is used only when offline.
-const CACHE = 'descent-ground-v8';
+const CACHE = 'descent-ground-v11';
 const FILES = [
   './', 'index.html', 'css/style.css',
-  'js/packet.js', 'js/lines.js', 'js/fleet.js', 'js/store.js', 'js/serial.js', 'js/serial_native.js',
+  'js/packet.js', 'js/lines.js', 'js/bench.js', 'js/fleet.js', 'js/store.js', 'js/serial.js', 'js/serial_native.js',
   'js/recorder.js', 'js/exportcsv.js', 'js/datamodel.js', 'js/boardmodel.js', 'js/update.js', 'js/charts.js', 'js/app.js',
-  'js/screens.js', 'js/tbeams.js', 'js/chipsats.js', 'js/datascreen.js',
+  'js/screens.js', 'js/tbeams.js', 'js/chipsats.js', 'js/benchscreen.js', 'js/datascreen.js',
   'vendor/uPlot.iife.min.js', 'vendor/uPlot.min.css',
   'vendor/fonts/ibm-plex-sans-latin-400-normal.woff2', 'vendor/fonts/ibm-plex-sans-latin-500-normal.woff2',
   'vendor/fonts/ibm-plex-sans-latin-600-normal.woff2', 'vendor/fonts/ibm-plex-mono-latin-400-normal.woff2',

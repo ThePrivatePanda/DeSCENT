@@ -32,7 +32,7 @@ function page(scripts, hub, o) {
   sandbox.window = sandbox;
   sandbox.self = sandbox;
   sandbox.DGApp = {
-    hub, live: { receivers: new Map() },
+    hub, live: { receivers: new Map() }, taps: [],
     ui: { $: el, esc, toast: (t) => toasts.push(t), logUrl: (n) => n, flatName: (n) => n, age: () => '', sfSelect: () => '' },
     shell: {
       paint: (e, html) => { e.html = html; },
@@ -51,7 +51,7 @@ function page(scripts, hub, o) {
     { getAttribute: (n) => (n in attrs ? attrs[n] : null), closest: () => null, blur() {}, tagName: 'BUTTON' }, more || {});
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    parts, jobs, toasts, settle, target,
+    parts, jobs, toasts, settle, target, taps: sandbox.DGApp.taps,
     html: (id) => el(id).html,
     async fire(id, type, attrs, more) {
       for (const fn of handlers[id + ':' + type] || []) await fn({ target: target(attrs || {}, more) });

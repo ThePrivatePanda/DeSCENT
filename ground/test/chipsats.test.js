@@ -10,16 +10,16 @@ const PROBE = { serial: '002A00', kind: 'STLink V3', access: true };
 const CS9 = { uid: UID9, name: 'CS9', module: 'le', lastSeen: 1, firmware: 'dump' };
 const CS12 = { uid: UID12, name: 'CS12', module: 'le', lastSeen: 2, firmware: 'flight', firmwareModule: 'le' };
 const RATE = (fixedMs, more) => Object.assign({ fixedMs, follow: false, percent: [75, 50, 35, 20], intervalMs: [10000, 30000, 60000, 120000, 180000] }, more || {});
-const RATES = [RATE(60000), RATE(10000), RATE(1000), RATE(60000)];
+// Ground's slots (waiting, landed) and air's (rising, falling) holding the same, as this page writes them.
+const RATES = [RATE(60000), RATE(10000), RATE(10000), RATE(60000)];
 const LOGS = [1000, 50, 50, 1000];
 const block = (o) => Object.assign({ layoutVersion: 3, csid: 255, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, rates: RATES, logMs: LOGS, logBlindMs: 200, reservedClear: true }, o);
-// What every flash request carries for the rates and log gaps when nobody touched them: the
-// falling slot is written with the air's (rising's) values.
+// untouched defaults with no block on the board, ground logs every 10 s
 const DEFAULT_RATES = { logblind: '200' };
 [60000, 1000, 1000, 60000].forEach((fixed, i) => {
   DEFAULT_RATES['fixed' + i] = String(fixed); DEFAULT_RATES['follow' + i] = '0';
   DEFAULT_RATES['soc' + i] = '75,50,35,20'; DEFAULT_RATES['socms' + i] = '10000,30000,60000,120000,180000';
-  DEFAULT_RATES['log' + i] = String(LOGS[i]);
+  DEFAULT_RATES['log' + i] = String([10000, 50, 50, 10000][i]);
 });
 const readOf = (uid, firmware, settings) => ({ ok: true, uid, flashBytes: 262144, firmware, settings, settingsError: null, probe: PROBE });
 const DUMP = readOf(UID9, { kind: 'dump', current: true, id: '25118bdfafab456c' }, null);
@@ -37,7 +37,16 @@ async function chipsats(o) {
     chipPeek: async () => { o.peeks++; return o.under === undefined ? o.read.uid : o.under; },
     chipFlash: async (q) => { o.flashed = q; },
     chipForget: async (uid) => { o.forgot = uid; o.chips = o.chips.filter((c) => c.uid !== uid); },
+    pull: async (port, keepFsw, more) => { o.pulled = { port, keepFsw, more }; },
+    pullStop: async () => { o.stops = (o.stops || 0) + 1; },
   };
+  if (o.fsw !== undefined) {
+    hub.fsw = async () => o.fsw;
+    hub.fswMode = async (on) => { o.mode = on; o.fsw = Object.assign({}, o.fsw, { on }); o.healths = (o.healths || 0); return o.fsw; };
+    hub.fswRebuild = async () => { o.rebuilds = (o.rebuilds || 0) + 1; o.fsw = Object.assign({}, o.fsw, { job: { running: true, pct: 10, steps: ['building the flight LE'], note: '', error: null, seconds: 1 } }); return o.fsw; };
+    hub.health = async () => { o.healths = (o.healths || 0) + 1; return o.health || null; };
+    hub.radio = async () => { o.radios = (o.radios || 0) + 1; return null; };
+  }
   const p = page(['boardmodel.js', 'datamodel.js', 'chipsats.js'], hub, o);
   await p.settle();
   p.parts.chipsats.show();
@@ -56,8 +65,8 @@ test('a value on the board is struck through only when the build would replace i
   // The log gap is its own box, in the same card.
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1l' }, { tagName: 'INPUT', value: '0.1' });
   assert.match(p.sheet(), /data-build="p1l" value="0.1"/);
-  await p.fire('screen-chipsats', 'input', { 'data-build': 'lb' }, { tagName: 'INPUT', value: '0.5' });
-  assert.deepStrictEqual(struck(p.sheet()), ['SF7', 'every 60 s, log every 1 s', 'every 10 s, log every 0.05 s', 'log every 0.2 s']);
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0l' }, { tagName: 'INPUT', value: '10' });
+  assert.deepStrictEqual(struck(p.sheet()), ['SF7', 'every 60 s, log every 1 s', 'every 10 s, log every 0.05 s']);
 });
 
 test('a board with no settings block still gets the table and a Build and flash that works', async () => {
@@ -71,63 +80,87 @@ test('a board with no settings block still gets the table and a Build and flash 
   assert.equal(p.o.flashed, undefined, 'the first press only asks');
   await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
   assert.deepStrictEqual(Object.assign({}, p.o.flashed),
-    Object.assign({ uid: UID9, backup: true, csid: '9', sf: 7, dbm: 14 }, DEFAULT_RATES, { embedded: 'built', module: 'le' }));
+    Object.assign({ uid: UID9, backup: false, csid: '9', sf: 7, dbm: 14 }, DEFAULT_RATES, { embedded: 'built', module: 'le' }));
 });
 
 test('each phase has its own gap and its own battery table, edited in its card', async () => {
   const p = await chipsats({ read: FLIGHT, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
   let h = p.sheet();
   assert.match(h, /<h3>Phases<\/h3>/);
-  assert.equal((h.match(/class="phase"/g) || []).length, 3, 'three phases: falling is never entered');
-  assert.match(h, /Waiting[\s\S]*In the air[\s\S]*Landed/);
-  assert.doesNotMatch(h, /Falling/);
+  assert.equal((h.match(/class="phase"/g) || []).length, 2, 'two phases, ground and air');
+  assert.match(h, /phase-name">Ground<[\s\S]*phase-name">Air</);
+  assert.doesNotMatch(h, /Falling|Landed|Waiting/);
   assert.match(h, /data-build="p0s" value="60"/);
   assert.match(h, /data-build="p1s" value="10"/);
-  assert.doesNotMatch(h, /data-build="p2s"/);
+  assert.doesNotMatch(h, /data-build="p2/);
+  assert.match(h, /data-build="p0l" value="1"/);
   assert.match(h, /data-build="p1l" value="0.05"/);
-  assert.match(h, /data-build="lb" value="0.2"/);
+  // blind gap has no box, the board's value is written back
+  assert.doesNotMatch(h, /data-build="lb"/);
+  assert.doesNotMatch(h, /No altitude source|blind/);
   assert.match(h, /30 m on GPS/);
-  assert.equal((h.match(/follow the battery/g) || []).length, 3, 'a switch per phase');
+  assert.match(h, /0 writes nothing/);
+  assert.match(h, /On the ground the readings mostly stay in the board's RAM, and only one per ground log gap reaches flash\./);
+  assert.equal((h.match(/follow the battery/g) || []).length, 2, 'a switch per phase');
   assert.doesNotMatch(h, /class="bands"/, 'no bands while nothing follows');
   assert.deepStrictEqual(struck(h), []);
-  // Landed follows the battery: its bands appear, the others' do not, and only its row is replaced.
-  await p.fire('screen-chipsats', 'change', { 'data-build': 'p3f' }, { tagName: 'INPUT', type: 'checkbox', checked: true });
+  // Ground follows the battery: its bands appear, the air's do not, and only its row is replaced.
+  await p.fire('screen-chipsats', 'change', { 'data-build': 'p0f' }, { tagName: 'INPUT', type: 'checkbox', checked: true });
   h = p.sheet();
   assert.equal((h.match(/class="bands"/g) || []).length, 1);
-  assert.match(h, /data-build="p3soc0" value="75"/);
-  assert.match(h, /data-build="p3ms4" value="180"/);
+  assert.match(h, /data-build="p0soc0" value="75"/);
+  assert.match(h, /data-build="p0ms4" value="180"/);
   assert.match(h, /while the gauge cannot be read/);
   assert.deepStrictEqual(struck(h), ['every 60 s, log every 1 s']);
-  await p.fire('screen-chipsats', 'input', { 'data-build': 'p3soc1' }, { tagName: 'INPUT', value: '60' });
-  await p.fire('screen-chipsats', 'input', { 'data-build': 'p3ms4' }, { tagName: 'INPUT', value: '300' });
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0soc1' }, { tagName: 'INPUT', value: '60' });
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0ms4' }, { tagName: 'INPUT', value: '300' });
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1s' }, { tagName: 'INPUT', value: '5' });
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0l' }, { tagName: 'INPUT', value: '0' });
   h = p.sheet();
-  assert.match(h, /landed by battery: 10 s above 75 %, 30 s to 60 %, 60 s to 35 %, 120 s to 20 %, then 300 s \(60 s when the gauge cannot be read\)/);
-  assert.match(h, /in the air every 5 s, log every 0.05 s/);
-  assert.deepStrictEqual(struck(h), ['every 10 s, log every 0.05 s', 'every 60 s, log every 1 s']);
+  assert.match(h, /ground by battery: 10 s above 75 %, 30 s to 60 %, 60 s to 35 %, 120 s to 20 %, then 300 s \(60 s when the gauge cannot be read\), log nothing written/);
+  assert.match(h, /air every 5 s, log every 0.05 s/);
+  assert.deepStrictEqual(struck(h), ['every 60 s, log every 1 s', 'every 10 s, log every 0.05 s']);
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
   const f = p.o.flashed;
-  assert.equal(f.fixed1, '5000');
-  assert.equal(f.follow3, '1');
-  assert.equal(f.soc3, '75,60,35,20');
-  assert.equal(f.socms3, '10000,30000,60000,120000,300000');
-  // The falling slot carries the air's values, log gap included.
-  assert.equal(f.fixed2, '5000');
-  assert.equal(f.follow2, '0');
-  assert.equal(f.soc2, '75,50,35,20');
-  assert.equal(f.log2, '50');
-  assert.equal(f.log0, '1000');
+  for (const i of [0, 3]) {
+    assert.equal(f['fixed' + i], '60000');
+    assert.equal(f['follow' + i], '1');
+    assert.equal(f['soc' + i], '75,60,35,20');
+    assert.equal(f['socms' + i], '10000,30000,60000,120000,300000');
+    assert.equal(f['log' + i], '0');
+  }
+  for (const i of [1, 2]) {
+    assert.equal(f['fixed' + i], '5000');
+    assert.equal(f['follow' + i], '0');
+    assert.equal(f['soc' + i], '75,50,35,20');
+    assert.equal(f['log' + i], '50');
+  }
   assert.equal(f.logblind, '200');
+});
+
+test('a board on firmware from before the two phases shows its other slots and is replaced in both', async () => {
+  // The block such a board was built with: rising and falling differ, and the blind gap is its own.
+  const p = await chipsats({ read: readOf(UID9, { kind: 'flight', module: 'le', id: 'c4fb204d8f79e725' },
+    block({ rates: [RATE(60000), RATE(10000), RATE(1000), RATE(60000)], logBlindMs: 500 })),
+  chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  const h = p.sheet();
+  assert.deepStrictEqual(struck(h), ['every 10 s, log every 0.05 s; falling slot every 1 s, log every 0.05 s'],
+    'the air is written into both slots, so the falling one is replaced');
+  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
+  await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
+  assert.equal(p.o.flashed.fixed2, '10000');
+  assert.equal(p.o.flashed.logblind, '500', 'the board\'s own blind gap goes back as it was');
 });
 
 test('a board from before the phases starts from the rates a fresh image ships', async () => {
   const p = await chipsats({ read: readOf(UID9, { kind: 'flight', module: 'le', id: 'c4fb204d8f79e725' }, block({ layoutVersion: 1, txIntervalMs: 1000, rates: null, logMs: null, logBlindMs: null })),
     chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
   const h = p.sheet();
-  assert.deepStrictEqual(struck(h), ['no phases in this firmware', 'no phases in this firmware', 'no phases in this firmware', '—'],
+  assert.deepStrictEqual(struck(h), ['no phases in this firmware', 'every 1 s (no phases in this firmware)'],
     'flashing gives it phases and log gaps, so every one is replaced');
   assert.match(h, /data-build="p0s" value="60"/, 'the draft starts from the defaults');
+  assert.match(h, /data-build="p0l" value="10"/, 'the ground logs every 10 s unless the board says otherwise');
 });
 
 test("the drone's flight controller is never offered as a console", async () => {
@@ -152,10 +185,47 @@ test('clear flash asks first, then runs the pull job told to wipe, and says so w
   assert.doesNotMatch(h, /data-wipego/);
   await p.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
   h = p.sheet();
-  assert.match(h, /Erases the flight log on <b>CS9<\/b> for good/);
+  // Nothing of CS9's was ever pulled here: the strongest warning.
+  assert.match(h, /<span class="mark bad">never pulled<\/span> <b>CS9<\/b> has never been pulled on this computer\. Clearing erases its flight log for good, and nothing is saved first\./);
+  assert.doesNotMatch(h, /Last pulled/);
   assert.match(h, /data-wipego="1" class="primary">Clear the flash</);
+  assert.match(h, /data-wipecancel="1">Cancel</);
   await p.fire('screen-chipsats', 'click', { 'data-wipecancel': '1' });
   assert.doesNotMatch(p.sheet(), /data-wipego/);
+});
+
+test('clearing a board pulled before says when, off the newest of its pulls, and that nothing is saved', async () => {
+  const now = new Date();
+  // Noon two days back on this laptop's calendar, and one a week back.
+  const twoDays = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2, 11, 49);
+  const week = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7, 9, 5);
+  const logs = [
+    { name: '2026-10-19/pulls/1149-board9/ground.log', bytes: 2000, when: twoDays.getTime() / 1000, kind: 'pull', uid: UID9 },
+    { name: '2026-10-14/pulls/0905-board9/ground.log', bytes: 1000, when: week.getTime() / 1000, kind: 'pull', uid: UID9 },
+    // Another board's newer pull is not this one's, and an old clear's image is not a pull.
+    { name: '2026-10-20/pulls/1000-board12/ground.log', bytes: 1000, when: now.getTime() / 1000 - 60, kind: 'pull', uid: UID12 },
+    { name: '2026-10-18/clears/1125-board9/1125-board9-002C002E.bin', bytes: 262144, when: now.getTime() / 1000 - 120, kind: 'image', uid: UID9 },
+  ];
+  const p = await chipsats({ read: FLIGHT, logs, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  await p.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
+  const h = p.sheet();
+  const at = twoDays.getDate() + ' ' + 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ')[twoDays.getMonth()] +
+    (twoDays.getFullYear() === now.getFullYear() ? '' : ' ' + twoDays.getFullYear()) + ', 11:49';
+  assert.ok(h.includes('Erases the flight log on <b>CS9</b> for good. Last pulled ' + at +
+    ' (2 days ago); anything it logged since is lost. Nothing is saved first.'), h);
+  assert.doesNotMatch(h, /never pulled/);
+  assert.match(h, /data-wipego="1" class="primary">Clear the flash</);
+});
+
+test('a running clear says nowhere it is saving, as it saves nothing', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })], boards: [{ port: '/dev/ttyUSB0', usb: '1a86:7523', state: 'waiting' }] });
+  // An older app still sent a clear's folder; it is not shown.
+  p.jobs.pull = { running: true, wipe: true, keepFsw: true, board: '/dev/ttyUSB0', seconds: 10, pct: 30, steps: [], dir: '/home/op/DeSCENT/2026-10-18/clears/1125-CS9', raw: null };
+  p.jobs.heard.forEach((fn) => fn([]));
+  const h = p.sheet();
+  assert.match(h, /Clearing the flash, console on \/dev\/ttyUSB0/);
+  assert.doesNotMatch(h, /Saving to/);
+  assert.doesNotMatch(h, /clears/);
 });
 
 test('with a flight software tree the pane says it builds, and names the module before it does', async () => {
@@ -184,7 +254,7 @@ test('with no tree the same button patches the carried image, says so, and sends
   await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
   // No module in the request: the app picks the image by the module it has for the board.
   assert.deepStrictEqual(Object.assign({}, p.o.flashed),
-    Object.assign({ uid: UID9, backup: true, csid: '9', sf: 12, dbm: 14 }, DEFAULT_RATES, { embedded: 'flight' }));
+    Object.assign({ uid: UID9, backup: false, csid: '9', sf: 12, dbm: 14 }, DEFAULT_RATES, { embedded: 'flight' }));
 });
 
 test('with no tree and no carried image for the module, the button is off and says why', async () => {
@@ -304,4 +374,139 @@ test('cancelling a forget forgets nothing', async () => {
   await p.fire('screen-chipsats', 'click', { 'data-forgetcancel': '1' });
   assert.doesNotMatch(p.sheet(), /data-forgetgo/);
   assert.equal(p.o.forgot, undefined);
+});
+
+test('a running pull says where it is saving, can be stopped, and a wrong console can be pulled anyway', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })], boards: [{ port: '/dev/ttyUSB0', usb: '1a86:7523', state: 'waiting' }] });
+  const repaint = () => p.jobs.heard.forEach((fn) => fn([]));
+  const dir = '/home/op/DeSCENT/2026-10-18/pulls/1432-CS9';
+  p.jobs.pull = { running: true, board: '/dev/ttyUSB0', seconds: 30, pct: 45, steps: [], dir, raw: null };
+  repaint();
+  let h = p.sheet();
+  assert.match(h, /Saving to <span class="path">\/home\/op\/DeSCENT\/2026-10-18\/pulls\/1432-CS9<\/span>/);
+  assert.match(h, /data-pullstop="1">Stop</);
+  p.jobs.pull.raw = '2026-10-18/pulls/1432-CS9/dump.txt';
+  repaint();
+  assert.match(p.sheet(), /Saving to <span class="path">\/home\/op\/DeSCENT\/2026-10-18\/pulls\/1432-CS9\/dump.txt<\/span>/);
+  await p.fire('screen-chipsats', 'click', { 'data-pullstop': '1' });
+  assert.equal(p.o.stops, 1);
+  p.jobs.pull.stopping = true;
+  repaint();
+  assert.match(p.sheet(), /data-pullstop="1" disabled>Stopping…/);
+
+  p.jobs.pull = { running: false, board: '/dev/ttyUSB0', steps: ['stop asked for'], keepFsw: true, restored: true, error: 'stopped by the operator', dir };
+  repaint();
+  h = p.sheet();
+  assert.match(h, /Pull stopped: stopped by the operator/);
+  assert.doesNotMatch(h, /Pull failed/);
+
+  p.jobs.pull = { running: false, board: '/dev/ttyUSB0', steps: [], keepFsw: true, restored: false,
+    error: "/dev/ttyUSB0 is not this board's console: nothing on it said it had started when the board was reset. Nothing was written." };
+  repaint();
+  h = p.sheet();
+  assert.match(h, /data-anyconsole="1"[^>]*>Pull anyway</);
+  await p.fire('screen-chipsats', 'click', { 'data-anyconsole': '1' });
+  assert.equal(p.o.pulled.port, '/dev/ttyUSB0');
+  assert.equal(p.o.pulled.more.anyConsole, 1);
+});
+
+test('a board shows its last saved flight software to put back and every log pulled off it', async () => {
+  const logs = [
+    { name: '2026-10-18/pulls/1432-board9/ground.log', bytes: 2000000, when: 1792348489, kind: 'pull', uid: UID9 },
+    { name: '2026-10-17/images/1454-board9-002C002E.bin', bytes: 262144, when: 1792263276, kind: 'image', uid: UID9 },
+    { name: '2026-10-17/pulls/1124-board9/ground.log', bytes: 1000, when: 1792200000, kind: 'pull', uid: UID9 },
+    { name: '2026-10-17/pulls/1509-board12/ground.log', bytes: 1000, when: 1792100000, kind: 'pull', uid: UID12 },
+  ];
+  const p = await chipsats({ read: FLIGHT, logs, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  const h = p.sheet();
+  assert.match(h, /Last saved flight software/);
+  assert.match(h, /data-putback="2026-10-17\/images\/1454-board9-002C002E.bin"[^>]*>Put back last saved flight software</);
+  assert.match(h, /2 pulls/);
+  assert.match(h, /data-openlog="2026-10-18\/pulls\/1432-board9\/ground.log"/);
+  assert.match(h, /data-openlog="2026-10-17\/pulls\/1124-board9\/ground.log"/);
+  assert.doesNotMatch(h, /1509-board12/, "another board's pull is not this one's");
+});
+
+// config.h changed, LE flight built, dump not built yet, HP bench failed
+const WORDS_LE = 'flight LE built here 14:02 from abc1234 + config.h changed';
+const part = (name, label, kind, module, more) => Object.assign({ part: name, label, kind, module, built: null, failed: null, carried: 'c4fb204d8f79e725', same: null }, more || {});
+const FSW = (more) => Object.assign({
+  ok: true, tree: '/home/op/DeSCENT-repo/fsw', on: true,
+  source: { hash: 'aa', commit: 'abc1234def', dirty: true, changed: ['V2_6_X_Code/src/config.h'], words: 'from abc1234 + config.h changed' },
+  parts: [
+    part('flight-le', 'flight LE', 'flight', 'le', { built: { part: 'flight-le', words: WORDS_LE, id: '0a1b2c3d4e5f6071' }, same: false }),
+    part('flight-hp', 'flight HP', 'flight', 'hp'),
+    part('flash_dump', 'dump firmware', 'dump', null),
+    part('bench-le', 'sensor bench LE', 'bench', 'le'),
+    part('bench-hp', 'sensor bench HP', 'bench', 'hp', { failed: 'the flight software did not build.\nsensor_bench.ino:40:3: error: expected \';\' before \'}\' token' }),
+    part('radio.json', 'radio table', 'radio', null),
+  ],
+  job: { running: false, pct: 0, note: '', steps: [], error: null, seconds: 0 },
+}, more || {});
+const HEALTH_ON = { fswTree: true, fswLocal: true, flightImages: [{ id: 'c4fb204d8f79e725', module: 'le', bytes: 63396 }] };
+
+test('the sheet says which tree, which commit and which files are changed, and each part as the app reports it', async () => {
+  const p = await chipsats({ fsw: FSW(), health: HEALTH_ON });
+  const h = p.sheet();
+  assert.match(h, /<h3>Flight software on this computer<\/h3>/);
+  assert.match(h, /<span class="path">\/home\/op\/DeSCENT-repo\/fsw<\/span>, from abc1234 \+ config.h changed/);
+  assert.match(h, /<input type="checkbox" data-fswon="1" checked> Use this computer's flight software/);
+  assert.match(h, /<span class="l">Flight LE<\/span><span class="grow"><span class="val">flight LE built here 14:02 from abc1234 \+ config.h changed<\/span> <span class="note">differs from the one this app carries<\/span>/);
+  assert.match(h, /<span class="l">Dump firmware<\/span><span class="grow"><span class="note">not built from these sources yet, built when first needed<\/span>/);
+  assert.match(h, /<span class="l">Sensor bench HP<\/span><span class="grow"><span class="mark bad">did not build<\/span> <span class="note">Nothing is written with it until it builds.<\/span><pre class="raw">the flight software did not build.\nsensor_bench.ino:40:3: error: expected (&#39;|')?;(&#39;|')? before (&#39;|')?}(&#39;|')? token<\/pre>/);
+  assert.match(h, /data-fswrebuild="1">Rebuild from this computer's flight software<\/button>/);
+});
+
+test('Rebuild starts the build and the sheet follows it; the switch is sent and the flashing way asked again', async () => {
+  const p = await chipsats({ fsw: FSW(), health: HEALTH_ON });
+  await p.fire('screen-chipsats', 'click', { 'data-fswrebuild': '1' });
+  assert.equal(p.o.rebuilds, 1);
+  assert.match(p.sheet(), /data-fswrebuild="1" disabled>Building…/);
+  assert.match(p.sheet(), /data-fswon="1" checked disabled>/, 'not switched while it builds');
+  p.o.fsw = FSW({ job: { running: false, pct: 83, note: '1 of 6 did not build', steps: ['x'], error: 'sensor bench HP: the flight software did not build.', seconds: 70 } });
+  const radios = p.o.radios;
+  await p.ticks(1);
+  assert.match(p.sheet(), /<p class="outcome bad inpane">1 of 6 did not build.<\/p>/);
+  assert.equal(p.o.radios, radios + 1, 'the radio table is asked again once a build ends');
+
+  const healths = p.o.healths;
+  await p.fire('screen-chipsats', 'change', { 'data-fswon': '1' }, { type: 'checkbox', checked: false });
+  assert.equal(p.o.mode, false);
+  assert.equal(p.o.healths, healths + 1);
+  assert.match(p.sheet(), /data-fswon="1"> Use this computer's flight software<\/label><span class="note">Off: they use the copies this app carries.<\/span>/);
+});
+
+test('a board running an image built here is named by where it came from, and so is the image about to be written', async () => {
+  const read = readOf(UID9, { kind: 'flight', module: 'le', id: '0a1b2c3d4e5f6071', built: { part: 'flight-le', words: WORDS_LE } }, block());
+  const p = await chipsats({ read, fsw: FSW(), health: HEALTH_ON, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  assert.match(p.sheet(), /<span class="l">On the board<\/span><span class="grow"><span class="val">Flight LE built here 14:02 from abc1234 \+ config.h changed<\/span>/);
+  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
+  assert.match(p.sheet(), /from this computer's tree with these settings to <b>CS9<\/b>. The image is the flight LE built here 14:02 from abc1234 \+ config.h changed./);
+  await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
+  assert.equal(p.o.flashed.embedded, 'built');
+});
+
+test('an HP image not built yet says it is built from the tree first', async () => {
+  const p = await chipsats({ fsw: FSW(), health: HEALTH_ON, chips: [Object.assign({}, CS9, { module: 'hp' })] });
+  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
+  assert.match(p.sheet(), /It is built from abc1234 \+ config.h changed first, about 13 seconds./);
+});
+
+test('with no tree the sheet says the carried images are used, and an older app gets no pane', async () => {
+  const none = await chipsats({ fsw: { ok: true, tree: null, on: false, source: null, parts: [], job: {} } });
+  assert.match(none.sheet(), /No flight software tree beside the app, so it uses the images it carries./);
+  assert.doesNotMatch(none.sheet(), /data-fswrebuild/);
+  const older = await chipsats({});
+  assert.doesNotMatch(older.sheet(), /Flight software on this computer/);
+});
+
+test('a pull says which dump firmware read it and which flight software was on the board', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  p.jobs.pull = {
+    running: false, board: '/dev/ttyUSB0', steps: ['done'], keepFsw: true, restored: true, error: null,
+    dir: '/home/op/DeSCENT/2026-10-22/pulls/1402-CS9', log: '2026-10-22/pulls/1402-CS9/ground.log',
+    report: { read: 2, found: 2, complete: true, firmware: { dump: { words: 'dump firmware built here 14:01 from abc1234 + FlashLog.cpp changed' }, onBoard: { kind: 'flight', module: 'le', built: { words: WORDS_LE } } } },
+  };
+  p.jobs.heard.forEach((fn) => fn([]));
+  assert.match(p.sheet(), /Read with the dump firmware built here 14:01 from abc1234 \+ FlashLog.cpp changed. On the board was the flight LE built here 14:02 from abc1234 \+ config.h changed./);
 });

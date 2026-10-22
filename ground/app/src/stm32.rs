@@ -214,18 +214,9 @@ fn main_flash(map: &[MemoryRegion]) -> Result<Range<u64>, String> {
     best.ok_or_else(|| format!("{} has no flash region in probe-rs's chip database", CHIP))
 }
 
-// descent-ground-fsw-rx1-2026-09-25T19-30-00.bin, the same shape as the log file names so
-// the two sort together in a field directory.
+// 1432-ttyACM1.bin when the board id isn't known
 pub fn backup_name(name_hint: &str, at: SystemTime) -> String {
-    format!("{}{}-{}.bin", OLDER_IMAGE_PREFIX, tidy(name_hint), stamp(at))
-}
-
-// 2026-09-25T19-30-00: no colons, because Windows will not have them in a file name.
-pub fn stamp(at: SystemTime) -> String {
-    humantime::format_rfc3339_seconds(at)
-        .to_string()
-        .replace(':', "-")
-        .replace('Z', "")
+    format!("{}-{}.bin", crate::layout::hhmm(at), crate::layout::board_word(name_hint))
 }
 
 // The hint is usually a port name or a board key, and both have to survive becoming part
@@ -269,17 +260,22 @@ pub fn uid_tail(uid: &str) -> &str {
     &uid[uid.len().saturating_sub(UID_TAIL)..]
 }
 
-// descent-image-20393256-Flight-spare-2-2026-09-25T19-30-00.bin: the board it came off is
-// in the name, because the name is all that is left to say so once the file is copied
-// somewhere else.
+// 1432-board9-20393256.bin, board in the name so it survives being copied elsewhere
 pub fn image_name(uid: &str, board: &str, at: SystemTime) -> String {
-    format!("{}{}-{}-{}.bin", IMAGE_PREFIX, uid_tail(uid), tidy(board), stamp(at))
+    format!("{}-{}.bin", crate::layout::hhmm(at), image_rest(uid, board))
 }
 
-// The end of the id of the board a saved image came off, when its name says. Images
-// saved before names carried one say nothing. Accepts both current and legacy prefixes.
+// What follows the time: board9-20393256
+pub fn image_rest(uid: &str, board: &str) -> String {
+    format!("{}-{}", crate::layout::board_word(board), uid_tail(uid))
+}
+
+// Also reads the older descent-image-20393256-... and descent-fsw-20393256-... names
 pub fn uid_in_name(name: &str) -> Option<String> {
     let file = name.rsplit('/').next().unwrap_or("");
+    if let Some(uid) = crate::layout::uid_in_image(file) {
+        return Some(uid);
+    }
     let rest = file
         .strip_prefix(IMAGE_PREFIX)
         .or_else(|| file.strip_prefix(LEGACY_IMAGE_PREFIX))?;
@@ -666,17 +662,14 @@ mod tests {
     #[test]
     fn a_saved_image_is_named_after_the_board_and_the_minute_it_was_read() {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
-        assert_eq!(
-            backup_name("rx1", at),
-            "descent-ground-fsw-rx1-2026-09-21T14-13-20.bin"
-        );
-        assert_eq!(
-            backup_name("/dev/ttyACM0", at),
-            "descent-ground-fsw-ttyACM0-2026-09-21T14-13-20.bin"
-        );
+        // local time, depends on this computer's zone
+        let hm = crate::layout::hhmm(at);
+        assert_eq!(backup_name("rx1", at), format!("{}-rx1.bin", hm));
+        assert_eq!(backup_name("/dev/ttyACM0", at), format!("{}-ttyACM0.bin", hm));
         // A hint with nothing usable in it still has to produce one file name.
-        assert!(backup_name("/", at).starts_with("descent-ground-fsw-board-"));
-        assert!(backup_name("", at).starts_with("descent-ground-fsw-board-"));
+        assert_eq!(backup_name("/", at), format!("{}-board.bin", hm));
+        assert_eq!(backup_name("", at), format!("{}-board.bin", hm));
+        assert_eq!(uid_in_name(&backup_name("/dev/ttyACM0", at)), None, "no id, so none is read off it");
         assert_eq!(tidy("chip sat #2"), "chip-sat--2");
     }
 
@@ -730,11 +723,11 @@ mod tests {
     fn a_saved_image_says_in_its_name_which_board_it_came_off() {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
         let uid = "0038002A5553500920393256";
-        assert_eq!(
-            image_name(uid, "Flight spare 2", at),
-            "descent-image-20393256-Flight-spare-2-2026-09-21T14-13-20.bin"
-        );
-        assert_eq!(image_name(uid, "", at), "descent-image-20393256-board-2026-09-21T14-13-20.bin");
+        let hm = crate::layout::hhmm(at);
+        assert_eq!(image_name(uid, "Flight spare 2", at), format!("{}-Flight-spare-2-20393256.bin", hm));
+        assert_eq!(image_name(uid, "9", at), format!("{}-board9-20393256.bin", hm));
+        assert_eq!(image_name(uid, "", at), format!("{}-board-20393256.bin", hm));
+        assert_eq!(uid_in_name(&format!("2026-10-18/pulls/1432-board9/{}", image_name(uid, "9", at))).as_deref(), Some("20393256"));
 
         assert_eq!(uid_in_name(&image_name(uid, "Flight spare 2", at)).as_deref(), Some("20393256"));
         assert_eq!(uid_in_name(&image_name(uid, "", at)).as_deref(), Some("20393256"));

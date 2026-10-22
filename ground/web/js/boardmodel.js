@@ -100,9 +100,12 @@
   // operator set for the board. Only the dump firmware and the flight images this app
   // carries can be told; anything else is said to be not recognised, which is not the
   // same as flight software and not the same as fine.
+  // fw.built e.g. "flight LE built here 14:02 from abc1234"
   function firmwareWords(fw, remembered) {
-    const none = { kind: '', head: '', value: '', note: '', mismatch: '', bad: false };
+    const none = { kind: '', head: '', value: '', note: '', mismatch: '', bad: false, built: '' };
     if (!fw || !fw.kind) return none;
+    const built = fw.built && fw.built.words ? String(fw.built.words) : '';
+    const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
     if (fw.kind === 'dump') {
       // A build that does not say which dump it found is taken to mean its own. The id goes in the
       // same way the flight case carries one, so two dump images can be told apart on sight.
@@ -112,21 +115,34 @@
         kind: 'dump',
         head: 'running ' + which.charAt(0).toLowerCase() + which.slice(1) + ', not flight software',
         value: which,
+        built,
         note: 'Not flight software. This board transmits nothing until flight software is on it.',
         bad: true,
       });
     }
+    if (fw.kind === 'bench') {
+      const forModule = MODULE[fw.module] || '';
+      return Object.assign({}, none, {
+        kind: 'bench',
+        head: 'running the sensor bench, not flight software',
+        value: 'Sensor bench' + (forModule ? ' for the ' + forModule + ' module' : ''),
+        note: 'Not flight software. It tests the sensors and sends as board 254. Write flight software before it flies.',
+        bad: true,
+        built,
+      });
+    }
     if (fw.kind === 'flight') {
-      const built = MODULE[fw.module] || '';
+      const forModule = MODULE[fw.module] || '';
       return Object.assign({}, none, {
         kind: 'flight',
-        value: 'Flight software' + (fw.id ? ' ' + String(fw.id).slice(0, 8) : '') + (built ? ' for the ' + built + ' module' : ''),
-        mismatch: built && MODULE[remembered] && remembered !== fw.module
-          ? 'This image is for the ' + built + ' module and the board is marked ' + MODULE[remembered] + '.' : '',
+        value: built ? cap(built) : 'Flight software' + (fw.id ? ' ' + String(fw.id).slice(0, 8) : '') + (forModule ? ' for the ' + forModule + ' module' : ''),
+        mismatch: forModule && MODULE[remembered] && remembered !== fw.module
+          ? 'This image is for the ' + forModule + ' module and the board is marked ' + MODULE[remembered] + '.' : '',
+        built,
       });
     }
     return Object.assign({}, none, {
-      kind: 'unknown', value: 'Not recognised', note: 'Not the dump firmware and not a flight image this app carries.',
+      kind: 'unknown', value: 'Not recognised', note: 'Not the dump firmware and not a flight image this app carries or this computer built.',
     });
   }
 
@@ -197,17 +213,22 @@
   // for the board's module has the settings written into its block. health is
   // /api/health; a build of the app from before it said which is taken to have a tree,
   // since building was all it did. stop is why nothing can be flashed this way.
+  // older apps only send fswTree and always built when they had one
   function flashWay(health, module) {
-    if (!health || health.fswTree !== false) {
+    const local = health && typeof health.fswLocal === 'boolean' ? health.fswLocal : (!health || health.fswTree !== false);
+    if (local) {
       return { way: 'build', verb: 'Build and flash', column: 'Build with', stop: '',
         says: 'A flight software tree is here, so this builds the exact image.' };
     }
+    const off = !!health && health.fswTree === true;
     const carried = { way: 'carried', verb: 'Patch and flash', column: 'Flash with', stop: '',
-      says: 'No flight software tree, so this patches the image this app carries.' };
+      says: off ? 'This computer\'s flight software is switched off, so this patches the image this app carries.'
+        : 'No flight software tree, so this patches the image this app carries.' };
     if (!module) return carried;
     const images = Array.isArray(health.flightImages) ? health.flightImages : [];
     if (images.some((i) => i.module === module)) return carried;
-    const none = 'No flight software tree, and this build carries no flight image for the ' + MODULE[module] + ' module. Flash a file instead.';
+    const none = (off ? 'This computer\'s flight software is switched off' : 'No flight software tree') +
+      ', and this build carries no flight image for the ' + MODULE[module] + ' module. Flash a file instead.';
     return Object.assign(carried, { says: none, stop: none });
   }
 
@@ -216,22 +237,24 @@
     return ms === 0 ? 'back to back' : String(Number((ms / 1000).toFixed(2))) + ' s';
   }
 
+  // Slot names from the firmware before 2026-10-22. Ground fills waiting and landed, air fills
+  // rising and falling, so older firmware still gets sensible gaps
   const PHASE_NAMES = ['waiting', 'rising', 'falling', 'landed'];
-  // The phases the board actually enters, as the page shows them. Falling is never entered: the
-  // air phase (rising) runs from the climb through the release and the fall, until landed. Its
-  // slot in the block is written with rising's values.
-  const PHASE_CARDS = [0, 1, 3];
-  const PHASE_LABELS = { waiting: 'Waiting', rising: 'In the air', falling: 'Falling', landed: 'Landed' };
+  const PHASES = [
+    { key: 'ground', label: 'Ground', slots: [0, 3] },
+    { key: 'air', label: 'Air', slots: [1, 2] },
+  ];
   // A block from before the phases (layout 1) has one gap, used from switch-on to the end.
   const NO_PHASES = 'no phases in this firmware';
 
-  // One phase's rate as the "On the board" column says it: "every 60 s", or what the phase
-  // follows on the battery and what it falls back to.
-  // A flash log gap in words. 0 is a record per IMU reading, the fastest anything changes.
-  function logWords(ms) {
-    return Number(ms) === 0 ? 'every reading' : 'every ' + intervalWords(ms);
+  // 0 means every IMU reading in the air, nothing written on the ground
+  function logWords(ms, phase) {
+    if (Number(ms) === 0) return phase === 'ground' ? 'nothing written' : 'every reading';
+    return 'every ' + intervalWords(ms);
   }
 
+  // One phase's rate as the "On the board" column says it: "every 60 s", or what the phase
+  // follows on the battery and what it falls back to.
   function rateWords(r) {
     if (!r) return NO_PHASES;
     if (!r.follow) return r.fixedMs === 0 ? 'back to back' : 'every ' + intervalWords(r.fixedMs);
@@ -258,17 +281,16 @@
       { key: 'sf', label: 'Spreading factor', onBoard: s ? 'SF' + s.sf : '—' },
       { key: 'dbm', label: 'Transmit power', onBoard: s ? dbmWords(s.dbm) : '—' },
     ];
-    // One row per phase. A layout-1 board has one gap and no phases: it is shown under
-    // falling, which is the phase that gap was for, and the others say so.
-    // A block from before the log gaps (layout 2) has rates and no logs: the words say the gap only.
-    PHASE_NAMES.forEach((name, i) => {
-      const r = s && s.rates ? s.rates[i] : null;
-      const log = s && s.logMs ? ', log ' + logWords(s.logMs[i]) : '';
-      const onBoard = !s ? '—' : r ? rateWords(r) + log
-        : name === 'falling' ? 'every ' + intervalWords(s.txIntervalMs) + ' (' + NO_PHASES + ')' : NO_PHASES;
-      rows.push({ key: name, label: PHASE_LABELS[name], onBoard });
+    // A second slot that differs (set by older firmware) is shown too. Layout 1 has one gap,
+    // shown under air since it was the old falling gap. Layout 2 has no log gaps
+    PHASES.forEach((ph) => {
+      const words = (i) => rateWords(s.rates[i]) + (s.logMs ? ', log ' + logWords(s.logMs[i], ph.key) : '');
+      const [first, second] = ph.slots;
+      const same = (a, b) => JSON.stringify(s.rates[a]) === JSON.stringify(s.rates[b]) && (!s.logMs || Number(s.logMs[a]) === Number(s.logMs[b]));
+      const onBoard = !s ? '—' : s.rates ? words(first) + (same(first, second) ? '' : '; ' + PHASE_NAMES[second] + ' slot ' + words(second))
+        : ph.key === 'air' ? 'every ' + intervalWords(s.txIntervalMs) + ' (' + NO_PHASES + ')' : NO_PHASES;
+      rows.push({ key: ph.key, label: ph.label, onBoard });
     });
-    rows.push({ key: 'blind', label: 'No altitude source', onBoard: s && s.logBlindMs != null ? 'log ' + logWords(s.logBlindMs) : '—' });
     if (!s) {
       // What the app said about the block it could not give, as it said it.
       if (error) return { rows, module: '', setBy: '', disagree: '', line: String(error), damaged: /damaged/i.test(String(error)) };
@@ -295,7 +317,7 @@
   // phases is always replaced in every phase: flashing gives it them.
   function buildDiffers(settings, remembered, draft) {
     const s = settings;
-    const none = { module: false, csid: false, sf: false, dbm: false, waiting: false, rising: false, falling: false, landed: false };
+    const none = { module: false, csid: false, sf: false, dbm: false, ground: false, air: false };
     if (!s || !draft) return none;
     const typed = (v) => (/^\s*-?\d+(\.\d+)?\s*$/.test(String(v)) ? Number(v) : NaN);
     const out = {
@@ -304,16 +326,17 @@
       sf: typed(draft.sf) !== Number(s.sf),
       dbm: typed(draft.dbm) !== Number(s.dbm),
     };
-    // A board from before the log gaps is replaced in every phase too: flashing gives it them.
-    PHASE_NAMES.forEach((name, i) => {
-      const r = s.rates ? s.rates[i] : null;
-      const same = !!r && Math.round(typed(draft['p' + i + 's']) * 1000) === Number(r.fixedMs) && !!draft['p' + i + 'f'] === !!r.follow &&
-        r.percent.every((p, k) => typed(draft['p' + i + 'soc' + k]) === Number(p)) &&
-        r.intervalMs.every((ms, k) => Math.round(typed(draft['p' + i + 'ms' + k]) * 1000) === Number(ms)) &&
-        !!s.logMs && Math.round(typed(draft['p' + i + 'l']) * 1000) === Number(s.logMs[i]);
-      out[name] = !same;
+    // boxes go into both slots, so either slot differing counts. No log gaps on the board counts too
+    PHASES.forEach((ph, n) => {
+      const same = ph.slots.every((i) => {
+        const r = s.rates ? s.rates[i] : null;
+        return !!r && Math.round(typed(draft['p' + n + 's']) * 1000) === Number(r.fixedMs) && !!draft['p' + n + 'f'] === !!r.follow &&
+          r.percent.every((p, k) => typed(draft['p' + n + 'soc' + k]) === Number(p)) &&
+          r.intervalMs.every((ms, k) => Math.round(typed(draft['p' + n + 'ms' + k]) * 1000) === Number(ms)) &&
+          !!s.logMs && Math.round(typed(draft['p' + n + 'l']) * 1000) === Number(s.logMs[i]);
+      });
+      out[ph.key] = !same;
     });
-    if (s.logBlindMs == null || Math.round(typed(draft.lb) * 1000) !== Number(s.logBlindMs)) out.waiting = true;
     return out;
   }
 
@@ -397,6 +420,6 @@
 
   return {
     MODULE, uidWords, sameBoard, chipName, firmwareWords, stillOnProbe, probesChanged, probeToRead, probeToAutoRead, swapSeen, readButton, readToast, dropChoice, chipList, stepList, powerOptions, sfOptions, dbmWords,
-    flashWay, settingsTable, buildDiffers, rateWords, PHASE_NAMES, PHASE_CARDS, PHASE_LABELS, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal,
+    flashWay, settingsTable, buildDiffers, rateWords, logWords, PHASE_NAMES, PHASES, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal,
   };
 });
