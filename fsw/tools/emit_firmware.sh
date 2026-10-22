@@ -1,6 +1,7 @@
 #!/bin/sh
 # Rebuilds everything firmware/ holds from the tree it sits in: the dump sketch, one default flight
-# image per radio module with flight.json describing them, and radio.json from the real headers.
+# image per radio module with flight.json describing them, the sensor bench sketch per radio module,
+# and radio.json from the real headers.
 # Run from fsw/:  ./tools/emit_firmware.sh [OUT]       OUT is firmware/ unless given
 # CI runs this and fails when the result differs from what is committed, so an image that has
 # fallen behind the source cannot ship. The build is reproducible: same source, same bytes.
@@ -33,9 +34,18 @@ for pair in "le:1" "hp:2"; do
 done
 printf '\n  ]\n}\n' >> "$out/flight.json"
 
+# The sensor bench, one per module because the module decides the amplifier. It sets its own id,
+# spreading factor and power, so nothing is passed but the module
+for pair in "le:1" "hp:2"; do
+  name=${pair%%:*}; module=${pair##*:}
+  ./build.sh build --sketch sensor_bench -DCHIPSAT_RADIO_MODULE=$module >/dev/null
+  cp build/chipsat.bin "$out/bench-$name.bin"
+  cp build/chipsat.elf "$out/bench-$name.elf"
+done
+
 ./tools/emit_radio_json.sh > "$out/radio.json"
 
 # Leave the tree configured for the flight software with its own defaults, as a build after a
 # checkout would be, so the next ./build.sh flash is not a bench sketch.
 ./build.sh build >/dev/null
-echo "wrote $out: flash_dump, flight-le, flight-hp, flight.json, radio.json"
+echo "wrote $out: flash_dump, flight-le, flight-hp, flight.json, bench-le, bench-hp, radio.json"
