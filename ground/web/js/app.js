@@ -65,8 +65,11 @@
 
   // Every line from every connected receiver is recorded, whichever unit is on screen.
   // The native app or Web Serial, depending on where the page was loaded from.
+  // for screens that want every line, e.g. Bench
+  const taps = [];
   const hub = DG.makeHub((rx, text) => {
     const t = Date.now();
+    for (const tap of taps) tap(rx, text, t);
     const result = ingestLine(live, rx, text, t);
     recorder.add(t, rx, text, result === 'new' || result === 'duplicate' || result === 'badcrc');
     if (settings.autosave) autosave.add(R.formatLine(t, rx, text));
@@ -1134,7 +1137,7 @@
   showView('live');
 
   window.DGApp = Object.assign(api, {
-    live, view, hub, recorder, autosave, startReplay, seek, settings: () => settings,
+    live, view, hub, recorder, autosave, startReplay, seek, settings: () => settings, taps,
     showView, openServerLog, rxName,
     // The plots were sized for a hidden box while another screen was up.
     redraw: () => { render(true); charts.resize(); },

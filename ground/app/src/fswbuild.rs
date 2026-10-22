@@ -48,19 +48,25 @@ fn is_tree(at: &Path) -> bool {
     at.join("build.sh").is_file() && at.join("V2_6_X_Code").is_dir()
 }
 
-/// Runs the build for one radio module and returns the image. About 13 s, because changing a -D
-/// forces a fresh configure rather than reusing the last build's objects. The board's settings are
-/// not compiled in: the built image carries a settings block with the repo's defaults, and the
-/// caller patches that block, the same way it patches the image the app carries. One way of
-/// writing settings, so a damaged block always falls back to the same thing, the repo's defaults
-pub fn build(at: &Path, module: &str) -> Result<Vec<u8>, String> {
-    let module = match module {
-        "le" => 1,
-        "hp" => 2,
-        other => return Err(format!("{:?} is not a radio module; it is le or hp", other)),
+// everything shares the tree's build/, so one at a time
+static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// Same flags as tools/emit_firmware.sh, part names as in fsw/firmware. ~13 s each since a new -D
+// forces a reconfigure. Flight images only get the module so config.h edits stick; board
+// settings get patched into the block afterwards like the carried image
+pub fn build_part(at: &Path, part: &str) -> Result<Vec<u8>, String> {
+    let args: &[&str] = match part {
+        "flight-le" => &["build", "-DCHIPSAT_RADIO_MODULE=1"],
+        "flight-hp" => &["build", "-DCHIPSAT_RADIO_MODULE=2"],
+        "flash_dump" => &["build", "--sketch", "flash_dump"],
+        "bench-le" => &["build", "--sketch", "sensor_bench", "-DCHIPSAT_RADIO_MODULE=1"],
+        "bench-hp" => &["build", "--sketch", "sensor_bench", "-DCHIPSAT_RADIO_MODULE=2"],
+        "radio.json" => return radio_json(at),
+        other => return Err(format!("{:?} is not something the flight software builds", other)),
     };
+    let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let out = std::process::Command::new("./build.sh")
-        .args(["build", &format!("-DCHIPSAT_RADIO_MODULE={}", module)])
+        .args(args)
         .current_dir(at)
         .output()
         .map_err(|e| format!("cannot run {}/build.sh: {}", at.display(), e))?;
@@ -79,6 +85,138 @@ pub fn build(at: &Path, module: &str) -> Result<Vec<u8>, String> {
         return Err(format!("{} is empty", bin.display()));
     }
     Ok(bytes)
+}
+
+// needs g++ on the laptop
+fn radio_json(at: &Path) -> Result<Vec<u8>, String> {
+    let out = std::process::Command::new("sh")
+        .arg("tools/emit_radio_json.sh")
+        .current_dir(at)
+        .output()
+        .map_err(|e| format!("cannot run {}/tools/emit_radio_json.sh: {}", at.display(), e))?;
+    if !out.status.success() {
+        return Err(format!("the radio table did not build.\n{}", refusal(&out.stderr, &out.stdout)));
+    }
+    if out.stdout.is_empty() {
+        return Err(String::from("tools/emit_radio_json.sh printed nothing"));
+    }
+    Ok(out.stdout)
+}
+
+// source hash is the cache key, the git bits are what gets shown
+#[derive(Debug, Clone, PartialEq)]
+pub struct Origin {
+    pub source: String,
+    pub commit: Option<String>,   // None outside a git checkout
+    pub dirty: Option<bool>,
+    pub changed: Vec<String>,     // relative to the tree, sources only
+}
+
+// tests and test data left out so editing a test doesn't invalidate every image
+const SOURCE_DIRS: &[&str] = &["V2_6_X_Code", "V2_6_X_Tests/bench", "V2_6_X_Tests/test/mock", "cmake"];
+const SOURCE_FILES: &[&str] = &["CMakeLists.txt", "build.sh", "tools/emit_radio_json.sh"];
+
+pub fn is_source(rel: &str) -> bool {
+    let rel = rel.trim_start_matches("./");
+    if rel.split('/').any(|part| part.starts_with('.') || part == "__pycache__") {
+        return false;
+    }
+    SOURCE_FILES.contains(&rel)
+        || SOURCE_DIRS.iter().any(|d| rel.starts_with(&format!("{}/", d)))
+        || rel
+            .strip_prefix("V2_6_X_Tests/test/")
+            .map(|r| r.starts_with("emit_") && r.ends_with(".cpp") && !r.contains('/'))
+            .unwrap_or(false)
+}
+
+pub fn sources(at: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = e.path();
+            let rel = path.strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+            match e.file_type() {
+                Ok(t) if t.is_dir() => {
+                    if !e.file_name().to_string_lossy().starts_with('.') {
+                        walk(root, &path, out)
+                    }
+                }
+                Ok(_) if is_source(&rel) => out.push(rel),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for d in SOURCE_DIRS.iter().chain(["V2_6_X_Tests/test"].iter()) {
+        walk(at, &at.join(d), &mut out);
+    }
+    for f in SOURCE_FILES {
+        if at.join(f).is_file() {
+            out.push(f.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+// an unreadable file still changes the hash
+pub fn source_hash(at: &Path, files: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for f in files {
+        h.update(f.as_bytes());
+        h.update([0]);
+        match std::fs::read(at.join(f)) {
+            Ok(bytes) => {
+                h.update((bytes.len() as u64).to_le_bytes());
+                h.update(&bytes);
+            }
+            Err(_) => h.update(b"unreadable"),
+        }
+    }
+    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// git is optional, a copied-out tree just has no commit
+pub fn origin(at: &Path) -> Origin {
+    let source = source_hash(at, &sources(at));
+    let git = |args: &[&str]| -> Option<Vec<u8>> {
+        let out = std::process::Command::new("git").arg("-C").arg(at).args(args).output().ok()?;
+        out.status.success().then_some(out.stdout)
+    };
+    let Some(commit) = git(&["rev-parse", "HEAD"]).map(|b| String::from_utf8_lossy(&b).trim().to_string()).filter(|c| !c.is_empty()) else {
+        return Origin { source, commit: None, dirty: None, changed: Vec::new() };
+    };
+    let prefix = git(&["rev-parse", "--show-prefix"]).map(|b| String::from_utf8_lossy(&b).trim().to_string()).unwrap_or_default();
+    let status = git(&["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]);
+    let changed = match &status {
+        Some(bytes) => changed_sources(bytes, &prefix),
+        None => Vec::new(),
+    };
+    Origin { source, commit: Some(commit), dirty: status.map(|_| !changed.is_empty()), changed }
+}
+
+// porcelain paths are repo-relative. With -z a rename is followed by its old name, skip that
+fn changed_sources(status: &[u8], prefix: &str) -> Vec<String> {
+    let text = String::from_utf8_lossy(status);
+    let mut out = Vec::new();
+    let mut entries = text.split('\0');
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (code, path) = (&entry[..2], &entry[3..]);
+        if code.contains('R') || code.contains('C') {
+            entries.next();
+        }
+        let rel = path.strip_prefix(prefix).unwrap_or(path);
+        if is_source(rel) {
+            out.push(rel.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// The compiler's own reason, which for a setting it will not accept is a static_assert naming the
@@ -112,13 +250,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_module_that_is_not_le_or_hp_is_refused_before_anything_runs() {
-        assert!(build(Path::new("/nonexistent"), "xp").unwrap_err().contains("not a radio module"));
-    }
-
-    #[test]
     fn a_missing_tree_says_which_path_it_tried() {
-        let e = build(Path::new("/nonexistent"), "le").unwrap_err();
+        let e = build_part(Path::new("/nonexistent"), "flight-le").unwrap_err();
+        assert!(e.contains("/nonexistent"), "{}", e);
+        let e = build_part(Path::new("/nonexistent"), "radio.json").unwrap_err();
         assert!(e.contains("/nonexistent"), "{}", e);
     }
 
@@ -134,6 +269,99 @@ mod tests {
     fn with_nothing_to_go_on_the_last_lines_are_kept() {
         let text = refusal(b"", b"something went wrong\nand then stopped\n");
         assert!(text.contains("and then stopped"), "{}", text);
+    }
+
+    #[test]
+    fn a_part_the_flight_software_does_not_build_is_refused_before_anything_runs() {
+        let e = build_part(Path::new("/nonexistent"), "flight-xp").unwrap_err();
+        assert!(e.contains("not something the flight software builds"), "{}", e);
+    }
+
+    #[test]
+    fn the_sources_are_what_a_build_reads_and_not_the_tests_or_the_output() {
+        for yes in [
+            "V2_6_X_Code/src/config.h",
+            "V2_6_X_Code/V2_6_X_Code.ino",
+            "V2_6_X_Tests/bench/flash_dump/flash_dump.ino",
+            "V2_6_X_Tests/test/mock/Arduino.h",
+            "V2_6_X_Tests/test/emit_radio_table.cpp",
+            "cmake/chipsat.cmake",
+            "CMakeLists.txt",
+            "build.sh",
+            "tools/emit_radio_json.sh",
+        ] {
+            assert!(is_source(yes), "{}", yes);
+        }
+        for no in [
+            "V2_6_X_Tests/test/test_phase.cpp",
+            "V2_6_X_Tests/test/data/drop.csv",
+            "V2_6_X_Tests/test/data/emit_x.cpp",
+            "build/chipsat.bin",
+            "deps/ninja/ninja",
+            "firmware/flight-le.bin",
+            "tools/descent_decode.py",
+            "V2_6_X_Code/src/.config.h.swp",
+            "README.md",
+        ] {
+            assert!(!is_source(no), "{}", no);
+        }
+    }
+
+    fn fake_tree(what: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fswbuild-{}-{}", what, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["V2_6_X_Code/src", "V2_6_X_Tests/test/data", "build"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("build.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("V2_6_X_Code/src/config.h"), "#define CHIPSAT_ID 255\n").unwrap();
+        std::fs::write(dir.join("V2_6_X_Tests/test/data/x.csv"), "1,2\n").unwrap();
+        std::fs::write(dir.join("build/chipsat.bin"), "out").unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_source_hash_moves_with_a_source_and_not_with_anything_else() {
+        let dir = fake_tree("hash");
+        let files = sources(&dir);
+        assert_eq!(files, vec!["V2_6_X_Code/src/config.h".to_string(), "build.sh".to_string()]);
+        let before = source_hash(&dir, &files);
+        assert_eq!(before.len(), 64);
+        assert_eq!(source_hash(&dir, &sources(&dir)), before, "the same files hash the same");
+        std::fs::write(dir.join("build/chipsat.bin"), "other output").unwrap();
+        std::fs::write(dir.join("V2_6_X_Tests/test/data/x.csv"), "3,4\n").unwrap();
+        assert_eq!(source_hash(&dir, &sources(&dir)), before, "output and test data are not sources");
+        std::fs::write(dir.join("V2_6_X_Code/src/config.h"), "#define CHIPSAT_ID 254\n").unwrap();
+        assert_ne!(source_hash(&dir, &sources(&dir)), before, "a changed constant is a new source");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_status_is_read_as_the_changed_sources_relative_to_the_tree() {
+        let status = b" M fsw/V2_6_X_Code/src/config.h\0?? fsw/V2_6_X_Tests/bench/sensor_bench/sensor_bench.ino\0 M fsw/V2_6_X_Tests/test/test_phase.cpp\0R  fsw/V2_6_X_Code/src/New.h\0fsw/V2_6_X_Code/src/Old.h\0 M fsw/README.md\0";
+        assert_eq!(
+            changed_sources(status, "fsw/"),
+            vec![
+                "V2_6_X_Code/src/New.h".to_string(),
+                "V2_6_X_Code/src/config.h".to_string(),
+                "V2_6_X_Tests/bench/sensor_bench/sensor_bench.ino".to_string(),
+            ]
+        );
+        assert!(changed_sources(b"", "fsw/").is_empty());
+    }
+
+    #[test]
+    fn a_tree_outside_any_checkout_has_a_source_hash_and_no_commit() {
+        let dir = fake_tree("nogit");
+        // temp dir could be inside a checkout
+        let inside = std::process::Command::new("git").arg("-C").arg(&dir).args(["rev-parse", "HEAD"]).output().map(|o| o.status.success()).unwrap_or(false);
+        let o = origin(&dir);
+        assert_eq!(o.source, source_hash(&dir, &sources(&dir)));
+        if !inside {
+            assert_eq!((o.commit, o.dirty), (None, None));
+            assert!(o.changed.is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

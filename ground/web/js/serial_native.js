@@ -133,7 +133,7 @@
     async flash(port, sf, image, keepBackup) {
       const body = { port, sf: Number(sf) };
       if (image) body.image = image;
-      if (keepBackup === false) body.backup = 0;
+      body.backup = keepBackup ? 1 : 0;
       const r = await fetch('/api/flash', { method: 'POST', body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({ ok: false, error: 'HTTP ' + r.status }));
       if (!j.ok) throw new Error(j.error || 'flash failed');
@@ -206,6 +206,14 @@
         method: 'POST',
         body: JSON.stringify(Object.assign({ port, keepFsw: keepFsw ? 1 : 0 }, more)),
       });
+      const j = await r.json().catch(() => ({ ok: false }));
+      if (!j.ok) throw new Error(j.error || 'HTTP ' + r.status);
+      return j;
+    }
+
+    // pull keeps what arrived and puts the flight software back
+    async pullStop() {
+      const r = await fetch('/api/pull/stop', { method: 'POST' });
       const j = await r.json().catch(() => ({ ok: false }));
       if (!j.ok) throw new Error(j.error || 'HTTP ' + r.status);
       return j;
@@ -288,6 +296,7 @@
       if (o.force) q.set('force', '1');
       // Either way the board's settings go on the query. The module goes only with a
       // build: the carried image is picked by the module the app has for the board.
+      if (o.embedded === 'bench' && o.module) q.set('module', o.module);
       if (o.embedded === 'built' || o.embedded === 'flight') {
         const keys = [['module', o.module], ['csid', o.csid], ['sf', o.sf], ['dbm', o.dbm]];
         // One rate per phase, waiting, rising, falling, landed: fixed0..3 in ms, follow0..3
@@ -307,6 +316,13 @@
       return j;
     }
 
+    // sends R, the bench toggles its radio
+    async benchRadio(port) {
+      const j = await answered(await fetch('/api/bench/radio?' + new URLSearchParams({ port }), { method: 'POST' }));
+      if (!j.ok) throw new Error(j.error || 'the board was not told');
+      return j;
+    }
+
     // Asked for rather than pushed, like pullState.
     async chipJob() {
       return answered(await fetch('/api/chip/job'));
@@ -319,6 +335,23 @@
 
     async health() {
       return answered(await fetch('/api/health'));
+    }
+
+    async fsw() {
+      return answered(await fetch('/api/fsw'));
+    }
+
+    async fswMode(on) {
+      const j = await answered(await fetch('/api/fsw/mode', { method: 'POST', body: JSON.stringify({ on: on ? 1 : 0 }) }));
+      if (!j.ok) throw new Error(j.error || 'the switch was not changed');
+      return j;
+    }
+
+    // returns straight away, poll fsw()
+    async fswRebuild() {
+      const j = await answered(await fetch('/api/fsw/rebuild', { method: 'POST' }));
+      if (!j.ok) throw new Error(j.error || 'the build did not start');
+      return j;
     }
 
     // A pull's report.json, by the name logs() gives the pull's folder.

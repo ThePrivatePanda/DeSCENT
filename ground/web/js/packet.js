@@ -51,7 +51,7 @@
     { key: 'counter', label: 'Packet counter', unit: '', type: 'u16', scale: 1, group: null, csvDecimals: 0 },
     { key: 'csid', label: 'CSID', unit: '', type: 'u8', scale: 1, group: null, csvDecimals: 0 },
     // Since 2026-10-17 the byte is the cell voltage above 2.5 V in 10 mV steps (2.5 to 5.05 V).
-    // Before that it was percent x2; logs from then read 4 % as 2.52 V, which is accepted.
+    // Before that it was percent x2; logs from then read 4 % (byte 8) as 2.58 V, which is accepted.
     { key: 'battery', label: 'Cell voltage', unit: 'V', type: 'u8', scale: 100, base: 2.5, group: 'soc', csvDecimals: 2 },
     { key: 'validity', label: 'Validity', unit: '', type: 'u8', scale: 1, group: null, csvDecimals: 0 },
   ];

@@ -54,6 +54,9 @@ pub fn firmware_words(text: &str) -> Option<(&'static str, Option<&'static str>)
         "flight" => Some(("flight", None)),
         "flight-le" => Some(("flight", Some("le"))),
         "flight-hp" => Some(("flight", Some("hp"))),
+        "bench-le" => Some(("bench", Some("le"))),
+        "bench-hp" => Some(("bench", Some("hp"))),
+        "bench" => Some(("bench", None)),
         _ => None,
     }
 }
@@ -66,7 +69,7 @@ pub fn clean_name(name: &str) -> String {
 }
 
 const HEADER: &str = "# ChipSats this laptop has had on the probe, one per line. Written by DeSCENT Ground.\n\
-# chip <id> <le|hp|-> <last seen, unix seconds> <dump|flight-le|flight-hp|unknown|-> <what you call it>\n";
+# chip <id> <le|hp|-> <last seen, unix seconds> <dump|flight-le|flight-hp|bench-le|bench-hp|unknown|-> <what you call it>\n";
 
 // The next word of a line and what follows it.
 pub fn word(rest: &str) -> Option<(&str, &str)> {
@@ -153,6 +156,8 @@ impl Registry {
                 let firmware = match (c.firmware, c.firmware_module) {
                     (Some("flight"), Some("le")) => "flight-le",
                     (Some("flight"), Some("hp")) => "flight-hp",
+                    (Some("bench"), Some("le")) => "bench-le",
+                    (Some("bench"), Some("hp")) => "bench-hp",
                     (Some(word), _) => word,
                     (None, _) => "-",
                 };
@@ -184,6 +189,15 @@ impl Registry {
 
     pub fn get(&self, uid: &str) -> Option<&Chip> {
         self.chips.iter().find(|c| c.uid == uid)
+    }
+
+    // board9 -> the board named "9". Only way to tell for pulls from before board.txt with no image left
+    pub fn named(&self, word: &str) -> Option<String> {
+        let mut called = self.chips.iter().filter(|c| !c.name.is_empty() && crate::layout::board_word(&c.name) == word);
+        match (called.next(), called.next()) {
+            (Some(only), None) => Some(only.uid.clone()),
+            _ => None,
+        }
     }
 
     // The whole id of the one board whose id ends this way. A saved image's name only
@@ -300,6 +314,17 @@ mod tests {
         // Nothing is left beside it.
         let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
         assert_eq!(names, vec![FILE.to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_board_on_the_sensor_bench_is_still_on_it_after_a_restart_of_the_app() {
+        let dir = scratch("bench");
+        let mut r = Registry::load(&dir);
+        r.saw(A, "bench-hp", 1_790_000_000).unwrap();
+        let again = Registry::load(&dir);
+        let c = again.get(A).unwrap();
+        assert_eq!((c.firmware, c.firmware_module), (Some("bench"), Some("hp")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

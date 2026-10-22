@@ -203,6 +203,9 @@ pub struct Hub {
     // receiver id -> what this computer calls it. Shared with the reader threads, which
     // are the ones that see a board come back without its name.
     rx_names: Arc<Mutex<receivers::Names>>,
+    // open receivers missing from the listing, and for how many passes
+    missing: HashMap<String, u32>,
+    listing_failed: bool,          // said once, not every 2 s
 }
 
 // Called on every line a receiver sends. Only its header line changes anything, and the
@@ -265,6 +268,8 @@ impl Hub {
             boards: Vec::new(),
             store: None,
             rx_names: Arc::new(Mutex::new(receivers::Names::empty())),
+            missing: HashMap::new(),
+            listing_failed: false,
         }
     }
 
@@ -591,7 +596,25 @@ impl Hub {
 
     // Called every 2 s. Opens anything new, forgets anything unplugged.
     pub fn poll(&mut self) {
-        let found = serialport::available_ports().unwrap_or_default();
+        self.poll_found(serialport::available_ports());
+    }
+
+    // A failed listing changes nothing. Taken as "nothing plugged in" it would close and reopen
+    // every receiver, and each reopen pulses DTR and reboots the board. Not the cause of the
+    // 2026-10-17 reboots (that was the USB hub dropping off, docs 09)
+    fn poll_found(&mut self, listed: serialport::Result<Vec<serialport::SerialPortInfo>>) {
+        let found = match listed {
+            Ok(found) => {
+                self.listing_failed = false;
+                found
+            }
+            Err(e) => {
+                if !std::mem::replace(&mut self.listing_failed, true) {
+                    println!("could not list the serial ports, leaving the open ones as they are: {}", e);
+                }
+                return;
+            }
+        };
         let mut seen: Vec<String> = Vec::new();
         let mut boards: Vec<Board> = Vec::new();
         let mut present: HashSet<String> = HashSet::new();
@@ -687,10 +710,19 @@ impl Hub {
             let _ = self.tx.send(Event::Ports);
         }
 
+        // Two passes, since a port whose USB details failed to read once gets skipped above and
+        // closing it would reboot the board. A real unplug kills the reader straight away
         let gone: Vec<String> = self.open.keys().filter(|k| !seen.contains(k)).cloned().collect();
+        self.missing.retain(|k, _| gone.contains(k));
         for k in gone {
-            println!("{} unplugged", k);
-            self.close(&k);
+            let passes = self.missing.entry(k.clone()).or_insert(0);
+            *passes += 1;
+            let reading = self.open.get(&k).is_some_and(|o| o.status.lock().map(|s| s.as_str() == "open").unwrap_or(false));
+            if *passes >= 2 || !reading {
+                self.missing.remove(&k);
+                println!("{} unplugged", k);
+                self.close(&k);
+            }
         }
     }
 
@@ -1510,5 +1542,29 @@ mod tests {
         let mut hub = Hub::new(tx);
         let err = hub.send("rx9", "#GET\n").unwrap_err();
         assert!(err.contains("rx9"));
+    }
+
+    #[test]
+    fn a_listing_that_fails_or_misses_a_port_once_does_not_reboot_the_receivers() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut hub = Hub::new(tx);
+        hub.pretend_open("rx1", "/dev/ttyACM0");
+        hub.pretend_open("rx2", "/dev/ttyACM1");
+
+        let failed: serialport::Result<Vec<serialport::SerialPortInfo>> =
+            Err(serialport::Error::new(serialport::ErrorKind::Unknown, "sysfs went away"));
+        hub.poll_found(failed);
+        assert!(hub.open.contains_key("rx1") && hub.open.contains_key("rx2"), "a failed listing closed a receiver");
+
+        hub.poll_found(Ok(Vec::new()));
+        assert_eq!(hub.open.len(), 2, "one pass without them is not an unplug");
+        hub.poll_found(Ok(Vec::new()));
+        assert!(hub.open.is_empty(), "two passes without them is");
+
+        // a dead reader goes at once
+        hub.pretend_open("rx3", "/dev/ttyACM2");
+        *hub.open["rx3"].status.lock().unwrap() = String::from("closed");
+        hub.poll_found(Ok(Vec::new()));
+        assert!(hub.open.is_empty());
     }
 }

@@ -71,7 +71,9 @@
   function keptIn(logPath) {
     const p = logPath ? String(logPath) : '';
     const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-    return cut > 0 ? p.slice(0, cut) : '';
+    const dir = cut > 0 ? p.slice(0, cut) : '';
+    // <data>/<day>/logs
+    return dir.replace(/[\\/]\d{4}-\d{2}-\d{2}[\\/]logs$/, '');
   }
 
   const baseName = (p) => String(p || '').split(/[\\/]/).pop();
@@ -81,6 +83,16 @@
   // the date, so the date is taken out wherever it sits and what is left is the board.
   function boardPart(name) {
     const parts = String(name).split('/');
+    // <day>/<kind>/1432-board9/..., images 1101-board9-0027003A.bin, 1432-2-... for a second one that minute
+    if (/^\d{4}-\d{2}-\d{2}$/.test(parts[0]) && parts.length >= 3) {
+      const last = parts[parts.length - 1];
+      const image = /\.bin$/i.test(last);
+      let own = (image ? last : parts[2]).replace(/\.[a-z]+$/i, '');
+      if (!/^\d{4}-/.test(own)) return '';
+      own = own.replace(/^\d{4}-(?:\d{1,3}-)?/, '');
+      if (image) own = own.replace(/-[0-9a-f]{8}$/i, '');
+      return own === 'ground' ? '' : own;
+    }
     const own = parts.length > 1 && /\.bin$/i.test(parts[parts.length - 1]) ? parts[parts.length - 1] : parts[0];
     const m = /^descent-(?:ground-)?(pull|fsw|backup|image|chip)-(.*)$/.exec(own.replace(/\.[a-z]+$/i, ''));
     if (!m) return '';
@@ -96,7 +108,9 @@
   // opt.current: path of the log being written now. opt.names: uid -> the board's name.
   function rows(logs, opt) {
     const o = opt || {};
-    const current = baseName(o.current);
+    const current = String(o.current || '').replace(/\\/g, '/');
+    // full path vs names from the data folder down, or older apps' flat names
+    const isCurrent = (name) => !!current && (current.endsWith('/' + name) || baseName(current) === name);
     const names = o.names || {};
     // A file may name its board by the last eight digits of the id.
     const nameOf = (uid) => {
@@ -114,7 +128,7 @@
       return {
         name: l.name, kind, what: WHAT[kind], from, uid: l.uid || null,
         when: l.when, size: bytes(l.bytes),
-        current: kind === 'session' && !!current && l.name === current,
+        current: kind === 'session' && isCurrent(l.name),
         folder,
         raw: kind === 'pull' && folder ? folder + '/dump.txt' : null,
         report: kind === 'pull' && folder ? folder + '/report.json' : null,
@@ -154,7 +168,7 @@
         Number.isFinite(at) && at > 0;
       const used = Number(b.anchorsUsed) || 0;
       const out = Number(b.anchorsRejected) || 0;
-      return {
+      const row = {
         boot: String(b.n),
         records: count(b.records),
         ranFor: duration(Number(b.lastMs) - Number(b.firstMs)),
@@ -164,7 +178,18 @@
         clock: clockWords(b.clockFastPpm),
         ids: ids(b.csids).join(', ') || '—',
       };
+      // only with event records. reset is the RCC CSR flags the board printed
+      if (events(report)) {
+        row.reset = typeof b.reset === 'string' ? b.reset.split('+').join(', ') : '—';
+        row.dropped = Number.isFinite(b.dropped) ? count(b.dropped) : '—';
+      }
+      return row;
     });
+  }
+
+  function events(report) {
+    const boots = report && Array.isArray(report.boots) ? report.boots : [];
+    return boots.some((b) => b.reset !== undefined || b.dropped !== undefined || b.otherEvents !== undefined);
   }
 
   // short is the word that goes in the warning mark beside the value; empty when the
@@ -184,8 +209,9 @@
       { key: 'bytes', label: 'Came off the board', value: bytes(r.bytes), short: '' },
       { key: 'whole', label: 'Every record the board counted as good was read',
         value: r.complete ? 'yes' : 'no', short: r.complete ? '' : 'incomplete' },
-    ];
+    ].concat(r.wrapped ? [{ key: 'wrapped', label: 'The log had gone round the chip, so the oldest records were written over',
+      value: 'yes', short: '' }] : []);
   }
 
-  return { duration, clockWords, bytes, day, dayTime, utcStamp, keptIn, builtWords, baseName, boardPart, rows, boardIdWords, idMismatch, bootRows, transferRows };
+  return { duration, clockWords, bytes, day, dayTime, utcStamp, keptIn, builtWords, baseName, boardPart, rows, boardIdWords, idMismatch, bootRows, events, transferRows };
 });

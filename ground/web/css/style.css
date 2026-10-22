@@ -373,8 +373,8 @@ label.check input { margin: 0; accent-color: var(--accent); }
 .kv > .l { color: var(--ink-2); font-size: var(--t-label); }
 /* A row that differs from the board: what is there now struck through, the control that
    will replace it outlined in the accent. */
-.phases { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 8px 14px 12px; }
-@media (max-width: 900px) { .phases { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.phases { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 8px 14px 12px; }
+@media (max-width: 700px) { .phases { grid-template-columns: minmax(0, 1fr); } }
 .phase { border: 1px solid var(--rule); border-radius: 6px; padding: 10px 12px; display: grid; gap: 6px; align-content: start; }
 .phase.changed { border-color: var(--ink-3); }
 .phase-name { font-weight: 600; }
@@ -475,3 +475,19 @@ span.strip-part { display: inline-flex; align-items: center; gap: 6px; padding-l
   .screen-data .two { max-height: none; }
   .sheet { overflow: visible; }
 }
+
+/* Bench screen */
+.bench .parts { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 10px; }
+.bench .pane h3 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--rule); font-size: var(--t-head); }
+.bench .pane .line, .bench .pane .boot, .bench .pane .rows { padding: 6px 14px; }
+.bench .pane .line .l { color: var(--ink-2); font-size: var(--t-label); margin-right: 6px; }
+.bench .part.gone { border-color: var(--critical); }
+.bench .fv { font-family: var(--mono); font-size: 12px; white-space: nowrap; margin-right: 8px; }
+.bench .fv .k { color: var(--ink-2); }
+.bench .boot { border-bottom: 1px solid var(--rule); }
+.bench .boot .when { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.bench pre.raw { margin: 0; padding: 8px 14px; max-height: 420px; overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sunk); }
+.bench pre.raw .boot { display: block; background: var(--critical-soft, var(--warning-soft)); color: var(--critical); font-weight: 600; border: 0; padding: 0; }
+.bench pre.raw .bad { color: var(--critical); }
+.bench pre.raw .warn { color: var(--warning); }
+.bench .grid { margin: 0 14px 10px; }

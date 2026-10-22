@@ -47,6 +47,8 @@ pub struct Pull {
     pub report: Option<String>,   // dump::Report as json
     pub error: Option<String>,
     pub restored: bool,
+    // Stop pressed. Ends like a failed pull: what arrived is kept, the flight software goes back
+    pub stop: bool,
 }
 
 impl Pull {
@@ -68,6 +70,7 @@ impl Pull {
             report: None,
             error: None,
             restored: false,
+            stop: false,
         }
     }
 }
@@ -94,7 +97,7 @@ pub fn state_json(p: &Pull, now_ms: u128) -> String {
     };
     let steps: Vec<String> = p.steps.iter().map(|l| format!("\"{}\"", esc(l))).collect();
     format!(
-        "{{\"ok\":true,\"running\":{},\"wipe\":{},\"keepFsw\":{},\"board\":\"{}\",\"seconds\":{},\"pct\":{},\"note\":\"{}\",\"steps\":[{}],\"savedFsw\":{},\"log\":{},\"dir\":{},\"raw\":{},\"report\":{},\"restored\":{},\"error\":{}}}",
+        "{{\"ok\":true,\"running\":{},\"wipe\":{},\"keepFsw\":{},\"board\":\"{}\",\"seconds\":{},\"pct\":{},\"note\":\"{}\",\"steps\":[{}],\"savedFsw\":{},\"log\":{},\"dir\":{},\"raw\":{},\"report\":{},\"restored\":{},\"stopping\":{},\"error\":{}}}",
         p.running,
         p.wipe,
         p.keep_fsw,
@@ -110,6 +113,7 @@ pub fn state_json(p: &Pull, now_ms: u128) -> String {
         // Already json, so it goes in as it is.
         p.report.as_deref().unwrap_or("null"),
         p.restored,
+        p.running && p.stop,
         quoted(&p.error),
     )
 }
@@ -230,8 +234,33 @@ impl Listener {
         None
     }
 
+    // "I BOOT 0 c0: start ..." now, "I Boot 3 c0: start" on older firmware. Only the first few
+    // lines, since a board boot-looping on this port prints one sooner or later too
+    fn boot_line_after(&self, from: usize) -> Option<String> {
+        let heard = self.heard.lock().unwrap();
+        let text = String::from_utf8_lossy(&heard[from.min(heard.len())..]).to_string();
+        let whole = match text.rfind('\n') {
+            Some(end) => &text[..end],
+            None => return None,
+        };
+        whole
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(BOOT_WITHIN_LINES)
+            .find(|l| {
+                let l = l.to_ascii_lowercase();
+                l.contains(" boot ") && l.contains(": start")
+            })
+            .map(|l| l.trim().to_string())
+    }
+
     fn last_ms(&self) -> u128 {
         *self.last_ms.lock().unwrap()
+    }
+
+    fn bytes_from(&self, from: usize) -> Vec<u8> {
+        let heard = self.heard.lock().unwrap();
+        heard[from.min(heard.len())..].to_vec()
     }
 
     fn len(&self) -> usize {
@@ -255,10 +284,8 @@ impl Listener {
     }
 }
 
-// Whether a line starting "found" has arrived whole at or after `from`, and where to look
-// from next time, which is the start of the line still arriving. Whole matters: the first
-// half of that line reads as a smaller count. Only the new bytes are looked at each time,
-// because this runs with the buffer locked and the reader waits for it.
+// Has to be the whole line, half of it reads as a smaller count. Returns where to look from
+// next time, so only new bytes are scanned (the reader waits on this lock)
 fn whole_found_line(bytes: &[u8], from: usize) -> (bool, usize) {
     let mut at = from.min(bytes.len());
     while let Some(len) = bytes[at..].iter().position(|b| *b == b'\n') {
@@ -270,9 +297,9 @@ fn whole_found_line(bytes: &[u8], from: usize) -> (bool, usize) {
     (false, at)
 }
 
-// descent-pull-2026-09-25T19-30-00-ttyACM1
-fn folder_name(hint: &str, at: SystemTime) -> String {
-    format!("descent-pull-{}-{}", crate::stm32::stamp(at), crate::stm32::tidy(hint))
+// 1432-board9, or 1432-ttyACM1 with no name. A second one in the same minute is 1432-2-board9
+fn folder_in(dir: &Path, hint: &str, at: SystemTime) -> Result<PathBuf, String> {
+    crate::layout::unused(dir, &crate::layout::hhmm(at), &crate::layout::board_word(hint), "")
 }
 
 // What is on the board when a pull ends.
@@ -331,6 +358,21 @@ fn closing_note(tally: Option<&str>, failed: bool, board: Board, folder: Option<
     note
 }
 
+// prepends "firmware":{"dump":..,"onBoard":..} to report.json, null when unknown
+fn with_firmware(report: &str, dump: &str, on_board: Option<&str>) -> String {
+    let dump = if dump.is_empty() { "null" } else { dump };
+    match report.strip_prefix('{') {
+        Some(rest) => format!(
+            "{{\"firmware\":{{\"dump\":{},\"onBoard\":{}}}{}{}",
+            dump,
+            on_board.unwrap_or("null"),
+            if rest.trim_start().starts_with('}') { "" } else { "," },
+            rest
+        ),
+        None => report.to_string(),
+    }
+}
+
 // The board's last count, when it gave one. A wiped chip prints its count and no records.
 fn board_count(text: &str) -> Option<u64> {
     text.lines()
@@ -347,16 +389,22 @@ pub struct Job {
     pub dir: PathBuf,
     pub port_name: String,
     pub probe: Option<String>,
-    // Clear the chip instead of reading it: the dump firmware is told to erase, and the
-    // flight software goes back on. The last thing done to a board before it flies.
-    pub wipe: bool,
+    pub wipe: bool,   // erase the chip instead of reading it
     pub keep_fsw: bool,
-    pub dump_image: &'static [u8],
-    // The board this pull is meant for, when the page knows, and what the operator calls
-    // it. With neither, the port is all there is to name things by.
+    pub dump_image: Vec<u8>,
+    pub dump_from: String,   // json for report.json, "" if unknown
+    // runs first in the job thread, the dump may need a ~13 s build
+    pub prepare: Option<Prepare>,
+    // to name the saved flight image in the report
+    pub known: Option<crate::chipflash::Known>,
+    // without either, things are named after the port
     pub uid: Option<String>,
     pub name: Option<String>,
+    pub check_console: bool,   // reset once and wait for the boot line before writing anything. Off for Pull anyway
 }
+
+// -> (dump bytes, dump_from, optional line for the steps)
+pub type Prepare = Box<dyn FnOnce(&dyn Fn(&str)) -> Result<(Vec<u8>, String, Option<String>), String> + Send>;
 
 // The caller holds the probe's gate, and hands it over so it is let go when the pull ends.
 pub fn start(job: Job, held: crate::stm32::Held) -> Result<(), String> {
@@ -380,6 +428,26 @@ pub fn start(job: Job, held: crate::stm32::Held) -> Result<(), String> {
         drop(held);
     });
     Ok(())
+}
+
+const STOPPED: &str = "stopped by the operator";
+
+// Only asks. The job stops within a second while waiting on the board, or after the current
+// probe step
+pub fn stop(shared: &Shared) -> Result<(), String> {
+    let mut p = shared.lock().map_err(|_| "pull state is wedged".to_string())?;
+    if !p.running {
+        return Err(String::from("nothing is running to stop"));
+    }
+    if !p.stop {
+        p.stop = true;
+        p.steps.push(String::from("stop asked for, finishing the step in hand"));
+    }
+    Ok(())
+}
+
+fn stop_asked(shared: &Shared) -> bool {
+    shared.lock().map(|p| p.stop).unwrap_or(false)
 }
 
 fn also(error: &mut Option<String>, more: String) {
@@ -421,12 +489,14 @@ impl Bench for StLink<'_> {
 struct Limits {
     quiet_ms: u128,
     read_ms: u128,
-    // A clear: how long to wait for the dump firmware to ask "Y?", and then to say it erased.
-    // The firmware says 5 s typical and 25 s at most for the erase itself.
+    // the dump firmware gives 5 s typical, 25 s max for the erase itself
     ask_ms: u128,
     erase_ms: u128,
+    boot_ms: u128,   // reset to boot line
 }
 
+const BOOT_LIMIT_MS: u128 = 5_000;
+const BOOT_WITHIN_LINES: usize = 4;
 const ASK_LIMIT_MS: u128 = 30_000;
 const ERASE_LIMIT_MS: u128 = 45_000;
 
@@ -436,39 +506,84 @@ fn put_back(bench: &dyn Bench, image: &Path) -> Result<(), String> {
     bench.reset()
 }
 
-fn run(job: Job) {
+fn run(mut job: Job) {
+    if let Some(prepare) = job.prepare.take() {
+        let (shared, broadcast) = (job.shared.clone(), job.broadcast.clone());
+        match prepare(&|said: &str| say(&shared, &broadcast, 1, said)) {
+            Ok((bytes, from, note)) => {
+                job.dump_image = bytes;
+                job.dump_from = from;
+                if let Some(note) = note {
+                    say(&job.shared, &job.broadcast, 1, &note);
+                }
+            }
+            Err(e) => return finish(&job.shared, &job.broadcast, None, Some(e), Board::Untouched, None),
+        }
+    }
     // Listening first. The board is talking already, and a port nobody reads fills up.
     say(&job.shared, &job.broadcast, 2, "listening to the board");
     match Listener::start(&job.port_name) {
         Ok(listener) => {
             let bench = StLink { probe: job.probe.as_deref(), broadcast: &job.broadcast };
-            pull(&job, &bench, listener, &Limits { quiet_ms: QUIET_MS, read_ms: READ_LIMIT_MS, ask_ms: ASK_LIMIT_MS, erase_ms: ERASE_LIMIT_MS });
+            pull(&job, &bench, listener, &Limits { quiet_ms: QUIET_MS, read_ms: READ_LIMIT_MS, ask_ms: ASK_LIMIT_MS, erase_ms: ERASE_LIMIT_MS, boot_ms: BOOT_LIMIT_MS });
         }
         Err(e) => finish(&job.shared, &job.broadcast, None, Some(e), Board::Untouched, None),
     }
 }
 
 fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
-    let Job { shared, broadcast, dir, port_name, keep_fsw, dump_image, uid, name: board_name, wipe, .. } = job;
+    let Job { shared, broadcast, dir, port_name, keep_fsw, dump_image, uid, name: board_name, wipe, check_console, dump_from, known, .. } = job;
     // A clear always puts the flight software back: the point is a board that flies with an
     // empty chip, not a board on the dump firmware.
     let wipe = *wipe;
     let keep_fsw = *keep_fsw || wipe;
 
-    let name = folder_name(board_name.as_deref().unwrap_or(port_name), SystemTime::now());
-    let name = if wipe { name.replacen("descent-pull-", "descent-clear-", 1) } else { name };
+    let now = SystemTime::now();
+    // A clear keeps nothing, the log was already pulled (decided 2026-10-21). Its flight
+    // software copy waits in WORKING and is only kept if it can't be put back
+    let (folder, name) = if wipe {
+        for said in recover_working(dir) {
+            say(shared, broadcast, 1, &said);
+        }
+        (dir.join(WORKING), String::new())
+    } else {
+        let place = match crate::layout::folder(dir, crate::layout::PULLS, now) {
+            Ok(place) => place,
+            Err(e) => {
+                listener.done();
+                return finish(shared, broadcast, None, Some(e), Board::Untouched, None);
+            }
+        };
+        let folder = match folder_in(&place.dir, board_name.as_deref().unwrap_or(port_name), now) {
+            Ok(folder) => folder,
+            Err(e) => {
+                listener.done();
+                return finish(shared, broadcast, None, Some(e), Board::Untouched, None);
+            }
+        };
+        // <day>/pulls/<folder>, as /api/log takes it
+        let name = place.rel_of(&folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+        (folder, name)
+    };
     // In full, because this is what the operator is shown to go and find it by.
-    let folder = std::path::absolute(dir.join(&name)).unwrap_or_else(|_| dir.join(&name));
+    let folder = std::path::absolute(&folder).unwrap_or(folder);
     if let Err(e) = std::fs::create_dir_all(&folder) {
         listener.done();
         let e = format!("could not make {}: {}", folder.display(), e);
         return finish(shared, broadcast, None, Some(e), Board::Untouched, None);
     }
-    shared.lock().unwrap().dir = Some(folder.display().to_string());
+    if !wipe {
+        shared.lock().unwrap().dir = Some(folder.display().to_string());
+        // for the list, once the image beside it is gone
+        if let Some(uid) = uid {
+            let _ = std::fs::write(folder.join(crate::layout::BOARD_FILE), format!("{}\n", uid));
+        }
+    }
 
     let mut saved: Option<PathBuf> = None;
     let mut wrote_dump = false;
     let mut reset_at = 0usize;   // how much the port had carried when the board was reset
+    let mut stopped = false;     // stopped by the operator once the board was printing
     let read = (|| -> Result<(), String> {
         // The page read a board a while ago and the clip has been in somebody's hand
         // since, so the board is asked again before it is saved or written.
@@ -482,7 +597,37 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
                 ));
             }
         }
-        if keep_fsw {
+        // Make sure the port is this board's console. Pulls have read the wrong port before
+        // (2026-10-16, 2026-10-17) and it only showed after flashing the board twice
+        let mut on_dump = false;
+        if *check_console {
+            say(shared, broadcast, 4, &format!("checking that {} is this board's console", port_name));
+            let from = listener.len();
+            bench.reset()?;
+            let reset_ms = crate::logfile::now_ms();
+            loop {
+                if let Some(line) = listener.boot_line_after(from) {
+                    on_dump = line.contains("test=flashdump");
+                    break;
+                }
+                if stop_asked(shared) {
+                    return Err(String::from(STOPPED));
+                }
+                if crate::logfile::now_ms().saturating_sub(reset_ms) > limits.boot_ms {
+                    return Err(format!(
+                        "{} is not this board's console: nothing on it said it had started when the board was reset. Nothing was written. \
+Pick the board's console port, or Pull anyway if the software on the board prints nothing",
+                        port_name
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        // otherwise the dump firmware would be saved and reported as the flight software
+        if on_dump {
+            say(shared, broadcast, 5, "the board is already running the dump firmware, so there is no flight software on it to save");
+        }
+        if keep_fsw && !on_dump {
             say(shared, broadcast, 5, "saving the flight software that is on the board");
             let file = match uid {
                 Some(uid) => crate::stm32::image_name(uid, board_name.as_deref().unwrap_or(""), SystemTime::now()),
@@ -493,7 +638,14 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
                 path.file_name().map(|n| n.to_string_lossy().to_string());
             saved = Some(path);
         }
+        // last point where the board still has its own software
+        if stop_asked(shared) {
+            return Err(String::from(STOPPED));
+        }
 
+        if dump_image.is_empty() {
+            return Err(String::from("there was no dump firmware to write"));
+        }
         say(shared, broadcast, 30, "writing the dump firmware");
         wrote_dump = true;
         bench.write(dump_image)?;
@@ -511,6 +663,9 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
             say(shared, broadcast, 45, "asking the dump firmware to erase the chip");
             let reset_ms = crate::logfile::now_ms();
             let asked = loop {
+                if stop_asked(shared) {
+                    return Err(String::from(STOPPED));
+                }
                 listener.send(b"E")?;
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 if let Some(end) = listener.line_with_after("send Y to go ahead", at) {
@@ -520,6 +675,7 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
                     return Err(String::from("the dump firmware never asked whether to erase: is the console port the board's?"));
                 }
             };
+            // no stopping after the Y, resetting mid erase leaves the chip in an unknown state
             say(shared, broadcast, 60, "erasing the chip, about 5 s");
             listener.send(b"Y")?;
             let sent_ms = crate::logfile::now_ms();
@@ -543,10 +699,32 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
 
         say(shared, broadcast, 45, "reading the log off the chip");
         let reset_ms = crate::logfile::now_ms();
+        // written as it arrives, so a pull cut short still leaves what it got
+        let raw = folder.join("dump.txt");
+        let mut on_disk = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&raw).ok();
+        if on_disk.is_some() {
+            shared.lock().unwrap().raw = Some(format!("{}/dump.txt", name));
+        }
+        let mut written = 0usize;
         loop {
+            if let Some(f) = on_disk.as_mut() {
+                let fresh = listener.bytes_from(written);
+                if !fresh.is_empty() {
+                    use std::io::Write;
+                    if f.write_all(&fresh).and_then(|_| f.flush()).is_ok() {
+                        written += fresh.len();
+                    } else {
+                        on_disk = None;   // the final write below says so if it fails too
+                    }
+                }
+            }
             let (whole, next) = listener.found_line_after(at);
             at = next;
             if whole {
+                break;
+            }
+            if stop_asked(shared) {
+                stopped = true;
                 break;
             }
             let now = crate::logfile::now_ms();
@@ -571,11 +749,13 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
     let mut error = read.err();
 
     // Before anything is made of it. Whatever happens next, this is the evidence, and
-    // getting it again means doing the whole pull again.
+    // getting it again means doing the whole pull again. A clear read nothing worth it.
     let raw = folder.join("dump.txt");
-    match std::fs::write(&raw, &heard) {
-        Ok(()) => shared.lock().unwrap().raw = Some(format!("{}/dump.txt", name)),
-        Err(e) => also(&mut error, format!("could not write {}: {}", raw.display(), e)),
+    if !wipe {
+        match std::fs::write(&raw, &heard) {
+            Ok(()) => shared.lock().unwrap().raw = Some(format!("{}/dump.txt", name)),
+            Err(e) => also(&mut error, format!("could not write {}: {}", raw.display(), e)),
+        }
     }
 
     let mut read_as: Option<String> = None;
@@ -610,7 +790,12 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
         } else {
             say(shared, broadcast, 80, &format!("read {} records from {} boots", parsed.records.len(), parsed.boots().len()));
             let report = crate::dump::report(&parsed, heard.len(), listener.longest_gap_ms());
-            let json = report.json();
+            // so a log can be matched to its build after the tree moves on
+            let on_board = match (saved.as_deref(), known) {
+                (Some(path), Some(known)) => std::fs::read(path).ok().map(|b| crate::chipflash::recognise(&b, known).json()),
+                _ => None,
+            };
+            let json = with_firmware(&report.json(), dump_from, on_board.as_deref());
             let log = folder.join("ground.log");
             match std::fs::write(&log, crate::dump::to_log(&parsed, port_name)) {
                 Ok(()) => shared.lock().unwrap().log = Some(format!("{}/ground.log", name)),
@@ -624,29 +809,126 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
         }
     }
 
+    // stop goes first, otherwise an early stop reads as an empty printing
+    if stopped {
+        error = Some(match error.take() {
+            Some(more) => format!("{}. Also: {}", STOPPED, more),
+            None => String::from(STOPPED),
+        });
+    }
+
     // Last, and whatever went wrong above: a board left on the dump firmware does not fly.
     let mut board = if wrote_dump { Board::OnDump } else { Board::Untouched };
-    if let Some(image) = &saved {
+    if let Some(image) = saved.as_ref().filter(|_| wrote_dump) {
         say(shared, broadcast, 90, "putting the flight software back");
         match put_back(bench, image) {
             Ok(()) => {
                 shared.lock().unwrap().restored = true;
                 board = Board::Back;
+                // Only the newest save per board is kept. With the console check off the
+                // "flight software" saved might be the dump firmware, which isn't kept
+                if is_dump(image) {
+                    let _ = std::fs::remove_file(image);
+                    let mut p = shared.lock().unwrap();
+                    p.saved_fsw = None;
+                    p.restored = false;
+                    board = Board::OnDump;
+                } else if !wipe {
+                    crate::layout::keep_only_latest(dir, image);
+                }
+            }
+            // only the dump firmware failed to go back on, nothing lost
+            Err(_) if is_dump(image) => {
+                let _ = std::fs::remove_file(image);
+                shared.lock().unwrap().saved_fsw = None;
+                board = Board::OnDump;
             }
             Err(e) => {
                 board = Board::NotBack;
+                // only time a clear keeps it, the ChipSats screen puts it back from there
+                let kept = if wipe { kept_from_clear(dir, image, now) } else { Ok(image.clone()) };
+                let kept = kept.unwrap_or_else(|why| {
+                    also(&mut error, why);
+                    image.clone()
+                });
+                if wipe {
+                    shared.lock().unwrap().saved_fsw = kept.file_name().map(|n| n.to_string_lossy().to_string());
+                }
                 also(
                     &mut error,
                     format!(
                         "the flight software was NOT put back ({}). The image that was on the board is {} and has to be written back by hand",
                         e,
-                        image.display()
+                        kept.display()
                     ),
                 );
             }
         }
     }
-    finish(shared, broadcast, read_as, error, board, Some(&folder));
+    if wipe && board != Board::NotBack {
+        if let Some(image) = saved.as_ref() {
+            let _ = std::fs::remove_file(image);
+            shared.lock().unwrap().saved_fsw = None;
+        }
+    }
+    finish(shared, broadcast, read_as, error, board, (!wipe).then_some(folder.as_path()));
+}
+
+// Inside the data folder so moving out is a rename. Nothing lists it
+const WORKING: &str = ".clearing";
+
+fn kept_from_clear(data: &Path, image: &Path, at: SystemTime) -> Result<PathBuf, String> {
+    let place = crate::layout::folder(data, crate::layout::IMAGES, at)?;
+    let file = image.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = file.strip_suffix(".bin").unwrap_or(&file).to_string();
+    let (hhmm, rest) = match stem.split_once('-') {
+        Some((t, rest)) if t.len() == 4 && t.chars().all(|c| c.is_ascii_digit()) => (t.to_string(), rest.to_string()),
+        _ => (crate::layout::hhmm(at), stem.clone()),
+    };
+    let to = crate::layout::unused(&place.dir, &hhmm, &rest, ".bin")?;
+    std::fs::rename(image, &to).map_err(|e| format!("could not move {} to {}: {}", image.display(), to.display(), e))?;
+    // an older save goes beside the newer ones instead of replacing them
+    let newer = crate::stm32::uid_in_name(&file).is_some_and(|uid| {
+        crate::layout::saved_images(data).iter().any(|p| {
+            p != &to
+                && p.file_name().and_then(|n| crate::stm32::uid_in_name(&n.to_string_lossy())).as_deref() == Some(uid.as_str())
+                && modified(p) > Some(at)
+        })
+    });
+    if !newer {
+        crate::layout::keep_only_latest(data, &to);
+    }
+    Ok(to)
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+fn is_dump(image: &Path) -> bool {
+    std::fs::read(image).map(|b| crate::layout::looks_like_dump(&b)).unwrap_or(false)
+}
+
+// Flight software left in WORKING by a clear that the app quit in the middle of
+fn recover_working(data: &Path) -> Vec<String> {
+    let mut said = Vec::new();
+    let work = data.join(WORKING);
+    for entry in std::fs::read_dir(&work).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|x| x != "bin") || !path.is_file() {
+            continue;
+        }
+        if is_dump(&path) {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        let at = modified(&path).unwrap_or_else(SystemTime::now);
+        said.push(match kept_from_clear(data, &path, at) {
+            Ok(to) => format!("an earlier clear left {} without putting it back; it is now {}", path.display(), to.display()),
+            Err(e) => format!("an earlier clear left {}, and it could not be filed: {}", path.display(), e),
+        });
+    }
+    said
 }
 
 fn finish(
@@ -657,13 +939,20 @@ fn finish(
     board: Board,
     folder: Option<&Path>,
 ) {
+    // a stop isn't shown as a failure
+    let stopped = error.as_deref().is_some_and(|e| e.starts_with(STOPPED));
+    let read_as = match (stopped, read_as) {
+        (true, Some(t)) => Some(format!("{}, {}", STOPPED, t)),
+        (true, None) => Some(String::from(STOPPED)),
+        (false, r) => r,
+    };
     let mut p = shared.lock().unwrap();
     p.running = false;
     p.finished_ms = crate::logfile::now_ms();
     if error.is_none() {
         p.pct = 100;
     }
-    p.note = closing_note(read_as.as_deref(), error.is_some(), board, folder);
+    p.note = closing_note(read_as.as_deref(), error.is_some() && !stopped, board, folder);
     p.error = error;
     let frame = format!(
         "{{\"type\":\"pull\",\"pct\":{},\"note\":\"{}\",\"done\":true}}",
@@ -722,8 +1011,15 @@ mod tests {
     #[test]
     fn a_pull_folder_is_named_for_the_second_and_the_board() {
         let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_790_000_000);
-        assert_eq!(folder_name("/dev/ttyACM1", at), "descent-pull-2026-09-21T14-13-20-ttyACM1");
-        assert_eq!(folder_name("COM3", at), "descent-pull-2026-09-21T14-13-20-COM3");
+        let hm = crate::layout::hhmm(at);
+        let dir = std::env::temp_dir().join(format!("dg-pull-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(folder_in(&dir, "/dev/ttyACM1", at).unwrap(), dir.join(format!("{}-ttyACM1", hm)));
+        assert_eq!(folder_in(&dir, "COM3", at).unwrap(), dir.join(format!("{}-COM3", hm)));
+        std::fs::create_dir(dir.join(format!("{}-board9", hm))).unwrap();
+        assert_eq!(folder_in(&dir, "9", at).unwrap(), dir.join(format!("{}-2-board9", hm)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -934,14 +1230,18 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
             probe: None,
             wipe: what.starts_with("wipe"),
             keep_fsw,
-            dump_image: DUMP,
+            dump_image: DUMP.to_vec(),
+            dump_from: String::new(),
+            prepare: None,
+            known: None,
             uid: None,
             name: None,
+            check_console: false,
         };
         job.shared.lock().unwrap().running = true;
         job.shared.lock().unwrap().keep_fsw = keep_fsw;
         job.shared.lock().unwrap().wipe = job.wipe;
-        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
         let state = job.shared.lock().unwrap().clone();
         let did = desk.did.lock().unwrap().clone();
         (state, did, dir)
@@ -957,12 +1257,144 @@ erasing, 5 s typical, 25 s at most\r\nerase ok after 5012 ms\r\nsend D to print 
         assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"], "saved and put back even when not asked to keep it");
         assert_eq!(p.error, None);
         assert!(p.restored && p.wipe);
-        let folder = PathBuf::from(p.dir.clone().unwrap());
-        let name = folder.file_name().unwrap().to_string_lossy().to_string();
-        assert!(name.starts_with("descent-clear-"), "{}", name);
-        assert_eq!(p.note, format!("flash cleared, flight software back on the board; saved in {}", folder.display()));
-        assert_eq!(p.log, None, "nothing was read, so there is no log to open");
-        assert!(folder.join("dump.txt").is_file(), "what the board said is kept");
+        assert_eq!(p.note, "flash cleared, flight software back on the board");
+        assert_eq!((p.dir, p.log, p.raw, p.saved_fsw), (None, None, None, None));
+        assert_eq!(kept_in(&dir), Vec::<String>::new(), "a clear keeps nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // working folder included
+    fn kept_in(dir: &Path) -> Vec<String> {
+        fn walk(d: &Path, base: &Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, base, out);
+                } else {
+                    out.push(p.strip_prefix(base).unwrap().display().to_string());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn what_a_clear_could_not_put_back_becomes_the_boards_newest_image() {
+        let dir = std::env::temp_dir().join(format!("dg-pull-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let day = crate::layout::day(SystemTime::now());
+        for (d, f) in [("2026-10-17/images", "1454-board9-0027003A.bin"), ("2026-10-17/images", "1513-board12-002C002E.bin"), (WORKING, "1432-board9-0027003A.bin")] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::write(dir.join(d).join(f), FLIGHT).unwrap();
+        }
+        // same name already there from earlier in the minute
+        std::fs::create_dir_all(dir.join(&day).join("images")).unwrap();
+        std::fs::write(dir.join(&day).join("images/1432-board9-0027003A.bin"), FLIGHT).unwrap();
+        let at = SystemTime::now() + std::time::Duration::from_millis(10);
+        let to = kept_from_clear(&dir, &dir.join(WORKING).join("1432-board9-0027003A.bin"), at).unwrap();
+        assert_eq!(to, dir.join(&day).join("images/1432-2-board9-0027003A.bin"));
+        assert_eq!(
+            kept_in(&dir),
+            vec!["2026-10-17/images/1513-board12-002C002E.bin".to_string(), format!("{}/images/1432-2-board9-0027003A.bin", day)],
+            "board 9's older images go, board 12's stays"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clear_left_behind_is_filed_on_its_own_day_and_does_not_replace_a_newer_save() {
+        let dir = std::env::temp_dir().join(format!("dg-pull-left-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(WORKING)).unwrap();
+        let old = SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+        let left = dir.join(WORKING).join("0910-board9-0027003A.bin");
+        std::fs::write(&left, FLIGHT).unwrap();
+        std::fs::File::options().write(true).open(&left).unwrap().set_modified(old).unwrap();
+        std::fs::write(dir.join(WORKING).join("0911-board12-002C002E.bin"), DUMP_WITH_NAME).unwrap();
+        // board 9 was pulled since, so that save is newer
+        let today = crate::layout::day(SystemTime::now());
+        std::fs::create_dir_all(dir.join(&today).join("images")).unwrap();
+        std::fs::write(dir.join(&today).join("images/1100-board9-0027003A.bin"), FLIGHT).unwrap();
+
+        let said = recover_working(&dir);
+        assert_eq!(said.len(), 1, "{:?}", said);
+        let then = crate::layout::day(old);
+        let mut want = vec![format!("{}/images/0910-board9-0027003A.bin", then), format!("{}/images/1100-board9-0027003A.bin", today)];
+        want.sort();
+        assert_eq!(kept_in(&dir), want, "both of board 9's kept, board 12's dump firmware gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const DUMP_WITH_NAME: &[u8] = b"\x00\x01 test=flashdump \x02";
+
+    #[test]
+    fn a_clear_anyway_on_a_board_already_on_the_dump_firmware_does_not_say_it_put_flight_software_back() {
+        // console check off, so the dump firmware gets saved as if it were flight software
+        struct OnDump(Desk);
+        impl Bench for OnDump {
+            fn uid(&self) -> Result<String, String> { self.0.uid() }
+            fn save(&self, dir: &Path, file: &str) -> Result<PathBuf, String> {
+                let path = self.0.save(dir, file)?;
+                std::fs::write(&path, DUMP_WITH_NAME).unwrap();
+                Ok(path)
+            }
+            fn write(&self, image: &[u8]) -> Result<(), String> { self.0.write(image) }
+            fn reset(&self) -> Result<(), String> { self.0.reset() }
+        }
+        let dir = std::env::temp_dir().join(format!("dg-pull-wipe-ondump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let said = b"I Boot 3 c0: start test=flashdump\r\nstopped printing: E received\r\n\
+erase the WHOLE chip? the log on it is gone for good. send Y to go ahead, anything else cancels\r\n\
+erase ok after 5012 ms\r\n";
+        let (go, wait) = std::sync::mpsc::channel();
+        let mut steps = vec![Step::Bytes(b"I TX 1 c1: talking\r\n".to_vec()), Step::Wait(wait), Step::Silence(100)];
+        steps.push(Step::Bytes(said.to_vec()));
+        let (listener, _ended) = played(steps);
+        let desk = OnDump(Desk { did: Mutex::new(Vec::new()), named: Mutex::new(Vec::new()), go: Mutex::new(Some(go)), fail_write: None });
+        let job = Job {
+            shared: shared(),
+            broadcast: crate::ws::Broadcast::new(),
+            dir: dir.clone(),
+            port_name: "/dev/ttyACM1".into(),
+            probe: None,
+            wipe: true,
+            keep_fsw: false,
+            dump_image: DUMP.to_vec(),
+            dump_from: String::new(),
+            prepare: None,
+            known: None,
+            uid: None,
+            name: None,
+            check_console: false,
+        };
+        job.shared.lock().unwrap().running = true;
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
+        let p = job.shared.lock().unwrap().clone();
+        assert_eq!(p.error, None, "{:?}", p.error);
+        assert!(!p.restored);
+        assert_eq!(p.note, "flash cleared, the board is still running the dump firmware");
+        assert_eq!(kept_in(&dir), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clear_that_cannot_put_the_flight_software_back_keeps_it_with_the_boards_images() {
+        let said = b"I Boot 3 c0: start test=flashdump\r\nstopped printing: E received\r\n\
+erase the WHOLE chip? the log on it is gone for good. send Y to go ahead, anything else cancels\r\n\
+erase ok after 5012 ms\r\n";
+        let (p, did, dir) = pulled("wipe-notback", said, false, Some(1));
+        assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software"]);
+        assert!(!p.restored);
+        let kept = kept_in(&dir);
+        assert_eq!(kept.len(), 1, "{:?}", kept);
+        assert!(kept[0].contains("/images/") && !kept[0].contains(WORKING), "{:?}", kept);
+        let e = p.error.unwrap();
+        assert!(e.contains("NOT put back") && e.contains(&kept[0]), "{}", e);
+        assert!(p.saved_fsw.is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1004,6 +1436,94 @@ record 1 boot 0 ms 2567\r\n\
     const FOUND_TWO: &str = "found 2 records, 2 good (0 time anchors), 0 bad, from 1 boots, log ends at address 0x000080\r\n";
 
     #[test]
+    fn the_report_starts_with_which_firmware_read_it_and_which_was_on_the_board() {
+        assert_eq!(with_firmware("{\"read\":2}", "{\"id\":\"ab\"}", None), "{\"firmware\":{\"dump\":{\"id\":\"ab\"},\"onBoard\":null},\"read\":2}");
+        assert_eq!(with_firmware("{}", "", Some("{\"kind\":\"flight\"}")), "{\"firmware\":{\"dump\":null,\"onBoard\":{\"kind\":\"flight\"}}}");
+        assert_eq!(with_firmware("not json", "", None), "not json");
+    }
+
+    #[test]
+    fn a_pull_report_records_the_dump_used_and_the_flight_image_built_here_that_was_on_the_board() {
+        let dir = std::env::temp_dir().join(format!("dg-pull-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (go, wait) = std::sync::mpsc::channel();
+        let printed = format!("{}{}", TWO, FOUND_TWO);
+        let mut steps = vec![Step::Bytes(b"I TX 1 c1: flight software talking\r\n".to_vec()), Step::Wait(wait), Step::Silence(100)];
+        steps.extend(printed.as_bytes().chunks(1000).map(|c| Step::Bytes(c.to_vec())));
+        let (listener, _ended) = played(steps);
+        let desk = Desk { did: Mutex::new(Vec::new()), named: Mutex::new(Vec::new()), go: Mutex::new(Some(go)), fail_write: None };
+        let sha = |b: &[u8]| -> String { use sha2::{Digest, Sha256}; Sha256::digest(b).iter().map(|x| format!("{:02x}", x)).collect() };
+        let mut known = crate::chipflash::Known::carried();
+        known.built = vec![crate::localfw::Identity {
+            part: "flight-le".into(),
+            at: (crate::logfile::now_ms() / 1000) as u64,
+            origin: crate::fswbuild::Origin { source: sha(b"sources"), commit: Some("abc1234ffff".into()), dirty: Some(true), changed: vec!["V2_6_X_Code/src/config.h".into()] },
+            sha256: sha(FLIGHT),
+            masked: sha(FLIGHT),
+            len: FLIGHT.len(),
+            block_at: None,
+        }];
+        let job = Job {
+            shared: shared(),
+            broadcast: crate::ws::Broadcast::new(),
+            dir: dir.clone(),
+            port_name: "/dev/ttyACM1".into(),
+            probe: None,
+            wipe: false,
+            keep_fsw: true,
+            dump_image: DUMP.to_vec(),
+            dump_from: String::from("{\"part\":\"flash_dump\",\"words\":\"dump firmware built here 14:02 from abc1234\"}"),
+            prepare: None,
+            known: Some(known),
+            uid: None,
+            name: None,
+            check_console: false,
+        };
+        job.shared.lock().unwrap().running = true;
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
+        let p = job.shared.lock().unwrap().clone();
+        assert_eq!(p.error, None);
+        let report = std::fs::read_to_string(PathBuf::from(p.dir.unwrap()).join("report.json")).unwrap();
+        assert!(report.starts_with("{\"firmware\":{\"dump\":{\"part\":\"flash_dump\",\"words\":\"dump firmware built here 14:02 from abc1234\"},\"onBoard\":{\"kind\":\"flight\",\"module\":\"le\""), "{}", report);
+        assert!(report.contains("\"words\":\"flight LE built here ") && report.contains("from abc1234 + config.h changed"), "{}", report);
+        assert!(report.contains("\"read\":2,"), "the rest of the report is still there: {}", report);
+        assert_eq!(p.report.as_deref(), Some(report.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dump_firmware_that_cannot_be_got_stops_the_pull_before_the_board_is_touched() {
+        let mut job = Job {
+            shared: shared(),
+            broadcast: crate::ws::Broadcast::new(),
+            dir: std::env::temp_dir(),
+            port_name: "/dev/nonexistent-dg-port".into(),
+            probe: None,
+            wipe: false,
+            keep_fsw: true,
+            dump_image: Vec::new(),
+            dump_from: String::new(),
+            prepare: Some(Box::new(|say: &dyn Fn(&str)| {
+                say("building the dump firmware from the flight software in /tree");
+                Err(String::from("the dump firmware from this computer's flight software did not build, and this app carries none. error: x"))
+            })),
+            known: None,
+            uid: None,
+            name: None,
+            check_console: false,
+        };
+        job.shared.lock().unwrap().running = true;
+        let shared = job.shared.clone();
+        job.wipe = false;
+        run(job);
+        let p = shared.lock().unwrap().clone();
+        assert!(p.error.as_deref().unwrap().contains("did not build"), "{:?}", p.error);
+        assert_eq!(p.steps[0], "building the dump firmware from the flight software in /tree");
+        assert!(!p.steps.iter().any(|s| s.contains("listening")), "{:?}", p.steps);
+    }
+
+    #[test]
     fn a_pull_leaves_one_folder_and_the_flight_software_back_on() {
         let printed = format!("{}{}", TWO, FOUND_TWO);
         let (p, did, dir) = pulled("whole", printed.as_bytes(), true, None);
@@ -1015,9 +1535,12 @@ record 1 boot 0 ms 2567\r\n\
 
         let folder = PathBuf::from(p.dir.clone().unwrap());
         assert!(folder.is_absolute());
-        assert_eq!(folder.parent().unwrap(), dir);
-        let name = folder.file_name().unwrap().to_string_lossy().to_string();
-        assert!(name.starts_with("descent-pull-") && name.ends_with("-ttyACM1"), "{}", name);
+        let day = crate::layout::day(SystemTime::now());
+        assert_eq!(folder.parent().unwrap(), dir.join(&day).join("pulls"));
+        let leaf = folder.file_name().unwrap().to_string_lossy().to_string();
+        assert!(leaf.ends_with("-ttyACM1") && leaf.len() == "1432-ttyACM1".len(), "{}", leaf);
+        // relative to the data folder, as /api/log takes it
+        let name = format!("{}/pulls/{}", day, leaf);
         // Every byte of TWO's packets is its own offset, so the id at 50 reads 50.
         assert_eq!(p.note, format!("done, board id 50, flight software back on the board; saved in {}", folder.display()));
         assert_eq!(p.log, Some(format!("{}/ground.log", name)));
@@ -1157,11 +1680,15 @@ record 1 boot 0 ms 2567\r\n\
             probe: None,
             wipe: false,
             keep_fsw: true,
-            dump_image: DUMP,
+            dump_image: DUMP.to_vec(),
+            dump_from: String::new(),
+            prepare: None,
+            known: None,
             uid: Some(uid.into()),
             name: name.map(String::from),
+            check_console: false,
         };
-        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
         let state = job.shared.lock().unwrap().clone();
         let did = desk.did.lock().unwrap().clone();
         let named = desk.named.lock().unwrap().clone();
@@ -1189,9 +1716,9 @@ record 1 boot 0 ms 2567\r\n\
         assert_eq!(p.error, None);
         let folder = PathBuf::from(p.dir.unwrap());
         let name = folder.file_name().unwrap().to_string_lossy().to_string();
-        assert!(name.starts_with("descent-pull-") && name.ends_with("-Flight-spare-2"), "{}", name);
+        assert!(name.ends_with("-Flight-spare-2"), "{}", name);
         assert_eq!(named.len(), 1);
-        assert!(named[0].starts_with("descent-image-20393256-Flight-spare-2-") && named[0].ends_with(".bin"), "{}", named[0]);
+        assert!(named[0].ends_with("-Flight-spare-2-20393256.bin"), "{}", named[0]);
         let _ = std::fs::remove_dir_all(&dir);
 
         // A board the list has no name for keeps the port in the folder's name, and is
@@ -1199,7 +1726,7 @@ record 1 boot 0 ms 2567\r\n\
         let (p, _, named, dir) = pulled_for("unnamed", ON_THE_PROBE, None);
         let folder = PathBuf::from(p.dir.unwrap());
         assert!(folder.file_name().unwrap().to_string_lossy().ends_with("-ttyACM1"), "{}", folder.display());
-        assert!(named[0].starts_with("descent-image-20393256-board-"), "{}", named[0]);
+        assert!(named[0].ends_with("-board-20393256.bin"), "{}", named[0]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1220,14 +1747,18 @@ record 1 boot 0 ms 2567\r\n\
             probe: None,
             wipe: false,
             keep_fsw: true,
-            dump_image: DUMP,
+            dump_image: DUMP.to_vec(),
+            dump_from: String::new(),
+            prepare: None,
+            known: None,
             uid: None,
             name: None,
+            check_console: false,
         };
-        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
         assert!(!desk.did.lock().unwrap().contains(&"uid".to_string()));
         let named = desk.named.lock().unwrap().clone();
-        assert!(named[0].starts_with("descent-ground-fsw-ttyACM1-") && named[0].ends_with(".bin"), "{}", named[0]);
+        assert!(named[0].ends_with("-ttyACM1.bin") && crate::stm32::uid_in_name(&named[0]).is_none(), "{}", named[0]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1253,11 +1784,15 @@ record 1 boot 0 ms 2567\r\n\
             probe: None,
             wipe: false,
             keep_fsw: false,
-            dump_image: DUMP,
+            dump_image: DUMP.to_vec(),
+            dump_from: String::new(),
+            prepare: None,
+            known: None,
             uid: None,
             name: None,
+            check_console: false,
         };
-        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
+        pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
         let state = job.shared.lock().unwrap().clone();
         (state, dir)
     }
@@ -1367,14 +1902,233 @@ record 3113 boot 6 ms 23302\r\n\
             probe: None,
             wipe: false,
             keep_fsw: false,
-            dump_image: DUMP,
+            dump_image: DUMP.to_vec(),
+            dump_from: String::new(),
+            prepare: None,
+            known: None,
             uid: None,
             name: None,
+            check_console: false,
         };
-        pull(&job, &desk, listener, &Limits { quiet_ms: 2_000, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000 });
+        pull(&job, &desk, listener, &Limits { quiet_ms: 2_000, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
         let p = job.shared.lock().unwrap().clone();
         let log = std::fs::read_to_string(PathBuf::from(p.dir.unwrap()).join("ground.log")).unwrap();
         assert!(log.contains("flash-boot4"), "the printing after the reset is the one taken: {}", log);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // `stop_when` runs on its own thread and stops the job when it returns. Quiet limit is
+    // long so only the stop can end the read early
+    fn pulled_stopping(
+        what: &str,
+        printed: Vec<Step>,
+        keep_fsw: bool,
+        stop_when: Option<Box<dyn FnOnce(&Shared) + Send>>,
+    ) -> (Pull, Vec<String>, PathBuf, std::time::Duration) {
+        let dir = std::env::temp_dir().join(format!("dg-pull-{}-{}", what, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (go, wait) = std::sync::mpsc::channel();
+        let mut steps = vec![Step::Wait(wait), Step::Silence(100)];
+        steps.extend(printed);
+        let (listener, _ended) = played(steps);
+        let desk = Desk { did: Mutex::new(Vec::new()), named: Mutex::new(Vec::new()), go: Mutex::new(Some(go)), fail_write: None };
+        let job = Job {
+            shared: shared(),
+            broadcast: crate::ws::Broadcast::new(),
+            dir: dir.clone(),
+            port_name: "/dev/ttyACM1".into(),
+            probe: None,
+            wipe: what.starts_with("wipe"),
+            keep_fsw,
+            dump_image: DUMP.to_vec(),
+            dump_from: String::new(),
+            prepare: None,
+            known: None,
+            uid: None,
+            name: None,
+            check_console: false,
+        };
+        job.shared.lock().unwrap().running = true;
+        // None: stop already asked for when the job starts
+        let watched = job.shared.clone();
+        let stopper = match stop_when {
+            None => {
+                stop(&watched).unwrap();
+                None
+            }
+            Some(when) => Some(std::thread::spawn(move || {
+                when(&watched);
+                stop(&watched).unwrap();
+            })),
+        };
+        let began = Instant::now();
+        pull(&job, &desk, listener, &Limits { quiet_ms: 10_000, read_ms: 20_000, ask_ms: 10_000, erase_ms: 10_000, boot_ms: 600 });
+        let took = began.elapsed();
+        if let Some(t) = stopper {
+            t.join().unwrap();
+        }
+        let state = job.shared.lock().unwrap().clone();
+        let did = desk.did.lock().unwrap().clone();
+        (state, did, dir, took)
+    }
+
+    fn until(shared: &Shared, what: impl Fn(&Pull) -> bool) {
+        while !what(&shared.lock().unwrap()) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_pull_stopped_mid_read_keeps_what_arrived_and_puts_the_flight_software_back() {
+        // two records, then slow printing for longer than the test runs
+        let mut printed = vec![Step::Bytes(TWO.as_bytes().to_vec())];
+        printed.extend((0..100).map(|_| Step::Silence(200)));
+        let (p, did, dir, took) = pulled_stopping("stopread", printed, true, Some(Box::new(|s: &Shared| {
+            until(s, |p| p.raw.is_some());
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        })));
+        assert!(took < std::time::Duration::from_secs(5), "the stop ended it, not the quiet limit: {:?}", took);
+        assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"]);
+        assert!(p.restored);
+        assert!(!p.running);
+        assert_eq!(p.error.as_deref(), Some("stopped by the operator"));
+        let folder = PathBuf::from(p.dir.clone().unwrap());
+        assert!(
+            p.note.starts_with("stopped by the operator, read 2 records, and the board never got to its count, board id 50, flight software back on the board; saved in "),
+            "{}",
+            p.note
+        );
+        assert!(std::fs::read_to_string(folder.join("dump.txt")).unwrap().contains(TWO));
+        let log = std::fs::read_to_string(folder.join("ground.log")).unwrap();
+        assert_eq!(log.matches("PKT,55,").count(), 2, "what arrived is read as well as kept");
+        assert!(p.steps.iter().any(|s| s.starts_with("stop asked for")), "{:?}", p.steps);
+        assert!(state_json(&p, 0).contains("\"stopping\":false"), "a finished job is not stopping");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stop_before_the_dump_firmware_leaves_the_board_as_it_was() {
+        // asked while the flight software is being saved, so the board is never written
+        let (p, did, dir, _) = pulled_stopping("stopearly", Vec::new(), true, None);
+        assert_eq!(did, vec!["save"], "nothing written, so nothing to put back");
+        assert!(!p.restored);
+        assert_eq!(p.error.as_deref(), Some("stopped by the operator"));
+        assert!(p.note.starts_with("stopped by the operator; saved in "), "{}", p.note);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clear_stopped_while_waiting_to_be_asked_puts_the_flight_software_back_unerased() {
+        let printed = (0..100).map(|_| Step::Silence(200)).collect();
+        let (p, did, dir, took) = pulled_stopping("wipe-stopped", printed, false, Some(Box::new(|s: &Shared| {
+            until(s, |p| p.note.starts_with("asking the dump firmware"));
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        })));
+        assert!(took < std::time::Duration::from_secs(5), "{:?}", took);
+        assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"]);
+        assert!(p.restored);
+        assert_eq!(p.error.as_deref(), Some("stopped by the operator"));
+        assert_eq!(p.note, "stopped by the operator, flight software back on the board");
+        assert_eq!(kept_in(&dir), Vec::<String>::new(), "a stopped clear keeps nothing either");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn there_is_nothing_to_stop_when_nothing_runs() {
+        let s = shared();
+        assert!(stop(&s).is_err());
+        s.lock().unwrap().running = true;
+        stop(&s).unwrap();
+        stop(&s).unwrap();
+        let p = s.lock().unwrap().clone();
+        assert_eq!(p.steps.len(), 1, "a second press says nothing new");
+        assert!(state_json(&p, 0).contains("\"stopping\":true"));
+    }
+    // `answers` is what the port says when the check resets the board, None for nothing
+    fn pulled_checking(what: &str, answers: Option<&str>) -> (Pull, Vec<String>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dg-pull-{}-{}", what, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (go, wait) = std::sync::mpsc::channel();
+        let mut steps = vec![Step::Bytes(b"I TX 1 c1: flight software talking\r\n".to_vec()), Step::Wait(wait)];
+        if let Some(said) = answers {
+            // the write between the two resets takes about 500 ms here
+            steps.push(Step::Bytes(said.as_bytes().to_vec()));
+            steps.push(Step::Silence(1500));
+            steps.push(Step::Bytes(format!("I BOOT 0 c0: start test=flashdump\r\n{}{}", TWO, FOUND_TWO).into_bytes()));
+        } else {
+            steps.extend((0..20).map(|_| Step::Silence(100)));
+        }
+        let (listener, _ended) = played(steps);
+        let desk = Desk { did: Mutex::new(Vec::new()), named: Mutex::new(Vec::new()), go: Mutex::new(Some(go)), fail_write: None };
+        let job = Job {
+            shared: shared(),
+            broadcast: crate::ws::Broadcast::new(),
+            dir: dir.clone(),
+            port_name: "/dev/ttyUSB0".into(),
+            probe: None,
+            wipe: false,
+            keep_fsw: true,
+            dump_image: DUMP.to_vec(),
+            dump_from: String::new(),
+            prepare: None,
+            known: None,
+            uid: None,
+            name: None,
+            check_console: true,
+        };
+        job.shared.lock().unwrap().running = true;
+        // longer than the gap between the check's boot line and the dump's printing
+        pull(&job, &desk, listener, &Limits { quiet_ms: 2_000, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
+        let state = job.shared.lock().unwrap().clone();
+        let did = desk.did.lock().unwrap().clone();
+        (state, did, dir)
+    }
+
+    #[test]
+    fn a_console_that_says_the_board_started_is_pulled() {
+        let (p, did, dir) = pulled_checking("console-ok", Some("\u{fffd}I BOOT 0 c0: start log=4\r\nI GPS 3 c0: start\r\n"));
+        assert_eq!(did, vec!["reset", "save", "write dump firmware", "reset", "write flight software", "reset"]);
+        assert_eq!(p.error, None, "{:?}", p.note);
+        assert!(p.restored);
+        assert!(p.steps.iter().any(|s| s == "checking that /dev/ttyUSB0 is this board's console"), "{:?}", p.steps);
+        let log = std::fs::read_to_string(PathBuf::from(p.dir.unwrap()).join("ground.log")).unwrap();
+        assert_eq!(log.matches("PKT,55,").count(), 2, "the boot line from the check is not part of the dump");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_console_that_says_nothing_is_refused_before_anything_is_written() {
+        let (p, did, dir) = pulled_checking("console-silent", None);
+        assert_eq!(did, vec!["reset"], "found out before the minute the save takes, and nothing written");
+        let e = p.error.unwrap();
+        assert!(e.starts_with("/dev/ttyUSB0 is not this board's console") && e.contains("Nothing was written"), "{}", e);
+        assert!(!p.restored, "nothing was written, so nothing is put back");
+        assert_eq!(p.saved_fsw, None);
+        assert!(p.note.starts_with("failed; what arrived is in "), "{}", p.note);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_boot_line_that_comes_after_other_talk_is_some_other_boards() {
+        // a board boot-looping on this port prints a boot line sooner or later too
+        let chatter = "I TX 1 c1: send\r\nI TX 2 c1: send\r\nI TX 3 c1: send\r\nI TX 4 c1: send\r\nI TX 5 c1: send\r\nI BOOT 0 c0: start log=4\r\n";
+        let (p, did, dir) = pulled_checking("console-other", Some(chatter));
+        assert_eq!(did, vec!["reset"]);
+        assert!(p.error.unwrap().contains("is not this board's console"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_board_already_on_the_dump_firmware_is_not_saved_as_its_flight_software() {
+        // an earlier pull left every board like this on 2026-10-18
+        let (p, did, dir) = pulled_checking("console-ondump", Some("I BOOT 0 c0: start test=flashdump\r\nI FLASH 0 c0: start\r\n"));
+        assert_eq!(did, vec!["reset", "write dump firmware", "reset"], "nothing saved, so nothing put back as if it were flight software");
+        assert_eq!(p.error, None);
+        assert_eq!(p.saved_fsw, None);
+        assert!(!p.restored);
+        assert!(p.steps.iter().any(|s| s.contains("already running the dump firmware")), "{:?}", p.steps);
+        assert!(p.note.contains("the board is still running the dump firmware"), "{}", p.note);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

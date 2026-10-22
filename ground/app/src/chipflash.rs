@@ -176,6 +176,10 @@ pub struct Known {
     // dump firmware, and calling it "unknown" reads as "flight software is on it".
     pub older_dumps: &'static [(usize, &'static str)],
     pub flight: Vec<FlightImage>,
+    pub bench: Vec<(&'static str, &'static [u8])>,
+    pub built: Vec<crate::localfw::Identity>,   // everything built on this laptop (localfw.rs)
+    // tree source hash while the app uses the tree, a dump built from it counts as current
+    pub source_now: Option<String>,
 }
 
 pub struct FlightImage {
@@ -209,35 +213,65 @@ impl Known {
                     block_at: settings::locate(i.bytes).ok().flatten(),
                 })
                 .collect(),
+            bench: bench_images(),
+            built: Vec::new(),
+            source_now: None,
+        }
+    }
+
+    pub fn with(local: &crate::localfw::Local) -> Known {
+        Known {
+            built: local.registered(),
+            source_now: if local.on() { local.origin().map(|o| o.source) } else { None },
+            ..Known::carried()
         }
     }
 }
 
+// leaves out a module the app was built without
+pub fn bench_images() -> Vec<(&'static str, &'static [u8])> {
+    [("le", crate::flash::CHIPSAT_BENCH_LE), ("hp", crate::flash::CHIPSAT_BENCH_HP)]
+        .into_iter()
+        .filter_map(|(m, b)| b.filter(|b| !b.is_empty()).map(|b| (m, b)))
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Firmware {
-    pub kind: &'static str,             // "dump", "flight" or "unknown"
+    pub kind: &'static str,             // "dump", "flight", "bench" or "unknown"
     pub current: bool,                  // for dump: it is the image this build carries
-    pub module: Option<&'static str>,   // for flight: which module the image is built for
+    pub module: Option<&'static str>,   // for flight and bench: which module the image is built for
     pub id: Option<String>,
+    pub built: Option<crate::localfw::Identity>,
 }
 
 impl Firmware {
     fn unknown() -> Firmware {
-        Firmware { kind: "unknown", current: false, module: None, id: None }
+        Firmware { kind: "unknown", current: false, module: None, id: None, built: None }
+    }
+
+    fn built_json(&self) -> String {
+        match &self.built {
+            Some(b) => format!(",\"built\":{}", b.json((crate::logfile::now_ms() / 1000) as u64)),
+            None => String::new(),
+        }
     }
 
     // As /api/chip/read gives it under "firmware".
     pub fn json(&self) -> String {
         match (self.kind, self.module) {
             ("dump", _) => format!(
-                "{{\"kind\":\"dump\",\"current\":{},\"id\":\"{}\"}}",
+                "{{\"kind\":\"dump\",\"current\":{},\"id\":\"{}\"{}}}",
                 self.current,
-                esc(self.id.as_deref().unwrap_or(""))
+                esc(self.id.as_deref().unwrap_or("")),
+                self.built_json()
             ),
-            ("flight", Some(module)) => format!(
-                "{{\"kind\":\"flight\",\"module\":\"{}\",\"id\":\"{}\"}}",
+            ("flight", Some(module)) | ("bench", Some(module)) => format!(
+                "{{\"kind\":\"{}\",\"module\":\"{}\",\"id\":\"{}\"{}}}",
+                self.kind,
                 module,
-                esc(self.id.as_deref().unwrap_or(""))
+                esc(self.id.as_deref().unwrap_or("")),
+                self.built_json()
             ),
             _ => String::from("{\"kind\":\"unknown\"}"),
         }
@@ -249,6 +283,8 @@ impl Firmware {
             ("dump", _) => "dump",
             ("flight", Some("le")) => "flight-le",
             ("flight", Some("hp")) => "flight-hp",
+            ("bench", Some("le")) => "bench-le",
+            ("bench", Some("hp")) => "bench-hp",
             _ => "unknown",
         }
     }
@@ -271,10 +307,33 @@ fn is_flight(flash: &[u8], f: &FlightImage) -> bool {
     }
 }
 
-// What the start of a board's flash is. Only ever one of the images named in `known`,
-// byte for byte but for a flight image's settings: a flight image has no mark of its own
-// to go by, so one this build does not carry is "unknown" and not "flight".
+// What the start of a board's flash is. Only ever one of the images in `known`, byte for byte
+// apart from a flight image's settings. A flight image has no mark of its own, so one neither
+// carried nor built here is "unknown", not "flight". Built here wins even if the app carries
+// the same bytes
 pub fn recognise(image: &[u8], known: &Known) -> Firmware {
+    let carried = recognise_carried(image, known);
+    // newest match, that's the build someone remembers
+    let Some(b) = known.built.iter().rev().find(|b| b.matches(image)) else { return carried };
+    let Some(p) = crate::localfw::part(&b.part) else { return carried };
+    if carried.kind != "unknown" && carried.kind != p.kind {
+        return carried;
+    }
+    let current = match p.kind {
+        "dump" => carried.current || known.source_now.as_deref() == Some(b.origin.source.as_str()),
+        "bench" => true,
+        _ => false,
+    };
+    Firmware {
+        kind: p.kind,
+        current,
+        module: p.module.or(carried.module),
+        id: carried.id.clone().or_else(|| Some(b.id().to_string())),
+        built: Some(b.clone()),
+    }
+}
+
+fn recognise_carried(image: &[u8], known: &Known) -> Firmware {
     let sha256 = |bytes: &[u8]| -> String { Sha256::digest(bytes).iter().map(|b| format!("{:02x}", b)).collect() };
     // An image is named by the start of its sha256, the way /api/health names the ones carried.
     let id = |hex: &str| Some(hex.chars().take(16).collect::<String>().to_ascii_lowercase());
@@ -290,8 +349,12 @@ pub fn recognise(image: &[u8], known: &Known) -> Firmware {
     if let Some((_, hash)) = older {
         return Firmware { kind: "dump", current: false, id: id(hash), ..Firmware::unknown() };
     }
+    // no settings block, so exact bytes
+    if let Some((module, bytes)) = known.bench.iter().find(|(_, b)| !b.is_empty() && image.starts_with(b)) {
+        return Firmware { kind: "bench", current: true, module: Some(*module), id: id(&sha256(bytes)), built: None };
+    }
     match known.flight.iter().find(|f| is_flight(image, f)) {
-        Some(f) => Firmware { kind: "flight", current: false, module: Some(f.module), id: Some(f.id.clone()) },
+        Some(f) => Firmware { kind: "flight", current: false, module: Some(f.module), id: Some(f.id.clone()), built: None },
         None => Firmware::unknown(),
     }
 }
@@ -395,11 +458,14 @@ pub struct Job {
     pub build: Option<BuildPlan>,
 }
 
+// gets the image from the tree (localfw.rs), returns it plus where it came from in words
+pub type Make = Box<dyn FnOnce(&dyn Fn(&str)) -> Result<(Vec<u8>, String), String> + Send>;
+
 pub struct BuildPlan {
-    pub at: PathBuf,
-    pub module: String,
-    pub asked: settings::Asked,
-    pub words: String,   // what is being built, for the steps
+    pub make: Make,
+    // None for the bench, it has no block
+    pub asked: Option<settings::Asked>,
+    pub words: String,   // what is being got, for the steps
 }
 
 // The caller holds the probe's gate, and hands it over so it is let go when the job ends.
@@ -409,17 +475,21 @@ pub fn start(job: Job, held: stm32::Held) {
     let mut job = job;
     std::thread::spawn(move || {
         if let Some(plan) = job.build.take() {
-            step(&job.shared, 2, &format!("building {}", plan.words));
+            let shared = job.shared.clone();
             // Built for the module, then given the board's settings the same way the carried
             // image is: by rewriting the block. One writer, so what a damaged block falls
             // back to is the same whichever way the image came.
-            let built = crate::fswbuild::build(&plan.at, &plan.module).and_then(|bytes| {
-                let (at, _) = settings::writable(&bytes)?;
-                settings::patch(&bytes, at, &plan.asked)
+            let asked = plan.asked;
+            let built = (plan.make)(&|said: &str| step(&shared, 2, said)).and_then(|(bytes, from)| match &asked {
+                Some(asked) => {
+                    let (at, _) = settings::writable(&bytes)?;
+                    Ok((settings::patch(&bytes, at, asked)?, from))
+                }
+                None => Ok((bytes, from)),
             });
             match built {
-                Ok(bytes) => {
-                    step(&job.shared, 5, &format!("built {}, {} kB", plan.words, bytes.len() / 1024));
+                Ok((bytes, from)) => {
+                    step(&job.shared, 5, &format!("{}, {} kB", from, bytes.len().div_ceil(1024)));
                     job.image = bytes;
                     job.label = plan.words;
                 }
@@ -558,12 +628,20 @@ fn flash(job: &Job, bench: &dyn Bench) {
             step(shared, 2, note);
         }
 
-        if job.backup {
+        // saving the dump firmware would replace the newest real image, the only one kept
+        let on_dump = recognise(&seen.image, &job.known).kind == "dump";
+        if job.backup && on_dump {
+            step(shared, 5, "the board is running the dump firmware, so nothing is saved off it");
+        }
+        if job.backup && !on_dump {
             step(shared, 5, "saving what is on the board");
             let name = registry.lock().unwrap().get(uid).map(|c| c.name.clone()).unwrap_or_default();
-            let file = stm32::image_name(uid, &name, SystemTime::now());
-            let path = bench.save(dir, &file, &listener(shared, String::new()))?;
-            shared.lock().unwrap().saved = Some(file);
+            let now = SystemTime::now();
+            let place = crate::layout::folder(dir, crate::layout::IMAGES, now)?;
+            let free = crate::layout::unused(&place.dir, &crate::layout::hhmm(now), &stm32::image_rest(uid, &name), ".bin")?;
+            let file = free.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let path = bench.save(&place.dir, &file, &listener(shared, String::new()))?;
+            shared.lock().unwrap().saved = Some(place.rel_of(&file));
             step(shared, 40, &format!("saved {}", path.display()));
             saved = Some(path);
         }
@@ -596,6 +674,13 @@ fn flash(job: &Job, bench: &dyn Bench) {
         Ok(())
     })();
 
+    // only the newest save per board is kept
+    if let Some(path) = &saved {
+        let gone = crate::layout::keep_only_latest(dir, path);
+        if !gone.is_empty() {
+            step(shared, 99, &format!("removed {} older saved image{} of this board", gone.len(), if gone.len() == 1 { "" } else { "s" }));
+        }
+    }
     let error = done.err().map(|e| with_saved(e, &saved));
     let note = match &error {
         None => format!("done, {} is on the board", label),
@@ -755,9 +840,11 @@ mod tests {
         assert_eq!(s.note, "done, new.bin is on the board");
 
         // The saved image is named for the board it came off, and is what was on it.
+        // relative, as /api/log takes it
         let name = s.saved.clone().unwrap();
-        assert!(name.starts_with("descent-image-20393256-Flight-spare-2-") && name.ends_with(".bin"), "{}", name);
-        assert_eq!(desk.named.lock().unwrap().clone(), vec![name.clone()]);
+        let day = crate::layout::day(SystemTime::now());
+        assert!(name.starts_with(&format!("{}/images/", day)) && name.ends_with("-Flight-spare-2-20393256.bin"), "{}", name);
+        assert_eq!(desk.named.lock().unwrap().clone(), vec![name.rsplit('/').next().unwrap().to_string()]);
         assert_eq!(std::fs::read(dir.join(&name)).unwrap(), OLD);
 
         assert_eq!(
@@ -983,7 +1070,7 @@ mod tests {
 
     // A build that carries the dump image and nothing else to tell a board by.
     fn only_dump() -> Known {
-        Known { dump: Some(DUMP), older_dumps: &[], flight: Vec::new() }
+        Known { dump: Some(DUMP), older_dumps: &[], flight: Vec::new(), bench: Vec::new(), built: Vec::new(), source_now: None }
     }
 
     const OLD_DUMP: &[u8] = b"the dump firmware from the build before";
@@ -1006,7 +1093,27 @@ mod tests {
                 FlightImage { module: "le", bytes: FLIGHT_LE, id: "f84691175ddf2641".to_string(), block_at: None },
                 FlightImage { module: "hp", bytes: FLIGHT_HP, id: "c2b044e470464918".to_string(), block_at: None },
             ],
+            bench: vec![("le", BENCH_LE), ("hp", BENCH_HP)],
+            built: Vec::new(),
+            source_now: None,
         }
+    }
+
+    const BENCH_LE: &[u8] = b"the sensor bench built for the LE module";
+    const BENCH_HP: &[u8] = b"the sensor bench built for the HP module";
+
+    #[test]
+    fn a_board_on_the_bench_firmware_is_said_to_be_and_by_module() {
+        let known = everything();
+        let mut flash = BENCH_HP.to_vec();
+        flash.extend_from_slice(&[0xFF; 64]);
+        let f = recognise(&flash, &known);
+        assert_eq!((f.kind, f.module, f.word()), ("bench", Some("hp"), "bench-hp"));
+        assert_eq!(f.json(), format!("{{\"kind\":\"bench\",\"module\":\"hp\",\"id\":\"{}\"}}", &sha256(BENCH_HP)[..16]));
+        assert_eq!(recognise(BENCH_LE, &known).word(), "bench-le");
+        assert_eq!(crate::chips::firmware_words("bench-le"), Some(("bench", Some("le"))));
+        // truncated bench image
+        assert_eq!(recognise(&BENCH_LE[..10], &known).kind, "unknown");
     }
 
     // A stand-in for a flight image that carries a block, as the real ones do: the same
@@ -1058,12 +1165,129 @@ mod tests {
                 FlightImage { module: "le", bytes: flight_with_block(1), id: "c4fb204d8f79e725".to_string(), block_at: Some(BLOCK_AT) },
                 FlightImage { module: "hp", bytes: flight_with_block(2), id: "6935d29957db19b5".to_string(), block_at: Some(BLOCK_AT) },
             ],
+            bench: Vec::new(),
+            built: Vec::new(),
+            source_now: None,
         }
     }
 
     fn on(desk: Desk, image: &[u8]) -> Desk {
         *desk.on_board.lock().unwrap() = image.to_vec();
         desk
+    }
+
+    fn built_here(part: &str, image: &[u8], block_at: Option<usize>, source: &str) -> crate::localfw::Identity {
+        crate::localfw::Identity {
+            part: part.to_string(),
+            at: (crate::logfile::now_ms() / 1000) as u64,
+            origin: crate::fswbuild::Origin {
+                source: source.to_string(),
+                commit: Some("abc1234def5678abc1234def5678abc1234def56".into()),
+                dirty: Some(true),
+                changed: vec!["V2_6_X_Code/src/config.h".into()],
+            },
+            sha256: sha256(image),
+            masked: crate::localfw::masked(image, block_at),
+            len: image.len(),
+            block_at,
+        }
+    }
+    const SRC: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+
+    #[test]
+    fn a_board_on_an_image_built_here_is_named_by_where_it_came_from() {
+        let mut tree_le = flight_with_block(1).to_vec();
+        tree_le[FALLBACK_AT + 1] ^= 0x5A;
+        let mut known = with_blocks();
+        assert_eq!(recognise(&in_flash(&tree_le), &known).kind, "unknown", "not carried, not built: unknown");
+        known.built.push(built_here("flight-le", &tree_le, Some(BLOCK_AT), SRC));
+        // different board id in the block
+        let mut on_board = tree_le.clone();
+        on_board[BLOCK_AT..BLOCK_AT + settings::SIZE].copy_from_slice(&tool_block(9, 1));
+        let f = recognise(&in_flash(&on_board), &known);
+        assert_eq!((f.kind, f.module, f.word()), ("flight", Some("le"), "flight-le"));
+        let b = f.built.as_ref().expect("named by the registry");
+        assert_eq!(b.origin.changed, vec!["V2_6_X_Code/src/config.h".to_string()]);
+        assert_eq!(f.id.as_deref(), Some(&sha256(&tree_le)[..16]));
+        let j = f.json();
+        assert!(j.starts_with(&format!("{{\"kind\":\"flight\",\"module\":\"le\",\"id\":\"{}\",\"built\":{{\"part\":\"flight-le\"", &sha256(&tree_le)[..16])), "{}", j);
+        assert!(j.contains("\"words\":\"flight LE built here ") && j.contains(" from abc1234 + config.h changed\""), "{}", j);
+        let mut other = on_board.clone();
+        other[0] ^= 1;
+        assert_eq!(recognise(&other, &known).kind, "unknown");
+    }
+
+    #[test]
+    fn the_carried_image_built_here_too_keeps_its_carried_name_and_says_where_it_was_built() {
+        let mut known = with_blocks();
+        let carried = flight_with_block(2);
+        known.built.push(built_here("flight-hp", carried, Some(BLOCK_AT), SRC));
+        let f = recognise(&in_flash(carried), &known);
+        assert_eq!((f.kind, f.module, f.id.as_deref()), ("flight", Some("hp"), Some("6935d29957db19b5")));
+        assert!(f.built.is_some());
+        let mut wrong = with_blocks();
+        wrong.built.push(built_here("bench-hp", carried, None, SRC));
+        assert_eq!(recognise(carried, &wrong).kind, "flight");
+        assert!(recognise(carried, &wrong).built.is_none());
+    }
+
+    #[test]
+    fn a_dump_built_here_is_the_current_one_only_from_the_sources_in_use() {
+        const TREE_DUMP: &[u8] = b"the dump firmware built from this computer's tree";
+        let mut known = only_dump();
+        known.built.push(built_here("flash_dump", TREE_DUMP, None, SRC));
+        let f = recognise(&in_flash(TREE_DUMP), &known);
+        assert_eq!((f.kind, f.current), ("dump", false));
+        known.source_now = Some(SRC.to_string());
+        let f = recognise(&in_flash(TREE_DUMP), &known);
+        assert_eq!((f.kind, f.current, f.word()), ("dump", true, "dump"));
+        assert!(f.json().contains("\"built\":{\"part\":\"flash_dump\",\"label\":\"dump firmware\""), "{}", f.json());
+        known.built.push(built_here("bench-hp", BENCH_HP, None, SRC));
+        assert_eq!(recognise(&in_flash(BENCH_HP), &known).word(), "bench-hp");
+    }
+
+    #[test]
+    fn an_image_got_from_the_tree_is_a_step_of_the_flash_and_is_given_the_boards_settings() {
+        let desk = on(desk(), OLD);
+        let dir = scratch("tree");
+        let image = flight_with_block(1).to_vec();
+        let rate = |fixed_ms: u32| settings::Rate { fixed_ms, follow: false, percent: [75, 50, 35, 20], interval_ms: [10_000, 30_000, 60_000, 120_000, 180_000] };
+        let asked = settings::Asked { csid: 9, sf: 7, dbm: 14, rates: [rate(60_000), rate(1000), rate(1000), rate(60_000)], logs: [10_000, 50, 50, 10_000], log_blind_ms: 200 };
+        let make: Make = Box::new(move |say: &dyn Fn(&str)| {
+            say("building the flight LE from the flight software in /tree");
+            Ok((image, String::from("flight LE built here 14:02 from abc1234 + config.h changed")))
+        });
+        let mut job = Job {
+            shared: shared(),
+            registry: known(),
+            dir: dir.clone(),
+            probe: None,
+            uid: UID.into(),
+            backup: false,
+            image: Vec::new(),
+            label: "a flight image for board 9".into(),
+            note: None,
+            known: with_blocks(),
+            build: Some(BuildPlan { make, asked: Some(asked), words: "a flight image for board 9".into() }),
+        };
+        // start() minus the thread
+        begin(&job.shared, "flash", UID);
+        let plan = job.build.take().unwrap();
+        let shared2 = job.shared.clone();
+        let (bytes, from) = (plan.make)(&|said: &str| step(&shared2, 2, said)).unwrap();
+        let (at, _) = settings::writable(&bytes).unwrap();
+        job.image = settings::patch(&bytes, at, plan.asked.as_ref().unwrap()).unwrap();
+        step(&job.shared, 5, &format!("{}, {} kB", from, job.image.len().div_ceil(1024)));
+        flash(&job, &desk);
+        let s = job.shared.lock().unwrap().clone();
+        assert_eq!(s.error, None, "{:?}", s.steps);
+        let written = desk.on_board.lock().unwrap().clone();
+        match settings::find(&written).unwrap() {
+            Found::Block(set) => assert_eq!((set.csid, set.module), (9, "le")),
+            other => panic!("the board's settings are in the block: {:?}", other),
+        }
+        assert!(s.steps.iter().any(|l| l == "flight LE built here 14:02 from abc1234 + config.h changed, 4 kB"), "{:?}", s.steps);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1154,9 +1378,9 @@ mod tests {
         assert_eq!(recognise(&DUMP[..DUMP.len() - 1], &only_dump()).kind, "unknown");
         assert_eq!(recognise(&[], &only_dump()).kind, "unknown");
         // A build with no dump image in it has nothing to compare against.
-        let none = Known { dump: None, older_dumps: &[], flight: Vec::new() };
+        let none = Known { dump: None, older_dumps: &[], flight: Vec::new(), bench: Vec::new(), built: Vec::new(), source_now: None };
         assert_eq!(recognise(DUMP, &none).kind, "unknown");
-        let empty = Known { dump: Some(&[]), older_dumps: &[], flight: Vec::new() };
+        let empty = Known { dump: Some(&[]), older_dumps: &[], flight: Vec::new(), bench: Vec::new(), built: Vec::new(), source_now: None };
         assert_eq!(recognise(DUMP, &empty).kind, "unknown");
     }
 
@@ -1184,7 +1408,7 @@ mod tests {
     #[test]
     fn a_flight_image_this_build_carries_is_recognised_with_its_module() {
         let le = recognise(&in_flash(FLIGHT_LE), &everything());
-        assert_eq!(le, Firmware { kind: "flight", current: false, module: Some("le"), id: Some("f84691175ddf2641".into()) });
+        assert_eq!(le, Firmware { kind: "flight", current: false, module: Some("le"), id: Some("f84691175ddf2641".into()), built: None });
         assert_eq!(le.json(), "{\"kind\":\"flight\",\"module\":\"le\",\"id\":\"f84691175ddf2641\"}");
         assert_eq!(le.word(), "flight-le");
 
@@ -1195,7 +1419,7 @@ mod tests {
         let mut flipped = in_flash(FLIGHT_HP);
         flipped[FLIGHT_HP.len() - 1] ^= 0x80;
         let no = recognise(&flipped, &everything());
-        assert_eq!(no, Firmware { kind: "unknown", current: false, module: None, id: None });
+        assert_eq!(no, Firmware { kind: "unknown", current: false, module: None, id: None, built: None });
         assert_eq!(no.json(), "{\"kind\":\"unknown\"}");
         assert_eq!(no.word(), "unknown");
         // Flight software this build does not carry has nothing to be told by.
@@ -1210,7 +1434,7 @@ mod tests {
         if let Some(dump) = known.dump {
             // Named as /api/health names it, so the sheet and the health line agree.
             let id = Some(crate::flash::CHIPSAT_DUMP_ID.to_string());
-            assert_eq!(recognise(dump, &known), Firmware { kind: "dump", current: true, module: None, id });
+            assert_eq!(recognise(dump, &known), Firmware { kind: "dump", current: true, module: None, id, built: None });
         }
         for carried in &known.flight {
             let f = recognise(carried.bytes, &known);
@@ -1420,5 +1644,47 @@ mod tests {
         // Putting an image back does not run the bar backwards.
         said(Doing::Erasing, 0, 0);
         assert!(state.lock().unwrap().pct >= s.pct);
+    }
+
+    #[test]
+    fn a_board_on_the_dump_firmware_has_nothing_saved_and_older_images_of_a_board_go() {
+        // on the dump firmware: nothing saved, newest real image stays
+        let on_dump = desk();
+        *on_dump.on_board.lock().unwrap() = DUMP.to_vec();
+        let (s, did, _, dir) = flashed("ondump", &on_dump, true, NEW, None);
+        assert!(!did.contains(&"save".to_string()), "{:?}", did);
+        assert_eq!(s.saved, None);
+        assert!(s.steps.iter().any(|x| x.contains("dump firmware, so nothing is saved")), "{:?}", s.steps);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // on flight software: saved, and the older image of the same board removed
+        let on_flight = desk();
+        let dir = scratch("keepnewest");
+        std::fs::create_dir_all(dir.join("2026-10-01/images")).unwrap();
+        let older = dir.join("2026-10-01/images/0900-board-20393256.bin");
+        let other = dir.join("2026-10-01/images/0900-board-20393301.bin");
+        std::fs::write(&older, b"old").unwrap();
+        std::fs::write(&other, b"other board").unwrap();
+        let job = Job {
+            shared: shared(),
+            registry: known(),
+            dir: dir.clone(),
+            probe: None,
+            uid: UID.into(),
+            backup: true,
+            image: NEW.to_vec(),
+            label: "new.bin".into(),
+            note: None,
+            known: only_dump(),
+            build: None,
+        };
+        begin(&job.shared, "flash", UID);
+        flash(&job, &on_flight);
+        let s = job.shared.lock().unwrap().clone();
+        assert_eq!(s.error, None);
+        assert!(dir.join(s.saved.unwrap()).is_file());
+        assert!(!older.exists(), "the older image of this board is gone");
+        assert!(other.exists(), "another board's is not");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

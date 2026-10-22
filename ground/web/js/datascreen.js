@@ -83,13 +83,18 @@
     }
     const boots = D.bootRows(state.report);
     const undated = boots.filter((b) => !b.dated).length;
+    const ev = D.events(state.report);
     const bootTable = boots.length
-      ? '<div class="scroll"><table class="grid plain"><thead><tr><th>Boot</th><th class="r">Records</th><th class="r">Ran for</th><th>Started</th><th>GPS anchors</th><th>Clock</th><th class="r">Board id</th></tr></thead><tbody>' +
+      ? '<div class="scroll"><table class="grid plain"><thead><tr><th>Boot</th><th class="r">Records</th><th class="r">Ran for</th><th>Started</th><th>GPS anchors</th><th>Clock</th><th class="r">Board id</th>' +
+        (ev ? '<th>Reset cause</th><th class="r">Dropped</th>' : '') + '</tr></thead><tbody>' +
         boots.map((b) => '<tr><td>' + esc(b.boot) + '</td><td class="r">' + b.records + '</td><td class="r">' + b.ranFor + '</td>' +
           '<td' + (b.dated ? '' : ' class="muted"') + '>' + esc(b.started) + '</td>' +
           '<td' + (b.anchors === 'none' ? ' class="muted"' : '') + '>' + b.anchors + '</td>' +
           '<td' + (b.clock === '—' ? ' class="muted"' : '') + ' title="How fast the board\'s clock ran against GPS">' + b.clock + '</td>' +
-          '<td class="r' + (b.ids === '—' ? ' muted' : '') + '">' + b.ids + '</td></tr>').join('') +
+          '<td class="r' + (b.ids === '—' ? ' muted' : '') + '">' + b.ids + '</td>' +
+          (ev ? '<td' + (b.reset === '—' ? ' class="muted"' : '') + ' title="The reset flags the board found at this boot">' + esc(b.reset) + '</td>' +
+            '<td class="r' + (b.dropped === '—' ? ' muted' : '') + '" title="Records lost when the RAM ring overran before the flash caught up">' + b.dropped + '</td>' : '') +
+          '</tr>').join('') +
         '</tbody></table></div>'
       : '<p class="empty">The report lists no boots.</p>';
     const transfer = D.transferRows(state.report).map((t) =>

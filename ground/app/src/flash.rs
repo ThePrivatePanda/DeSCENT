@@ -144,15 +144,11 @@ pub fn backup(port: &str, dir: &Path, broadcast: &crate::ws::Broadcast) -> Resul
         .map_err(|e| format!("could not read the flash size: {}", e))?
         .unwrap_or(espflash::flasher::FlashSize::_4Mb);
     let bytes = size.size();
-    let name = format!(
-        "descent-ground-backup-{}-{}.bin",
-        port.rsplit('/').next().unwrap_or("port"),
-        humantime::format_rfc3339_seconds(std::time::SystemTime::now())
-            .to_string()
-            .replace(':', "-")
-            .replace('Z', "")
-    );
-    let path = dir.join(name);
+    // own folder so it's never offered for a ChipSat
+    let now = std::time::SystemTime::now();
+    let place = crate::layout::folder(dir, crate::layout::RECEIVER_IMAGES, now)?;
+    let path = crate::layout::unused(&place.dir, &crate::layout::hhmm(now), &crate::layout::board_word(port), ".bin")?;
+    let dir = place.dir.as_path();
 
     // espflash reads to a file of its own and truncates it, so the chip is taken a
     // piece at a time and the pieces appended. Without this the operator watches one
@@ -228,10 +224,8 @@ pub fn handle_request(body: &str, ctx: &Arc<Ctx>) -> String {
         return err(&e);
     }
 
-    // Reading the whole chip takes minutes, and an operator who has already saved this
-    // board, or does not care what is on it, should be able to say so. Off by default:
-    // skipping is a choice, never the quiet path.
-    let keep_backup = crate::json::int_field(body, "backup").unwrap_or(1) != 0;
+    // reading the chip takes minutes and the app has the firmware anyway (decided 2026-10-21)
+    let keep_backup = crate::json::int_field(body, "backup").unwrap_or(0) != 0;
 
     if let Err(e) = ctx.hub.lock().unwrap().release_for_flash(&port) {
         return err(&e);

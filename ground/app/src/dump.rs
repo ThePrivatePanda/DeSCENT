@@ -29,9 +29,15 @@
 // Both end with a line saying how many it found, which is how we know a dump finished
 // rather than stopped halfway.
 //
+// Since 2026-10-22 the log is a ring, so on a full chip the newest records can be at a lower
+// address than the oldest. Sectors are sorted by the boot and ms of their first good record,
+// same rule as headOlder in FlashLog.cpp, so a printing in address order reads right too.
+// Slot type 0xA7 is an event, byte 7 its kind. Lock events came from an older ring version
+// and are only counted
+//
 // Everything else on that port is console chatter and is ignored.
 use crate::json::esc;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const PACKET_BYTES: usize = 55;
 // Where the board's id sits in a packet: one byte, after the counter. This is the one
@@ -43,6 +49,12 @@ const SLOT_BYTES: usize = 64;
 const SLOT_CRC_AT: usize = 62;
 const SLOT_PACKET: u8 = 0xA5;
 const SLOT_TIME: u8 = 0xA6;
+const SLOT_EVENT: u8 = 0xA7;
+// byte 7 of an event slot, from FlashLog.h
+const EVENT_BOOT: u8 = 1;
+const EVENT_LOCK: u8 = 2;
+const EVENT_DROPPED: u8 = 3;
+const SECTOR_SLOTS: u64 = 4096 / SLOT_BYTES as u64;
 const BOOT_GAP_MS: u64 = 1000;
 // How far one anchor may sit from the middle of the anchors written around it and still be
 // believed. Picked, not measured. A digit lost from an uptime of more than a few seconds
@@ -69,10 +81,39 @@ pub struct Anchor {
     pub unix_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum EventKind {
+    // RCC CSR before it was cleared, reset flags in bits 24-31
+    Boot { csr: u32 },
+    // dropped so far this boot, waiting on an erase
+    Dropped { count: u32 },
+    // 0x10-0x3F are reserved for sensor and bus events
+    Other(u8),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Event {
+    pub boot: u32,
+    pub ms: u64,
+    pub kind: EventKind,
+}
+
+// bit 24 first, names as in FlashLog.h
+const RESET_FLAGS: [&str; 8] = ["RFILAR", "OBL", "PIN", "BOR", "SFT", "IWDG", "WWDG", "LPWR"];
+
+pub fn reset_words(csr: u32) -> String {
+    let set: Vec<&str> = (0..8).filter(|i| csr & (1 << (24 + i)) != 0).map(|i| RESET_FLAGS[i]).collect();
+    if set.is_empty() { String::from("none") } else { set.join("+") }
+}
+
 #[derive(Debug, Default)]
 pub struct Dump {
+    // write order, not address order on a chip that went round
     pub records: Vec<Record>,
     pub anchors: Vec<Anchor>,
+    pub events: Vec<Event>,
+    pub wrapped: bool,          // the sectors' own order was not their order on the chip
+    pub read_slots: usize,      // slots that passed, lock events included, as the board counts them
     pub found: Option<usize>,   // the board's own count, when it said
     pub good: Option<usize>,    // how many of those passed their check on the board
     pub bad: Option<usize>,
@@ -88,8 +129,9 @@ impl Dump {
     pub fn complete(&self) -> bool {
         self.found.is_some()
     }
+    // includes boots that reset before their first packet and only left events
     pub fn boots(&self) -> Vec<u32> {
-        let mut b: Vec<u32> = self.records.iter().map(|r| r.boot).collect();
+        let mut b: Vec<u32> = self.records.iter().map(|r| r.boot).chain(self.events.iter().map(|e| e.boot)).collect();
         b.sort_unstable();
         b.dedup();
         b
@@ -143,6 +185,19 @@ fn unix_ms(epoch: u32, nano: i64) -> u64 {
 enum Slot {
     Packet { boot: u32, ms: u64, hex: String },
     Time(Anchor),
+    Event(Event),
+    // counted like any slot, nothing else
+    Lock { boot: u32, ms: u64 },
+}
+
+impl Slot {
+    fn when(&self) -> (u32, u64) {
+        match self {
+            Slot::Packet { boot, ms, .. } | Slot::Lock { boot, ms } => (*boot, *ms),
+            Slot::Time(a) => (a.boot, a.ms),
+            Slot::Event(e) => (e.boot, e.ms),
+        }
+    }
 }
 
 // None for anything decodeRecord in FlashLog.cpp would also turn down, or that did not
@@ -174,6 +229,16 @@ fn slot(text: &str) -> Option<Slot> {
             let nano = i32::from_le_bytes([b[11], b[12], b[13], b[14]]);
             Some(Slot::Time(Anchor { boot, ms, unix_ms: unix_ms(epoch, nano as i64) }))
         }
+        SLOT_EVENT => {
+            let word = u32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+            let kind = match b[7] {
+                EVENT_LOCK => return Some(Slot::Lock { boot, ms }),
+                EVENT_BOOT => EventKind::Boot { csr: word },
+                EVENT_DROPPED => EventKind::Dropped { count: word },
+                other => EventKind::Other(other),
+            };
+            Some(Slot::Event(Event { boot, ms, kind }))
+        }
         _ => None,
     }
 }
@@ -186,6 +251,8 @@ struct Printing {
     kept: BTreeSet<u64>,
     failed: BTreeSet<u64>,
     blind: usize,            // raw lines so damaged that the index could not be read either
+    // first good slot of each sector, (slot in the sector, boot, ms), for ordering a ring
+    heads: BTreeMap<u64, (u64, u32, u64)>,
     // What record and time lines gave, held apart until the printing is over. One
     // printing is one format: the sketch prints whole slots or it prints these, never
     // both. So when a printing has slots in it, these are the end of some earlier
@@ -210,7 +277,18 @@ impl Printing {
         // The index and address are outside the slot's check. An address that does not
         // read is no reason to drop a slot that passed.
         let addr = u32::from_str_radix(parts[2], 16).ok();
-        match slot(parts[3]) {
+        let read = slot(parts[3]);
+        if let Some(s) = &read {
+            if !self.kept.contains(&n) {
+                let (boot, ms) = s.when();
+                let at = n % SECTOR_SLOTS;
+                let head = self.heads.entry(n / SECTOR_SLOTS).or_insert((at, boot, ms));
+                if at < head.0 {
+                    *head = (at, boot, ms);
+                }
+            }
+        }
+        match read {
             // A second line for an index already read is left alone: the first one passed.
             Some(_) if self.kept.contains(&n) => {}
             Some(Slot::Packet { boot, ms, hex }) => {
@@ -220,6 +298,13 @@ impl Printing {
             Some(Slot::Time(anchor)) => {
                 self.kept.insert(n);
                 self.dump.anchors.push(anchor);
+            }
+            Some(Slot::Event(event)) => {
+                self.kept.insert(n);
+                self.dump.events.push(event);
+            }
+            Some(Slot::Lock { .. }) => {
+                self.kept.insert(n);
             }
             None => {
                 self.failed.insert(n);
@@ -236,10 +321,32 @@ impl Printing {
             self.seen.append(&mut self.old_seen);
         }
         self.dump.failed = self.blind + self.failed.difference(&self.kept).count();
-        // The board counts every slot up to the first erased one, so its count is also one
-        // past the last index. With no count, the highest index seen has to do.
+        self.dump.read_slots = if self.dump.raw {
+            self.kept.len()
+        } else {
+            self.dump.records.len() + self.dump.anchors.len()
+        };
+        // tie keeps address order. Only raw slots get ranked, the old text format has no CRC
+        // over boot and ms
+        let mut sectors: Vec<(u64, u32, u64)> = self.heads.iter().map(|(s, h)| (*s, h.1, h.2)).collect();
+        sectors.sort_by_key(|(s, boot, ms)| (*boot, *ms, *s));
+        self.dump.wrapped = self.dump.raw && sectors.windows(2).any(|w| w[0].0 > w[1].0);
+        let rank: BTreeMap<u64, usize> = sectors.iter().enumerate().map(|(i, (s, _, _))| (*s, i)).collect();
+        let wrapped = self.dump.wrapped;
+        let place = |n: u64| (if wrapped { rank.get(&(n / SECTOR_SLOTS)).copied().unwrap_or(0) } else { 0 }, n);
+        self.dump.records.sort_by_key(|r| place(r.n));
         let top = self.seen.iter().next_back().map(|n| n + 1).unwrap_or(0);
-        let expected = top.max(self.dump.found.unwrap_or(0) as u64);
+        let expected = if wrapped {
+            // the board skips erased sectors and stops each one at its first erased slot
+            let mut ends: BTreeMap<u64, u64> = BTreeMap::new();
+            for n in &self.seen {
+                ends.insert(n / SECTOR_SLOTS, n % SECTOR_SLOTS + 1);
+            }
+            (ends.values().sum::<u64>()).max(self.dump.found.unwrap_or(0) as u64)
+        } else {
+            // board's count is one past the last index. Without it, use the highest index seen
+            top.max(self.dump.found.unwrap_or(0) as u64)
+        };
         self.dump.missing = (expected - self.seen.len() as u64) as usize;
         self.dump
     }
@@ -426,11 +533,11 @@ fn uptime0_at(clock: &Clock, ms: u64) -> i128 {
     a as i128 + (b as i128 - a as i128) * (ms - a_ms) as i128 / (b_ms - a_ms) as i128
 }
 
-// One boot's records in the order the chip was written, each with its time.
+// One boot's records in write order (not index order on a ring), each with its time
 fn rows<'a>(dump: &'a Dump, clock: &Clock) -> Vec<(u64, &'a Record)> {
-    let mut mine: Vec<&Record> = dump.records.iter().filter(|r| r.boot == clock.boot).collect();
-    mine.sort_by_key(|r| r.n);
-    mine.into_iter()
+    dump.records
+        .iter()
+        .filter(|r| r.boot == clock.boot)
         .map(|r| {
             let t = (uptime0_at(clock, r.ms) + r.ms as i128).clamp(0, u64::MAX as i128);
             (t as u64, r)
@@ -537,6 +644,10 @@ pub struct BootReport {
     pub anchors_rejected: usize,
     pub clock_fast_ppm: Option<i64>,   // how far the board's clock runs ahead of GPS; None when there is too little to tell
     pub csids: Vec<u8>,   // the board ids its packets carry, ascending
+    // from events, ring chips only
+    pub reset_csr: Option<u32>,
+    pub dropped: Option<u32>,
+    pub other_events: usize,
 }
 
 // What was read set against what the board said it has, for whoever has to decide whether
@@ -559,6 +670,7 @@ pub struct Report {
     // keeps the boots from before a board was given a new id.
     pub csids: Vec<u8>,
     pub boots: Vec<BootReport>,
+    pub wrapped: bool,
 }
 
 // The distinct board ids a set of records carries. A raw record is only here because its
@@ -577,7 +689,9 @@ fn numbers(ids: &[u8]) -> String {
 }
 
 pub fn report(dump: &Dump, bytes: usize, longest_reader_gap_ms: u64) -> Report {
-    let read = dump.records.len() + dump.anchors.len();
+    // includes lock events, which the board counts but nothing keeps
+    let read = dump.read_slots;
+    let mine = |boot: u32| dump.events.iter().filter(move |e| e.boot == boot).map(|e| &e.kind);
     let boots = clocks(dump)
         .iter()
         .map(|c| {
@@ -593,6 +707,17 @@ pub fn report(dump: &Dump, bytes: usize, longest_reader_gap_ms: u64) -> Report {
                 anchors_rejected: c.rejected,
                 clock_fast_ppm: clock_fast_ppm(&c.said),
                 csids: csids(dump.records.iter().filter(|r| r.boot == c.boot)),
+                reset_csr: mine(c.boot).find_map(|k| match k {
+                    EventKind::Boot { csr } => Some(*csr),
+                    _ => None,
+                }),
+                dropped: mine(c.boot)
+                    .filter_map(|k| match k {
+                        EventKind::Dropped { count } => Some(*count),
+                        _ => None,
+                    })
+                    .max(),
+                other_events: mine(c.boot).filter(|k| matches!(k, EventKind::Other(_))).count(),
             }
         })
         .collect();
@@ -612,6 +737,7 @@ pub fn report(dump: &Dump, bytes: usize, longest_reader_gap_ms: u64) -> Report {
         bytes,
         csids: csids(dump.records.iter()),
         boots,
+        wrapped: dump.wrapped,
     }
 }
 
@@ -629,7 +755,7 @@ impl Report {
             .iter()
             .map(|b| {
                 format!(
-                    "{{\"n\":{},\"records\":{},\"firstMs\":{},\"lastMs\":{},\"timeSource\":\"{}\",\"uptime0Ms\":{},\"anchorsUsed\":{},\"anchorsRejected\":{},\"clockFastPpm\":{},\"csids\":[{}]}}",
+                    "{{\"n\":{},\"records\":{},\"firstMs\":{},\"lastMs\":{},\"timeSource\":\"{}\",\"uptime0Ms\":{},\"anchorsUsed\":{},\"anchorsRejected\":{},\"clockFastPpm\":{},\"csids\":[{}]",
                     b.n,
                     b.records,
                     b.first_ms,
@@ -643,11 +769,11 @@ impl Report {
                         None => String::from("null"),
                     },
                     numbers(&b.csids)
-                )
+                ) + &b.events_json()
             })
             .collect();
         format!(
-            "{{\"format\":\"{}\",\"found\":{},\"boardGood\":{},\"boardBad\":{},\"read\":{},\"failedCheck\":{},\"missing\":{},\"ignoredOldFormat\":{},\"complete\":{},\"longestReaderGapMs\":{},\"bytes\":{},\"csids\":[{}],\"boots\":[{}]}}",
+            "{{\"format\":\"{}\",\"found\":{},\"boardGood\":{},\"boardBad\":{},\"read\":{},\"failedCheck\":{},\"missing\":{},\"ignoredOldFormat\":{},\"complete\":{},\"longestReaderGapMs\":{},\"bytes\":{},\"csids\":[{}],\"boots\":[{}]",
             if self.raw { "raw" } else { "text" },
             or_null(self.found),
             or_null(self.board_good),
@@ -661,7 +787,24 @@ impl Report {
             self.bytes,
             numbers(&self.csids),
             boots.join(",")
-        )
+        ) + if self.wrapped { ",\"wrapped\":true}" } else { "}" }
+    }
+}
+
+impl BootReport {
+    // left out without events so older reports stay the same. Closes the boot's braces
+    fn events_json(&self) -> String {
+        let mut s = String::new();
+        if let Some(csr) = self.reset_csr {
+            s.push_str(&format!(",\"resetCsr\":{},\"reset\":\"{}\"", csr, reset_words(csr)));
+        }
+        if let Some(n) = self.dropped {
+            s.push_str(&format!(",\"dropped\":{}", n));
+        }
+        if self.other_events > 0 {
+            s.push_str(&format!(",\"otherEvents\":{}", self.other_events));
+        }
+        s + "}"
     }
 }
 
@@ -1361,5 +1504,152 @@ anchor_utc=2026-09-26T16:45:50.000Z,anchors=1,anchors_rejected=0"
         assert_eq!(rows.len(), 2);
         assert!(rows[0].ends_with(",,,,up=2517,n=0"), "{}", rows[0]);
         assert!(rows[1].ends_with(",,,,up=2567,n=1"), "{}", rows[1]);
+    }
+    fn event(n: u64, boot: u16, ms: u32, kind: u8, word: u32) -> String {
+        let mut payload = vec![kind];
+        payload.extend_from_slice(&word.to_le_bytes());
+        raw_line(n, &slot(SLOT_EVENT, boot, ms, &payload))
+    }
+
+    // Six sectors, 3 is the erased one ahead of the end. Boot 4 runs 4, 5, 0, boot 5 is in 1
+    // and 2, and 2 starts with a lock event
+    fn wrapped_sectors() -> Vec<(u64, Vec<String>)> {
+        let s = SECTOR_SLOTS;
+        vec![
+            (0, vec![packet(0, 4, 9000), packet(1, 4, 9050)]),
+            (1, vec![event(s, 5, 10, EVENT_BOOT, 1 << 26 | 1 << 27), packet(s + 1, 5, 400), packet(s + 2, 5, 450)]),
+            (2, vec![event(2 * s, 5, 500, EVENT_LOCK, 0), packet(2 * s + 1, 5, 500)]),
+            (4, vec![event(4 * s, 4, 12, EVENT_BOOT, 1 << 29), packet(4 * s + 1, 4, 1000), packet(4 * s + 2, 4, 1050)]),
+            (5, vec![packet(5 * s, 4, 5000), event(5 * s + 1, 4, 5010, EVENT_DROPPED, 3), packet(5 * s + 2, 4, 5050)]),
+        ]
+    }
+
+    fn printed(order: &[u64]) -> String {
+        let sectors = wrapped_sectors();
+        let mut text = String::new();
+        for want in order {
+            let (_, lines) = sectors.iter().find(|(s, _)| s == want).unwrap();
+            text.push_str(&lines.concat());
+        }
+        text + &found(13, 13, 0, 2)
+    }
+
+    fn rows_of(log: &str) -> Vec<String> {
+        log.lines().filter(|l| l.contains("PKT,55,")).map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            format!("{} {}", f[1], l.rsplit(',').next().unwrap())
+        }).collect()
+    }
+
+    #[test]
+    fn a_chip_that_went_round_reads_oldest_sector_first() {
+        // sorted by each sector's first record, as the dump sketch prints it
+        let d = parse(&printed(&[4, 5, 0, 1, 2]));
+        assert!(d.wrapped);
+        assert_eq!(d.records.iter().map(|r| r.n).collect::<Vec<_>>(), vec![257, 258, 320, 322, 0, 1, 65, 66, 129]);
+        let s = SECTOR_SLOTS;
+        assert_eq!(
+            rows_of(&to_log(&d, "x")),
+            vec![
+                "flash-boot4 n=257", "flash-boot4 n=258", "flash-boot4 n=320", "flash-boot4 n=322",
+                "flash-boot4 n=0", "flash-boot4 n=1",
+                "flash-boot5 n=65", "flash-boot5 n=66", "flash-boot5 n=129",
+            ]
+        );
+        assert_eq!(4 * s + 1, 257, "the expected indices above assume 64 slots a sector");
+        // erased sector and the slots past each sector's end don't count as missing
+        assert_eq!((d.failed, d.missing, d.read_slots), (0, 0, 13));
+        let r = report(&d, 0, 0);
+        assert!(r.complete, "{}", r.json());
+        assert!(r.json().ends_with(",\"wrapped\":true}"), "{}", r.json());
+        // address order, as the sketch printed before the ring
+        let by_address = parse(&printed(&[0, 1, 2, 4, 5]));
+        assert_eq!(to_log(&by_address, "x"), to_log(&d, "x"));
+        assert_eq!(report(&by_address, 0, 0).json(), r.json());
+    }
+
+    #[test]
+    fn a_boot_spanning_the_wrap_keeps_time_running_forward() {
+        let d = parse(&printed(&[4, 5, 0, 1, 2]));
+        let (dated, _) = date(&d);
+        let boot4: Vec<u64> = dated.iter().filter(|(_, r)| r.boot == 4).map(|(t, _)| *t).collect();
+        assert!(boot4.windows(2).all(|w| w[0] <= w[1]), "{:?}", boot4);
+        assert_eq!(boot4.len(), 6);
+    }
+
+    #[test]
+    fn events_say_the_reset_cause_and_what_was_dropped() {
+        let r = report(&parse(&printed(&[4, 5, 0, 1, 2])), 0, 0);
+        let of = |boot: u32| r.boots.iter().find(|b| b.n == boot).unwrap();
+        assert_eq!((of(4).reset_csr, of(4).dropped), (Some(1 << 29), Some(3)));
+        assert_eq!((of(5).reset_csr, of(5).dropped), (Some(1 << 26 | 1 << 27), None));
+        let j = r.json();
+        assert!(j.contains("],\"resetCsr\":536870912,\"reset\":\"IWDG\",\"dropped\":3}"), "{}", j);
+        assert!(j.contains(",\"resetCsr\":201326592,\"reset\":\"PIN+BOR\"}"), "{}", j);
+        // lock event not in the list or any boot
+        assert_eq!(parse(&printed(&[4, 5, 0, 1, 2])).events.len(), 3);
+        assert_eq!(reset_words(0), "none");
+        assert_eq!(reset_words(0xFF00_0000), "RFILAR+OBL+PIN+BOR+SFT+IWDG+WWDG+LPWR");
+    }
+
+    #[test]
+    fn the_most_dropped_is_the_one_shown_and_unknown_kinds_are_counted() {
+        let text = [
+            event(0, 2, 5, EVENT_BOOT, 0),
+            packet(1, 2, 1000),
+            event(2, 2, 2000, EVENT_DROPPED, 7),
+            event(3, 2, 3000, EVENT_DROPPED, 12),
+            event(4, 2, 3500, 0x10, 99),
+            found(5, 5, 0, 1),
+        ]
+        .concat();
+        let d = parse(&text);
+        assert!(!d.wrapped);
+        let r = report(&d, 0, 0);
+        assert!(r.complete);
+        assert_eq!(r.read, 5);
+        assert!(r.json().ends_with(",\"resetCsr\":0,\"reset\":\"none\",\"dropped\":12,\"otherEvents\":1}]}"), "{}", r.json());
+    }
+
+    #[test]
+    fn a_boot_that_left_only_events_is_still_listed() {
+        // reset before its first packet
+        let text = [packet(0, 2, 1000), event(1, 3, 8, EVENT_BOOT, 1 << 27), packet(2, 4, 1000), found(3, 3, 0, 3)].concat();
+        let d = parse(&text);
+        assert_eq!(d.boots(), vec![2, 3, 4]);
+        let r = report(&d, 0, 0);
+        let three = r.boots.iter().find(|b| b.n == 3).unwrap();
+        assert_eq!((three.records, three.reset_csr), (0, Some(1 << 27)));
+        // no rows, so no header
+        assert_eq!(to_log(&d, "x").matches("#DG,BOOT,").count(), 2);
+    }
+
+    #[test]
+    fn a_slot_lost_inside_a_sector_of_a_chip_that_went_round_is_missing() {
+        let s = SECTOR_SLOTS;
+        let text = [
+            packet(2 * s, 1, 100),
+            packet(2 * s + 1, 1, 150),
+            packet(0, 2, 100),
+            packet(2, 2, 200),   // 1 never arrived
+            found(5, 5, 0, 2),
+        ]
+        .concat();
+        let d = parse(&text);
+        assert!(d.wrapped);
+        assert_eq!(d.missing, 1);
+        assert!(!report(&d, 0, 0).complete);
+        let text = [packet(2 * s, 1, 100), packet(0, 2, 100), found(4, 4, 0, 2)].concat();
+        assert_eq!(parse(&text).missing, 2);
+    }
+
+    #[test]
+    fn a_chip_that_never_went_round_is_in_address_order_with_no_wrapped_key() {
+        let s = SECTOR_SLOTS;
+        let text = [packet(0, 1, 100), packet(1, 1, 150), packet(s, 1, 9000), packet(s + 1, 2, 10), found(4, 4, 0, 2)].concat();
+        let d = parse(&text);
+        assert!(!d.wrapped);
+        assert!(!report(&d, 0, 0).json().contains("wrapped"));
+        assert!(!report(&d, 0, 0).json().contains("reset"));
     }
 }

@@ -105,7 +105,7 @@ test('the dump firmware is named with its id, and an earlier one is said to be e
 test('a flight image this app carries is named by its id and module', () => {
   const fw = { kind: 'flight', module: 'le', id: 'f84691175ddf2641' };
   const same = B.firmwareWords(fw, 'le');
-  assert.deepStrictEqual(same, { kind: 'flight', head: '', value: 'Flight software f8469117 for the LE module', note: '', mismatch: '', bad: false });
+  assert.deepStrictEqual(same, { kind: 'flight', head: '', value: 'Flight software f8469117 for the LE module', note: '', mismatch: '', bad: false, built: '' });
   assert.equal(B.firmwareWords(fw, 'hp').mismatch, 'This image is for the LE module and the board is marked HP.');
   assert.equal(B.firmwareWords({ kind: 'flight', module: 'hp', id: '0c2e77aa11' }, 'le').mismatch,
     'This image is for the HP module and the board is marked LE.');
@@ -119,15 +119,43 @@ test('a flight image this app carries is named by its id and module', () => {
   assert.equal(B.firmwareWords({ kind: 'flight' }, null).value, 'Flight software');
 });
 
+test('an image this computer built is named by where it came from', () => {
+  const built = { part: 'flight-le', words: 'flight LE built here 14:02 from abc1234 + config.h changed' };
+  const w = B.firmwareWords({ kind: 'flight', module: 'le', id: '0a1b2c3d4e5f6071', built }, 'hp');
+  assert.equal(w.value, 'Flight LE built here 14:02 from abc1234 + config.h changed');
+  assert.equal(w.built, built.words);
+  assert.equal(w.mismatch, 'This image is for the LE module and the board is marked HP.', 'built here or not, the module still has to agree');
+  const dump = B.firmwareWords({ kind: 'dump', current: true, id: '77aa', built: { words: 'dump firmware built here 09:10 from abc1234' } }, 'le');
+  assert.equal(dump.value, 'Dump firmware 77aa');
+  assert.equal(dump.built, 'dump firmware built here 09:10 from abc1234');
+  assert.equal(dump.bad, true);
+  const bench = B.firmwareWords({ kind: 'bench', module: 'hp', built: { words: 'sensor bench HP built here 09:12 from abc1234' } }, 'hp');
+  assert.equal(bench.value, 'Sensor bench for the HP module');
+  assert.equal(bench.built, 'sensor bench HP built here 09:12 from abc1234');
+});
+
+test('with this computer\'s flight software switched off, the carried image is patched even with a tree', () => {
+  const images = [{ id: 'f84691175ddf2641', module: 'le', bytes: 63396 }];
+  assert.equal(B.flashWay({ fswTree: true, fswLocal: true, flightImages: images }, 'le').way, 'build');
+  const off = B.flashWay({ fswTree: true, fswLocal: false, flightImages: images }, 'le');
+  assert.equal(off.way, 'carried');
+  assert.equal(off.says, 'This computer\'s flight software is switched off, so this patches the image this app carries.');
+  const none = B.flashWay({ fswTree: true, fswLocal: false, flightImages: images }, 'hp');
+  assert.equal(none.stop, 'This computer\'s flight software is switched off, and this build carries no flight image for the HP module. Flash a file instead.');
+  // older app, no fswLocal
+  assert.equal(B.flashWay({ fswTree: true }, 'le').way, 'build');
+  assert.equal(B.flashWay({ fswTree: false, flightImages: images }, 'le').says, 'No flight software tree, so this patches the image this app carries.');
+});
+
 test('anything else is not recognised, and is called neither flight software nor fine', () => {
   const w = B.firmwareWords({ kind: 'unknown' }, 'le');
   assert.deepStrictEqual(w, {
     kind: 'unknown', head: '', value: 'Not recognised',
-    note: 'Not the dump firmware and not a flight image this app carries.', mismatch: '', bad: false,
+    note: 'Not the dump firmware and not a flight image this app carries or this computer built.', mismatch: '', bad: false, built: '',
   });
   assert.equal(B.firmwareWords({ kind: 'something new' }, 'le').value, 'Not recognised');
   for (const none of [null, undefined, {}]) {
-    assert.deepStrictEqual(B.firmwareWords(none, 'le'), { kind: '', head: '', value: '', note: '', mismatch: '', bad: false });
+    assert.deepStrictEqual(B.firmwareWords(none, 'le'), { kind: '', head: '', value: '', note: '', mismatch: '', bad: false, built: '' });
   }
 });
 
@@ -250,7 +278,7 @@ test('flight software is built when a tree is at hand and patched into the carri
 test('the radio table with no settings block is all dashes under the plain line', () => {
   const t = B.settingsTable(null, 'hp');
   assert.deepStrictEqual(t.rows.map((r) => [r.key, r.onBoard]),
-    [['csid', '—'], ['sf', '—'], ['dbm', '—'], ['waiting', '—'], ['rising', '—'], ['falling', '—'], ['landed', '—'], ['blind', '—']]);
+    [['csid', '—'], ['sf', '—'], ['dbm', '—'], ['ground', '—'], ['air', '—']]);
   assert.equal(t.line, 'This board\'s firmware predates the settings block, so the id, spreading factor, power and interval ' +
     'it was built with cannot be read off it. Flashing it from here gives it one.');
   // The dump firmware is not an old flight image, and is not called one.
@@ -265,28 +293,38 @@ const RATE = (fixedMs, more) => Object.assign({ fixedMs, follow: false, percent:
 const RATES = [RATE(60000), RATE(10000), RATE(1000), RATE(60000)];
 
 test('a settings block fills the on-the-board column, one row per phase', () => {
-  const s = { layoutVersion: 3, csid: 255, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, rates: RATES, logMs: [1000, 50, 50, 1000], logBlindMs: 200, reservedClear: true };
+  // Ground's slots (waiting, landed) and air's (rising, falling) hold the same, as this page writes them.
+  const PAIRED = [RATE(60000), RATE(10000), RATE(10000), RATE(60000)];
+  const s = { layoutVersion: 3, csid: 255, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, rates: PAIRED, logMs: [10000, 50, 50, 10000], logBlindMs: 200, reservedClear: true };
   const t = B.settingsTable(s, 'le');
-  assert.deepStrictEqual(t.rows.map((r) => r.onBoard), ['unconfigured (255)', 'SF7', '+14 dBm', 'every 60 s, log every 1 s', 'every 10 s, log every 0.05 s', 'every 1 s, log every 0.05 s', 'every 60 s, log every 1 s', 'log every 0.2 s']);
-  assert.deepStrictEqual(t.rows.slice(3).map((r) => r.label), ['Waiting', 'In the air', 'Falling', 'Landed', 'No altitude source']);
+  assert.deepStrictEqual(t.rows.map((r) => r.onBoard), ['unconfigured (255)', 'SF7', '+14 dBm', 'every 60 s, log every 10 s', 'every 10 s, log every 0.05 s']);
+  assert.deepStrictEqual(t.rows.slice(3).map((r) => r.label), ['Ground', 'Air']);
+  // older firmware can leave a different value in a phase's second slot
+  assert.deepStrictEqual(B.settingsTable(Object.assign({}, s, { rates: RATES, logMs: [1000, 50, 50, 1000] }), 'le').rows.slice(3).map((r) => r.onBoard),
+    ['every 60 s, log every 1 s', 'every 10 s, log every 0.05 s; falling slot every 1 s, log every 0.05 s']);
+  assert.equal(B.settingsTable(Object.assign({}, s, { logMs: [10000, 50, 50, 1000] }), 'le').rows[3].onBoard,
+    'every 60 s, log every 10 s; landed slot every 60 s, log every 1 s');
+  // A ground log gap of 0 writes nothing; in the air it is every reading.
+  assert.deepStrictEqual(B.settingsTable(Object.assign({}, s, { logMs: [0, 0, 0, 0] }), 'le').rows.slice(3).map((r) => r.onBoard),
+    ['every 60 s, log nothing written', 'every 10 s, log every reading']);
   // A layout-2 block, from before the log gaps, has the gaps and no logs.
   assert.deepStrictEqual(B.settingsTable(Object.assign({}, s, { layoutVersion: 2, logMs: null, logBlindMs: null }), 'le').rows.slice(3).map((r) => r.onBoard),
-    ['every 60 s', 'every 10 s', 'every 1 s', 'every 60 s', '—']);
+    ['every 60 s', 'every 10 s']);
   assert.equal(t.module, 'LE');
   assert.equal(t.setBy, 'from the build, not set from here');
   assert.equal(t.line, '');
   assert.equal(t.damaged, false);
   assert.equal(t.disagree, '');
   // A phase on the battery says what it follows and what it falls back to; back to back is said.
-  const landed = RATES.slice(); landed[3] = RATE(300000, { follow: true, percent: [90, 60, 30, 5], intervalMs: [0, 20000, 60000, 90000, 200000] });
-  assert.equal(B.settingsTable(Object.assign({}, s, { rates: landed }), 'le').rows[6].onBoard,
-    'by battery: back to back above 90 %, 20 s to 60 %, 60 s to 30 %, 90 s to 5 %, then 200 s (300 s when the gauge cannot be read), log every 1 s');
-  const btb = RATES.slice(); btb[2] = RATE(0);
-  assert.equal(B.settingsTable(Object.assign({}, s, { rates: btb }), 'le').rows[5].onBoard, 'back to back, log every 0.05 s');
-  // A block from before the phases has one gap, shown under falling, and no others.
+  const ground = PAIRED.slice(); ground[0] = ground[3] = RATE(300000, { follow: true, percent: [90, 60, 30, 5], intervalMs: [0, 20000, 60000, 90000, 200000] });
+  assert.equal(B.settingsTable(Object.assign({}, s, { rates: ground }), 'le').rows[3].onBoard,
+    'by battery: back to back above 90 %, 20 s to 60 %, 60 s to 30 %, 90 s to 5 %, then 200 s (300 s when the gauge cannot be read), log every 10 s');
+  const btb = PAIRED.slice(); btb[1] = btb[2] = RATE(0);
+  assert.equal(B.settingsTable(Object.assign({}, s, { rates: btb }), 'le').rows[4].onBoard, 'back to back, log every 0.05 s');
+  // A block from before the phases has one gap, the old falling one, shown under the air.
   const old = B.settingsTable(Object.assign({}, s, { layoutVersion: 1, txIntervalMs: 250, rates: null, logMs: null, logBlindMs: null }), 'le');
   assert.deepStrictEqual(old.rows.slice(3).map((r) => r.onBoard),
-    ['no phases in this firmware', 'no phases in this firmware', 'every 0.25 s (no phases in this firmware)', 'no phases in this firmware', '—']);
+    ['no phases in this firmware', 'every 0.25 s (no phases in this firmware)']);
 
   const u = B.settingsTable(Object.assign({}, s, { csid: 12, setBy: 'tool' }), 'hp');
   assert.equal(u.rows[0].onBoard, '12');
@@ -309,41 +347,47 @@ test('what the board says about a block it could not give is shown as it comes',
 });
 
 test('a row is marked as replaced only when the build would change what the board holds', () => {
-  const s = { csid: 255, module: 'le', sf: 7, dbm: 14, txIntervalMs: 1000, rates: RATES, logMs: [1000, 50, 50, 1000], logBlindMs: 200 };
+  const PAIRED = [RATE(60000), RATE(10000), RATE(10000), RATE(60000)];
+  const s = { csid: 255, module: 'le', sf: 7, dbm: 14, txIntervalMs: 1000, rates: PAIRED, logMs: [10000, 50, 50, 10000], logBlindMs: 200 };
+  // p0 is ground, p1 the air.
   const same = { csid: '255', sf: 7, dbm: 14, lb: '0.2' };
-  [60, 10, 1, 60].forEach((secs, i) => {
-    same['p' + i + 's'] = String(secs); same['p' + i + 'f'] = false;
-    same['p' + i + 'l'] = i === 0 || i === 3 ? '1' : '0.05';
-    [75, 50, 35, 20].forEach((p, k) => { same['p' + i + 'soc' + k] = String(p); });
-    [10, 30, 60, 120, 180].forEach((v, k) => { same['p' + i + 'ms' + k] = String(v); });
+  [60, 10].forEach((secs, n) => {
+    same['p' + n + 's'] = String(secs); same['p' + n + 'f'] = false;
+    same['p' + n + 'l'] = n === 0 ? '10' : '0.05';
+    [75, 50, 35, 20].forEach((p, k) => { same['p' + n + 'soc' + k] = String(p); });
+    [10, 30, 60, 120, 180].forEach((v, k) => { same['p' + n + 'ms' + k] = String(v); });
   });
-  const none = { module: false, csid: false, sf: false, dbm: false, waiting: false, rising: false, falling: false, landed: false };
+  const none = { module: false, csid: false, sf: false, dbm: false, ground: false, air: false };
   assert.deepStrictEqual(B.buildDiffers(s, 'le', same), none);
   assert.deepStrictEqual(B.buildDiffers(s, 'hp', Object.assign({}, same, { csid: '9' })),
     Object.assign({}, none, { module: true, csid: true }));
-  assert.deepStrictEqual(B.buildDiffers(s, 'le', Object.assign({}, same, { sf: 12, dbm: 15, p2s: '0.5' })),
-    Object.assign({}, none, { sf: true, dbm: true, falling: true }));
+  assert.deepStrictEqual(B.buildDiffers(s, 'le', Object.assign({}, same, { sf: 12, dbm: 15, p1s: '0.5' })),
+    Object.assign({}, none, { sf: true, dbm: true, air: true }));
   // Each phase differs on its own: its gap in seconds, its switch, a threshold or a band.
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1f: true })).rising, true);
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p3soc2: '36' })).landed, true);
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0ms4: '181' })).waiting, true);
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0ms4: '181' })).rising, false);
-  // A log gap differs on its own phase; the blind one is counted under waiting.
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1l: '0.1' })).rising, true);
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1l: '0.1' })).waiting, false);
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { lb: '0.5' })).waiting, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1f: true })).air, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0soc2: '36' })).ground, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0ms4: '181' })).ground, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0ms4: '181' })).air, false);
+  // A log gap differs on its own phase.
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1l: '0.1' })).air, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1l: '0.1' })).ground, false);
+  // Both of a phase's slots get its values, so either one holding something else is replaced.
+  assert.equal(B.buildDiffers(Object.assign({}, s, { logMs: [10000, 50, 50, 1000] }), 'le', same).ground, true);
+  assert.equal(B.buildDiffers(Object.assign({}, s, { rates: [PAIRED[0], PAIRED[1], RATE(1000), PAIRED[3]] }), 'le', same).air, true);
+  // blind gap has no box, so it never differs
+  assert.deepStrictEqual(B.buildDiffers(s, 'le', Object.assign({}, same, { lb: '0.5' })), none);
   // A board from before the log gaps is replaced in every phase: flashing gives it them.
   assert.deepStrictEqual(B.buildDiffers(Object.assign({}, s, { logMs: null, logBlindMs: null }), 'le', same),
-    Object.assign({}, none, { waiting: true, rising: true, falling: true, landed: true }));
+    Object.assign({}, none, { ground: true, air: true }));
   // An empty or half-typed box is not the board's value.
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p2s: '' })).falling, true);
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1s: '' })).air, true);
   assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { csid: '25x' })).csid, true);
   // No module chosen yet is said elsewhere; no block read means nothing is known to be replaced.
   assert.equal(B.buildDiffers(s, null, same).module, false);
   assert.deepStrictEqual(B.buildDiffers(null, 'hp', same), none);
   // A board with no phases is replaced in every phase: flashing gives it them.
   assert.deepStrictEqual(B.buildDiffers(Object.assign({}, s, { rates: null }), 'le', same),
-    Object.assign({}, none, { waiting: true, rising: true, falling: true, landed: true }));
+    Object.assign({}, none, { ground: true, air: true }));
 });
 
 test('which receivers are listening on a spreading factor, by name', () => {

@@ -11,32 +11,22 @@ pub struct Log {
     path: PathBuf,
 }
 
-// A file name someone can read on a laptop in a field: descent-ground-2026-09-22T19-30-00.log
-fn stamp() -> String {
-    humantime::format_rfc3339_seconds(SystemTime::now())
-        .to_string()
-        .replace(':', "-")
-        .replace('Z', "")
-}
-
-// The stamp only goes down to the second, so two logs started inside one second want
-// the same name and the second would truncate the first.
-fn unused_path(dir: &Path) -> PathBuf {
-    let base = format!("descent-ground-{}", stamp());
-    let mut path = dir.join(format!("{}.log", base));
-    let mut n = 2;
-    while path.exists() && n < 100 {
-        path = dir.join(format!("{}-{}.log", base, n));
-        n += 1;
-    }
-    path
+// 2026-10-17/logs/1402-ground.log, local time. A second log in the same minute gets -2
+// instead of truncating the first
+fn unused_path(data: &Path) -> Result<PathBuf, String> {
+    let now = SystemTime::now();
+    let place = crate::layout::folder(data, crate::layout::LOGS, now)?;
+    crate::layout::unused(&place.dir, &crate::layout::hhmm(now), "ground", ".log")
 }
 
 impl Log {
     // Returns the log, or a warning to print when one cannot be opened. A read-only
     // directory is not a reason to refuse to run.
-    pub fn create(dir: &Path) -> (Option<Log>, Option<String>) {
-        let path = unused_path(dir);
+    pub fn create(data: &Path) -> (Option<Log>, Option<String>) {
+        let path = match unused_path(data) {
+            Ok(path) => path,
+            Err(e) => return (None, Some(format!("no log file: {}", e))),
+        };
         match File::create(&path) {
             Ok(f) => {
                 let mut file = BufWriter::new(f);
@@ -66,16 +56,11 @@ impl Log {
     }
 }
 
-// Close the current file and start another beside it, in one go, so nothing is
-// written to the old file after the swap. The new one is opened first: a directory
-// that has gone read-only leaves the old log in place rather than no log at all.
-pub fn rotate(slot: &Mutex<Option<Log>>, fallback: &Path) -> Result<PathBuf, String> {
+// Swaps under the lock so nothing goes to the old file after. The new file is opened first,
+// so a read-only folder leaves the old log going instead of none
+pub fn rotate(slot: &Mutex<Option<Log>>, data: &Path) -> Result<PathBuf, String> {
     let mut slot = slot.lock().map_err(|_| String::from("the log is busy"))?;
-    let dir = slot
-        .as_ref()
-        .and_then(|l| l.path().parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| fallback.to_path_buf());
-    let (new, warn) = Log::create(&dir);
+    let (new, warn) = Log::create(data);
     let Some(new) = new else {
         return Err(warn.unwrap_or_else(|| String::from("could not start a new log")));
     };

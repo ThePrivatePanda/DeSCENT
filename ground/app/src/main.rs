@@ -10,6 +10,8 @@ mod flight;
 mod fswbuild;
 mod framing;
 mod json;
+mod layout;
+mod localfw;
 mod logfile;
 mod opts;
 mod pull;
@@ -95,6 +97,14 @@ fn main() {
     hub.lock().unwrap().remember_in(&dir);
     let broadcast = ws::Broadcast::new();
 
+    // fsw tree beside the program, if any (localfw.rs)
+    let local = Arc::new(localfw::Local::new(
+        fswbuild::tree(std::env::current_exe().ok().as_deref()),
+        &data,
+        Box::new(localfw::RealBuilder),
+        localfw::Carried::this_build(),
+    ));
+
     let ctx = Arc::new(Ctx {
         hub: hub.clone(),
         broadcast: broadcast.clone(),
@@ -108,6 +118,7 @@ fn main() {
         gate: stm32::Gate::new(),
         exe: std::env::current_exe().ok(),
         started: std::time::SystemTime::now(),
+        local: local.clone(),
     });
 
     std::thread::spawn({
@@ -143,11 +154,22 @@ fn main() {
         "" => println!("no flight image in this build"),
         offered => println!("carrying the flight image for {}", offered),
     }
+    match (local.tree(), local.origin()) {
+        (Some(t), Some(o)) => println!(
+            "flight software tree {}, {}; {}",
+            t.display(),
+            localfw::origin_words(&o),
+            if local.on() { "the app builds its ChipSat images from it (switch on the ChipSats screen)" } else { "switched off, so the app uses the images it carries" }
+        ),
+        _ => println!("no flight software tree beside this program, so the app uses the images it carries"),
+    }
     match &log_path {
         Some(p) => println!("logging every line to {}", p.display()),
         None => println!("not logging to a file"),
     }
     println!("logs and pulled flight logs go in {}", data.display());
+    // with no TZ or /etc/localtime this is silently UTC and day folders can be a day off
+    println!("named by local time, {} (UTC{})", chrono::Local::now().format("%Y-%m-%d %H:%M"), chrono::Local::now().format("%:z"));
     // Ctrl-C ends the process outright, so the log is flushed every five seconds
     // rather than on the way out. The most a kill can cost is that tail.
     println!("Ctrl-C to stop. Closing the browser tab does not stop it.");

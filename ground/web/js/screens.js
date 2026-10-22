@@ -9,8 +9,8 @@
   const D = DG.datamodel;
   const hub = A.hub;
 
-  const SCREENS = ['chipsats', 'tbeams', 'live', 'data', 'replay'];
-  const NEED_APP = ['chipsats', 'tbeams', 'data'];
+  const SCREENS = ['chipsats', 'bench', 'tbeams', 'live', 'data', 'replay'];
+  const NEED_APP = ['chipsats', 'bench', 'tbeams', 'data'];
   const parts = {};   // name -> {show(), hide()}, registered by each screen's own file
   let screen = 'live';
 
