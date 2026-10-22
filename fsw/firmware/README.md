@@ -9,9 +9,12 @@ flight image on a board without a compiler.
 * flight-le.bin, flight-hp.bin, and their .elf - the flight software for each radio module, built with
   the defaults: id 255 meaning nobody configured it, SF7, +14 dBm. A board flashed with one announces
   itself as unconfigured rather than impersonating a real one. Each image carries a settings block,
-  which the ground software rewrites with the board's own id, spreading factor, power and interval
-  before flashing. The block names the module but a tool never changes it: the other module
+  which the ground software rewrites with the board's own id, spreading factor, power and gaps per
+  phase before flashing. The block names the module but a tool never changes it: the other module
   means the other image
+* bench-le.bin, bench-hp.bin, and their .elf - bench/sensor_bench for each radio module: every sensor
+  read and printed on the console, the flight packet back to back as CSID 254 at the module's lowest
+  power. Not flight software, and no settings block to configure. Flashes at 0x08000000
 * flight.json - which images these are, their sizes and sha256, and the defaults they were built
   with. The ground software reads it rather than being told
 * radio.json - what the firmware will actually accept: the spreading factor range, and per module the
@@ -27,3 +30,7 @@ that has fallen behind its source cannot ship unnoticed. A change to the flight 
 therefore not finished until this folder has been regenerated and committed with it.
 
 build/ is wiped and rewritten by every build, which is why these are copied out rather than pointed at.
+
+A ground app with this fsw/ tree beside it can build its own flight, dump and bench images and
+radio.json from the tree instead, in fsw/build, and keeps them in its data folder. It never writes
+here, so this folder is still only what emit_firmware.sh made.

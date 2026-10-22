@@ -2,10 +2,10 @@
   "layoutVersion": 3,
   "spreadingFactor": {"min": 5, "max": 12},
   "phases": [
-    {"name": "waiting", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 1000},
+    {"name": "waiting", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 10000},
     {"name": "rising", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 50},
     {"name": "falling", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 50},
-    {"name": "landed", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 1000}
+    {"name": "landed", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 10000}
   ],
   "logBlindMs": 200,
   "le": {
