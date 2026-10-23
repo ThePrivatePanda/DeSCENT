@@ -83,14 +83,14 @@ pub fn newer_on_disk(started: std::time::SystemTime, modified: Option<std::time:
     modified.map(|m| m > started).unwrap_or(false)
 }
 
-pub fn health_json(version: &str, port: u16, log: Option<&str>, boards: usize, receivers: usize, built: u64, newer: bool, fsw: bool, local: bool) -> String {
+pub fn health_json(version: &str, port: u16, log: Option<&str>, boards: usize, receivers: usize, built: u64, newer: bool, fsw: bool) -> String {
     // The dump firmware has no version of its own and does change, so the build says
     // which copy it is carrying rather than leaving a stale one to be guessed at. The id
     // is the first 16 characters of the image's sha256, which the flight repo publishes
     // in full. The flight images are listed the same way, each with the module it is for.
     let flight = crate::flight::carried();
     format!(
-        "{{\"ok\":true,\"version\":\"{}\",\"built\":{},\"newerOnDisk\":{},\"port\":{},\"dumpFirmware\":\"{}\",\"flightImages\":{},\"flightBuild\":{},\"fswTree\":{},\"fswLocal\":{},\"log\":{},\"boards\":{},\"receivers\":{}}}",
+        "{{\"ok\":true,\"version\":\"{}\",\"built\":{},\"newerOnDisk\":{},\"port\":{},\"dumpFirmware\":\"{}\",\"flightImages\":{},\"flightBuild\":{},\"fswTree\":{},\"log\":{},\"boards\":{},\"receivers\":{}}}",
         esc(version),
         built,
         newer,
@@ -99,7 +99,6 @@ pub fn health_json(version: &str, port: u16, log: Option<&str>, boards: usize, r
         flight.images_json(),
         flight.build_json(),
         fsw,
-        local,
         match log {
             Some(l) => format!("\"{}\"", esc(l)),
             None => String::from("null"),
@@ -718,9 +717,9 @@ fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
     let backup = asked(&q, "backup") == Some("1");
     let probe = asked(&q, "probe").filter(|p| !p.is_empty()).map(String::from);
     // The compile runs in the job, so only what can be checked without it is checked here.
-    // With the tree switch on, flight and bench images come from the tree too (localfw.rs)
+    // With a tree, flight and bench images come from it too (localfw.rs)
     let embedded = asked(&q, "embedded");
-    let on = ctx.local.on();
+    let on = ctx.local.tree().is_some();
     let (image, label, note, build) = if embedded == Some("built") || (on && embedded == Some("flight")) {
         ctx.local.tree().ok_or_else(|| {
             String::from(
@@ -821,9 +820,8 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
             receivers,
             crate::opts::built(),
             newer_on_disk(ctx.started, modified),
-            // the second one decides build-and-flash vs patching the carried image
+            // decides build-and-flash vs patching the carried image
             ctx.local.tree().is_some(),
-            ctx.local.on(),
         );
         let _ = request.respond(
             Response::from_string(body).with_header(header("Content-Type", "application/json")),
@@ -1186,7 +1184,8 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
         let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
         let board = crate::json::str_field(&body, "port").unwrap_or_default();
         let wipe = crate::json::int_field(&body, "wipe").unwrap_or(0) != 0;
-        let keep_fsw = wipe || crate::json::int_field(&body, "keepFsw").unwrap_or(1) != 0;
+        // unticked by default, nothing is saved unless asked
+        let keep_fsw = crate::json::int_field(&body, "keepFsw").unwrap_or(0) != 0;
         let probe = crate::json::str_field(&body, "probe").filter(|p| !p.is_empty());
         // anyConsole is Pull anyway
         let check_console = crate::json::int_field(&body, "anyConsole").unwrap_or(0) == 0;
@@ -1199,7 +1198,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
             .filter(|n| !n.is_empty());
 
         // tree's dump is fetched inside the job, it may need building
-        let on = ctx.local.on();
+        let on = ctx.local.tree().is_some();
         let dump = if on { Some(&[][..]) } else { crate::flash::CHIPSAT_DUMP };
         let text = match dump {
             None => String::from("{\"ok\":false,\"error\":\"this build carries no dump firmware\"}"),
@@ -1449,9 +1448,9 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
     }
 
     // What the flight software will accept for a radio, as its own build wrote it down.
-    // tree's table when the switch is on
+    // tree's table when there is a tree
     if path == "/api/radio" {
-        match ctx.local.radio_text(ctx.local.on()) {
+        match ctx.local.radio_text(true) {
             Ok((table, _)) => answer(request, table),
             Err(e) => {
                 let _ = request.respond(Response::from_string(e).with_status_code(404));
@@ -1462,35 +1461,6 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
 
     if path == "/api/fsw" {
         return answer(request, ctx.local.state_json());
-    }
-
-    if path == "/api/fsw/mode" {
-        let Some(mut request) = post_only(request) else { return };
-        let mut body = String::new();
-        let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
-        let text = match crate::json::int_field(&body, "on") {
-            None => failed("no on in the request: 1 to use this computer's flight software, 0 for the copies the app carries"),
-            Some(on) => match ctx.local.set_on(on != 0) {
-                Ok(()) => {
-                    println!("{}", if on != 0 { "using this computer's flight software" } else { "using the flight software this app carries" });
-                    ctx.local.state_json()
-                }
-                Err(e) => failed(&e),
-            },
-        };
-        return answer(request, text);
-    }
-
-    if path == "/api/fsw/rebuild" {
-        let Some(request) = post_only(request) else { return };
-        let text = match ctx.local.rebuild() {
-            Ok(()) => {
-                println!("building every part of the flight software in {}", ctx.local.tree().map(|t| t.display().to_string()).unwrap_or_default());
-                ctx.local.state_json()
-            }
-            Err(e) => failed(&e),
-        };
-        return answer(request, text);
     }
 
     match assets::get(&path) {
@@ -1693,19 +1663,18 @@ mod tests {
         let id = crate::flash::CHIPSAT_DUMP_ID;
         let flight = |fsw: bool| {
             format!(
-                "\"flightImages\":{},\"flightBuild\":{},\"fswTree\":{},\"fswLocal\":{}",
+                "\"flightImages\":{},\"flightBuild\":{},\"fswTree\":{}",
                 crate::flight::carried().images_json(),
                 crate::flight::carried().build_json(),
-                fsw,
                 fsw
             )
         };
         assert_eq!(
-            health_json("0.4.0", 8790, Some("/tmp/a.log"), 2, 1, 1_791_216_000, false, true, true),
+            health_json("0.4.0", 8790, Some("/tmp/a.log"), 2, 1, 1_791_216_000, false, true),
             format!("{{\"ok\":true,\"version\":\"0.4.0\",\"built\":1791216000,\"newerOnDisk\":false,\"port\":8790,\"dumpFirmware\":\"{}\",{},\"log\":\"/tmp/a.log\",\"boards\":2,\"receivers\":1}}", id, flight(true))
         );
         assert_eq!(
-            health_json("0.4.0", 8765, None, 0, 0, 1_791_216_000, true, false, false),
+            health_json("0.4.0", 8765, None, 0, 0, 1_791_216_000, true, false),
             format!("{{\"ok\":true,\"version\":\"0.4.0\",\"built\":1791216000,\"newerOnDisk\":true,\"port\":8765,\"dumpFirmware\":\"{}\",{},\"log\":null,\"boards\":0,\"receivers\":0}}", id, flight(false))
         );
         // The build time is the one compiled into this binary.
@@ -1713,7 +1682,7 @@ mod tests {
         // A build that carries a dump image says which one, so a stale copy is visible.
         assert!(!id.is_empty(), "the dump firmware should be compiled in");
         // The version is the crate's, not a string typed twice.
-        assert!(health_json(env!("CARGO_PKG_VERSION"), 1, None, 0, 0, 0, false, false, false)
+        assert!(health_json(env!("CARGO_PKG_VERSION"), 1, None, 0, 0, 0, false, false)
             .contains(&format!("\"version\":\"{}\"", env!("CARGO_PKG_VERSION"))));
     }
 
@@ -2043,7 +2012,7 @@ mod tests {
         let dump = crate::flash::CHIPSAT_DUMP.expect("the dump firmware should be compiled in");
         let id = &sha256(dump)[..16];
         assert_eq!(crate::flash::CHIPSAT_DUMP_ID, id);
-        let health = health_json("0.4.0", 8765, None, 0, 0, 0, false, false, false);
+        let health = health_json("0.4.0", 8765, None, 0, 0, 0, false, false);
         assert!(health.contains(&format!("\"dumpFirmware\":\"{}\",", id)), "{}", health);
 
         for image in &crate::flight::carried().images {

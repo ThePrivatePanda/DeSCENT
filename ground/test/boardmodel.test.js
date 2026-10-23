@@ -134,16 +134,11 @@ test('an image this computer built is named by where it came from', () => {
   assert.equal(bench.built, 'sensor bench HP built here 09:12 from abc1234');
 });
 
-test('with this computer\'s flight software switched off, the carried image is patched even with a tree', () => {
+test('a tree always means building, whatever else health says', () => {
   const images = [{ id: 'f84691175ddf2641', module: 'le', bytes: 63396 }];
-  assert.equal(B.flashWay({ fswTree: true, fswLocal: true, flightImages: images }, 'le').way, 'build');
-  const off = B.flashWay({ fswTree: true, fswLocal: false, flightImages: images }, 'le');
-  assert.equal(off.way, 'carried');
-  assert.equal(off.says, 'This computer\'s flight software is switched off, so this patches the image this app carries.');
-  const none = B.flashWay({ fswTree: true, fswLocal: false, flightImages: images }, 'hp');
-  assert.equal(none.stop, 'This computer\'s flight software is switched off, and this build carries no flight image for the HP module. Flash a file instead.');
-  // older app, no fswLocal
-  assert.equal(B.flashWay({ fswTree: true }, 'le').way, 'build');
+  assert.equal(B.flashWay({ fswTree: true, flightImages: images }, 'le').way, 'build');
+  // 1.2.0 sent fswLocal false with its switch off; there is no switch now
+  assert.equal(B.flashWay({ fswTree: true, fswLocal: false, flightImages: images }, 'hp').way, 'build');
   assert.equal(B.flashWay({ fswTree: false, flightImages: images }, 'le').says, 'No flight software tree, so this patches the image this app carries.');
 });
 

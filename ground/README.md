@@ -39,24 +39,24 @@ the chip goes round. A ground log gap of 0 keeps nothing from the ground. The bo
 30 s in RAM, so a take-off writes the 30 s before it too. Every setting goes into the image's
 settings block and the board reads it at boot.
 
-**Clear flash** erases the log chip and nothing else: the flight software is read off, the dump
-firmware erases the chip, and the flight software goes back on with its settings as they were.
-Nothing is saved to disk, and the confirm says when the board was last pulled. It is the last
+**Clear flash** erases the log chip. With **Save the flight software that is on it and put it
+back** ticked, the flight software is read off, the dump firmware erases the chip, and the flight
+software goes back on with its settings as they were. Unticked, the default, the board is left on
+the dump firmware: write a flight image next. Nothing is saved to disk, and the confirm says when the board was last pulled. It is the last
 click before launch. A full chip no longer stops logging, it overwrites its oldest sector.
 
-With the flight software beside the app and **Use this computer's flight software** ticked, the
-app builds the flight, dump and bench images from it, about 13 seconds a part, keeps them by
-source hash and names each by its commit and the files changed since. **Rebuild** on the ChipSats
-screen builds whatever is not built yet. A tree that does not build refuses to write a flight or
-bench image rather than write the old one, and Pull and Clear use the dump firmware the app
-carries until it does. Unticked, or with no tree, it writes the image the app carries with the
-settings patched in, about two seconds. The pane says which. The module is never patched: to
+With the flight software beside the app, the app always builds the flight, dump and bench images
+from it when first needed, about 13 seconds a part, keeps them by source hash and names each by its
+commit and the files changed since. A tree that does not build refuses to write a flight or bench
+image rather than write the old one, with the compiler's output where the write was asked for, and
+Pull and Clear use the dump firmware the app carries until it does. With no tree it writes the
+image the app carries with the settings patched in, about two seconds. The confirm says which. The module is never patched: to
 change it, flash the other image. Writing an image saves what was on the board only when that box
 is ticked.
 
-Pulling a log takes minutes and flashes the board twice. It first checks that the console port is
-this board's, saves the flight software and puts it back afterwards, and **Stop** keeps what has
-arrived. Each pull gets a folder in the data folder under the day, like `2026-10-18/pulls/1432-board9`.
+Pulling a log takes minutes. It first checks that the console port is this board's. With the box
+ticked it saves the flight software and puts it back afterwards, flashing the board twice;
+unticked, the default, the board is left on the dump firmware. **Stop** keeps what has arrived. Each pull gets a folder in the data folder under the day, like `2026-10-18/pulls/1432-board9`.
 
 ## Bench
 

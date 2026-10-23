@@ -18,8 +18,7 @@
   const state = {
     missing: false,     // the app has no /api/chips: it can pull, and nothing else here
     chips: [], probes: [], logs: [], health: null, radio: null,
-    fsw: null,          // /api/fsw, null on older apps
-    fswError: '',
+    fsw: null,          // /api/fsw, for the write confirm. null on older apps
     read: null,         // what the last Read the board said, while its probe stays plugged in
     stale: '',          // the job that has changed the board since it was read
     autoRead: [],       // probes already read, or tried, since they were plugged in
@@ -29,7 +28,7 @@
     reading: false, readError: '',
     sel: null,
     loaded: false,      // the app has answered once, so an unknown selection really is gone
-    keepFsw: true,
+    keepFsw: false,     // nothing is saved unless asked
     // off, a fresh image is written anyway
     backup: false,
     pick: null,         // the image about to be written: {kind, label, name, bytes, saved}
@@ -106,25 +105,12 @@
   // Asks which probes are plugged in, and whether a job was started from another window.
   // It attaches to nothing unless a probe has appeared since it last asked.
   async function lookForProbes() {
-    if (state.fsw && state.fsw.job && state.fsw.job.running) followRebuild();
     if (!busy()) A.shell.pollJobs();
     if (state.missing || busy()) return;
     try { seeProbes(await hub.chipProbes()); } catch (e) { return; }
     render();
     readNewProbe();
     if (state.looks++ % 2) peek();
-  }
-
-  // radio table may have changed once a rebuild ends
-  async function followRebuild() {
-    const was = state.fsw;
-    const now = await hub.fsw().catch(() => null);
-    if (!now || !now.ok) return;
-    state.fsw = now;
-    if (was && was.job && was.job.running && !now.job.running) {
-      state.radio = await hub.radio().then((r) => (r && r.layoutVersion ? r : null)).catch(() => state.radio);
-    }
-    render();
   }
 
   // Nothing touches a board unasked unless this screen is up and nothing else is going
@@ -518,49 +504,6 @@ async function buildAndFlash() {
     return rows.join('');
   }
 
-  // fsw tree pane. Only shows what the app said, compiler output verbatim
-  const FSW_FALLS_BACK = { dump: 'Pull and Clear use the copy this app carries until it builds.', radio: 'Settings are checked against the table this app carries until it builds.' };
-  function fswPane() {
-    const f = state.fsw;
-    if (!f) return '';
-    if (!f.tree) {
-      return '<div class="pane"><h3>Flight software on this computer</h3><p class="plain inpane">No flight software tree beside the app, so it uses the images it carries. ' +
-        'A tree is the folder holding build.sh and V2_6_X_Code: fsw/ beside ground/, or set CHIPSAT_FSW to it before starting the app.</p></div>';
-    }
-    const job = f.job || {};
-    const src = f.source || {};
-    const tree = '<span class="path">' + esc(f.tree) + '</span>' + (src.words ? ', ' + esc(src.words) : '');
-    const toggle = '<label class="check"><input type="checkbox" data-fswon="1"' + (f.on ? ' checked' : '') + (job.running ? ' disabled' : '') + '> Use this computer\'s flight software</label>' +
-      '<span class="note">' + (f.on ? 'Pull, Clear, the sensor bench and Write firmware use what is built from it, and settings are checked against its radio table.'
-        : 'Off: they use the copies this app carries.') + '</span>';
-    const partRow = (p) => {
-      let what;
-      if (p.failed) {
-        what = mark('bad', 'did not build') + ' <span class="note">' + esc(f.on ? FSW_FALLS_BACK[p.kind] || 'Nothing is written with it until it builds.' : '') + '</span>' +
-          '<pre class="raw">' + esc(p.failed) + '</pre>';
-      } else if (p.built) {
-        const vs = p.carried === null ? 'this app carries none' : p.same ? 'the same as the one this app carries' : 'differs from the one this app carries';
-        what = '<span class="val">' + esc(p.built.words) + '</span> <span class="note">' + esc(vs) + '</span>';
-      } else {
-        what = '<span class="note">not built from these sources yet' + (f.on ? ', built when first needed' : '') + '</span>';
-      }
-      return '<div><span class="l">' + esc(p.label.charAt(0).toUpperCase() + p.label.slice(1)) + '</span><span class="grow">' + what + '</span></div>';
-    };
-    const running = job.running ? jobBlock(job, 'Building from this computer\'s flight software') : '';
-    const ended = !job.running && job.error
-      ? '<p class="outcome bad inpane">' + esc(job.note || 'Some parts did not build') + '.</p>'
-      : !job.running && (job.steps || []).length ? '<p class="outcome inpane">' + esc(job.note ? job.note.charAt(0).toUpperCase() + job.note.slice(1) : 'Done') + '.</p>' : '';
-    return '<div class="pane"><h3>Flight software on this computer</h3>' + running + ended +
-      (state.fswError ? '<p class="outcome bad inpane">' + esc(state.fswError) + '</p>' : '') +
-      '<div class="rows kvrows">' +
-        '<div><span class="l">Tree</span><span class="grow">' + tree + '</span></div>' +
-        '<div>' + toggle + '</div>' +
-        (f.parts || []).map(partRow).join('') +
-        '<div><button data-fswrebuild="1"' + (job.running ? ' disabled>Building…' : '>Rebuild from this computer\'s flight software') + '</button>' +
-          '<span class="note">Builds whatever isn\'t built from the current sources yet, about 13 s a part.</span></div>' +
-      '</div></div>';
-  }
-
   function nextImage(module) {
     const f = state.fsw;
     if (!f || !f.tree || !module) return '';
@@ -749,7 +692,9 @@ async function buildAndFlash() {
     } else if (mine && s.wipe && s.pct === 100) {
       last = s.restored
         ? '<p class="outcome inpane">Flash cleared. The flight software is back on the board with its settings as they were.</p>'
-        : '<p class="outcome bad inpane">Flash cleared. The board was already on the dump firmware and still is: write the flight image and its settings before it flies.</p>';
+        : !s.keepFsw
+          ? '<p class="outcome bad inpane">Flash cleared. The board is on the dump firmware: write a flight image next.</p>'
+          : '<p class="outcome bad inpane">Flash cleared. The board was already on the dump firmware and still is: write the flight image and its settings before it flies.</p>';
     } else if (mine && s.log) {
       // The id read off the board before the pull is still its id: a pull puts the same image back.
       const read = r.onProbe && state.read.settings ? state.read.settings.csid : null;
@@ -778,10 +723,11 @@ async function buildAndFlash() {
           (state.keepFsw ? '' : mark('warn', 'the board will be left on the dump firmware')) + '</div>' +
         '<div><button data-pull="1" class="primary"' + (ready ? '' : ' disabled') + '>Pull the flight log</button>' +
           '<span class="note">' + (r.onProbe || r.id === ANY
-            ? 'Flashes the board twice. Takes minutes.'
+            ? (state.keepFsw ? 'Flashes the board twice. Takes minutes.' : 'Flashes the dump firmware. Takes minutes.')
             : 'Put the board on the ST-Link and press Read the board first.') + '</span></div>' +
         '<div><button data-wipe="1"' + (ready && r.uid ? '' : ' disabled') + '>Clear flash</button>' +
-          '<span class="note">Erases the log on the chip and nothing else. The flight software is read off and put back, settings untouched.</span></div>' +
+          '<span class="note">' + (state.keepFsw ? 'Erases the log on the chip and nothing else. The flight software is read off and put back, settings untouched.'
+            : 'Erases the log on the chip and leaves the board on the dump firmware.') + '</span></div>' +
         // a clear keeps no copy, so say when it was last pulled
         (state.pick && state.pick.kind === 'wipe' && state.pickFor === r.uid && !busy()
           ? '<div class="confirm"><span class="grow">' + (pulls.length
@@ -807,9 +753,9 @@ async function buildAndFlash() {
       const more = { uid: r.uid, wipe: 1 };
       if (anyConsole) more.anyConsole = 1;
       if (r.probe && r.probe.serial) more.probe = r.probe.serial;
-      await hub.pull(port, true, more);
+      await hub.pull(port, state.keepFsw, more);
       store.set('dg-pull-board', r.uid);
-      toast('Clearing the flash on ' + nameOf(r));
+      toast('Clearing the flash on ' + nameOf(r) + (state.keepFsw ? '' : ', not keeping the flight software'));
     } catch (e) {
       toast('Could not start the clear: ' + (e.message || e));
     }
@@ -824,7 +770,7 @@ async function buildAndFlash() {
     }
     if (r.unread) return headPane(r);
     if (r.id === ANY) return headPane(r) + logPane(r);
-    return headPane(r) + fswPane() + radioPane(r) + '<div class="two">' + firmwarePane(r) + logPane(r) + '</div>';
+    return headPane(r) + radioPane(r) + '<div class="two">' + firmwarePane(r) + logPane(r) + '</div>';
   }
 
   function render() {
@@ -961,17 +907,6 @@ async function pull(anyConsole) {
     const r = rows().find((x) => x.id === state.sel);
 
     if (at('data-read')) { read(at('data-read')); return; }
-    if (at('data-fswrebuild')) {
-      state.fswError = '';
-      try {
-        state.fsw = await hub.fswRebuild();
-        toast('Building from this computer\'s flight software');
-      } catch (err) {
-        state.fswError = err.missing ? CANNOT : (err.message || String(err));
-      }
-      render();
-      return;
-    }
     if (at('data-module') && r && r.uid) {
       const m = at('data-module');
       try {
@@ -1062,20 +997,6 @@ async function pull(anyConsole) {
     if (t.getAttribute('data-build') && t.type === 'checkbox' && state.build) {
       state.build[t.getAttribute('data-build')] = !!t.checked;
       state.buildError = '';
-      render();
-      return;
-    }
-    if (t.getAttribute('data-fswon')) {
-      state.fswError = '';
-      try {
-        state.fsw = await hub.fswMode(!!t.checked);
-        // both depend on the switch
-        state.health = await hub.health().catch(() => state.health);
-        state.radio = await hub.radio().then((x) => (x && x.layoutVersion ? x : null)).catch(() => state.radio);
-        toast(t.checked ? 'Using this computer\'s flight software' : 'Using the flight software this app carries');
-      } catch (err) {
-        state.fswError = err.missing ? CANNOT : (err.message || String(err));
-      }
       render();
       return;
     }

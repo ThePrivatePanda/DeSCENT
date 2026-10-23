@@ -10,10 +10,12 @@ One page to print. The app needs no internet.
 - set each board's **Phases**: for the ground and the air, the gap between flash log records and
   the gap between packets, and whether the packets follow the battery with that phase's own table.
   A board flashed before the phases has none and keeps its one fixed interval whatever is set
-- if the app builds from this laptop's flight software, check the ChipSats screen names the commit
-  you mean to fly, or untick **Use this computer's flight software**
-- last of all, **Clear flash** on each board: the log chip is wiped, the flight software and its
-  settings stay, nothing is saved. Pull it first if the chip holds anything you want
+- if the app builds from this laptop's flight software, check the write confirm names the commit
+  you mean to fly
+- last of all, **Clear flash** on each board with **Save the flight software that is on it and put
+  it back** ticked: the log chip is wiped, the flight software and its settings stay, nothing is
+  saved. Unticked (the default) the board is left on the dump firmware. Pull it first if the chip
+  holds anything you want
 - flash a spare T-Beam the same way, so a dead receiver is a swap
 - check the laptop clock, because logs are timestamped from it
 - check free disk space; a long flight is a few MB, a chip dump about 5 MB
@@ -35,7 +37,7 @@ One page to print. The app needs no internet.
 ## After landing
 
 - for the on-board log: clip the board on the ST-Link, **ChipSats** → **Read the board** → **Pull the flight log**. It takes a few minutes and flashes twice
-- the flight software is saved before the dump and written back after; if the pull fails, the sheet says whether the board is still on the dump firmware
+- the flight software is saved before the dump and written back after only with that box ticked (off by default); if the pull fails, the sheet says whether the board is still on the dump firmware
 - **Stop** ends a pull and keeps what has arrived
 - the pull lands in the day's folder, `<day>/pulls/<time>-<board>`; **Data** lists it and shows the folder
 - **Save log**, **Save CSV** and **Save raw** are on the pull's result, on its row in **Data**, and above the replayed log
@@ -53,8 +55,8 @@ One page to print. The app needs no internet.
 - **ChipSat buttons greyed out** — the board has not been read since it was clipped on. Press **Read
   the board**.
 - **"did not build, so nothing was written"** — the flight software beside the app does not
-  compile. Fix it, or untick **Use this computer's flight software** to write the copy the app
-  carries.
+  compile. The compiler's words are under the button. Fix it, or restart the app with
+  `CHIPSAT_FSW=none` to write the copy it carries.
 - **SF6 does not link, SF5 is not offered** — the T-Beam's SX1276 has no SF5, and its SF6 is the
   first generation format, which the ChipSat's SX1262 cannot produce: tested 2026-10-17 with both
   sides headerless, every packet heard, every CRC failed (`ERR,-7` in the log). Fly SF7 or above.

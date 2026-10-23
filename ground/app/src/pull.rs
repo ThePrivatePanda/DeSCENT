@@ -533,10 +533,9 @@ fn run(mut job: Job) {
 
 fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
     let Job { shared, broadcast, dir, port_name, keep_fsw, dump_image, uid, name: board_name, wipe, check_console, dump_from, known, .. } = job;
-    // A clear always puts the flight software back: the point is a board that flies with an
-    // empty chip, not a board on the dump firmware.
+    // a clear keeps the flight software only when asked, same as a pull
     let wipe = *wipe;
-    let keep_fsw = *keep_fsw || wipe;
+    let keep_fsw = *keep_fsw;
 
     let now = SystemTime::now();
     // A clear keeps nothing, the log was already pulled (decided 2026-10-21). Its flight
@@ -693,7 +692,11 @@ Pick the board's console port, or Pull anyway if the software on the board print
             if !said.starts_with("erase ok") {
                 return Err(format!("the chip was not erased: the board said {:?}", said.trim()));
             }
-            shared.lock().unwrap().note = format!("{}, flight software going back on", said.trim());
+            shared.lock().unwrap().note = format!(
+                "{}, {}",
+                said.trim(),
+                if saved.is_some() { "flight software going back on" } else { "the board stays on the dump firmware" }
+            );
             return Ok(());
         }
 
@@ -1248,18 +1251,30 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
     }
 
     #[test]
-    fn a_clear_asks_the_dump_firmware_to_erase_and_puts_the_flight_software_back() {
+    fn a_clear_puts_the_flight_software_back_only_when_asked_to_keep_it() {
         // The board boots, starts printing, hears the E, asks, hears the Y, erases.
         let said = b"I Boot 3 c0: start test=flashdump\r\nraw 0 000000 AA\r\n\r\nstopped printing: E received\r\n\
 erase the WHOLE chip? the log on it is gone for good. send Y to go ahead, anything else cancels\r\n\
 erasing, 5 s typical, 25 s at most\r\nerase ok after 5012 ms\r\nsend D to print the log again, E to erase the whole chip\r\n";
+        // unticked: dump firmware, reset, erase over the console. Nothing read off, nothing put back
         let (p, did, dir) = pulled("wipe", said, false, None);
-        assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"], "saved and put back even when not asked to keep it");
+        assert_eq!(did, vec!["write dump firmware", "reset"]);
+        assert_eq!(p.error, None);
+        assert!(!p.restored && p.wipe);
+        assert!(p.steps.iter().all(|s| !s.contains("saving") && !s.contains("putting the flight software back")), "{:?}", p.steps);
+        assert!(p.steps.iter().any(|s| s == "erasing the chip, about 5 s"), "{:?}", p.steps);
+        assert_eq!(p.note, "flash cleared, the board is still running the dump firmware");
+        assert_eq!((p.dir, p.log, p.raw, p.saved_fsw), (None, None, None, None));
+        assert_eq!(kept_in(&dir), Vec::<String>::new(), "a clear keeps nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (p, did, dir) = pulled("wipe-kept", said, true, None);
+        assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"]);
         assert_eq!(p.error, None);
         assert!(p.restored && p.wipe);
         assert_eq!(p.note, "flash cleared, flight software back on the board");
         assert_eq!((p.dir, p.log, p.raw, p.saved_fsw), (None, None, None, None));
-        assert_eq!(kept_in(&dir), Vec::<String>::new(), "a clear keeps nothing");
+        assert_eq!(kept_in(&dir), Vec::<String>::new(), "the copy in the working folder goes once it is back");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1386,7 +1401,7 @@ erase ok after 5012 ms\r\n";
         let said = b"I Boot 3 c0: start test=flashdump\r\nstopped printing: E received\r\n\
 erase the WHOLE chip? the log on it is gone for good. send Y to go ahead, anything else cancels\r\n\
 erase ok after 5012 ms\r\n";
-        let (p, did, dir) = pulled("wipe-notback", said, false, Some(1));
+        let (p, did, dir) = pulled("wipe-notback", said, true, Some(1));
         assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software"]);
         assert!(!p.restored);
         let kept = kept_in(&dir);
@@ -1405,7 +1420,7 @@ erase ok after 5012 ms\r\n";
         let said = b"I BOOT 0 c0: start test=flashdump\r\nstopped printing: E received\r\n\
 erase the WHOLE chip? the log on it is gone for good. send Y to go ahead, anything else cancels\r\n\
 erasing, 5 s typical, 25 s at most\r\nI FLASH 416 c0: erase what=chip\r\nerase ok after 5012 ms\r\nsend D to print the log again, E to erase the whole chip\r\n";
-        let (p, _, dir) = pulled("wipe-logged", said, false, None);
+        let (p, _, dir) = pulled("wipe-logged", said, true, None);
         assert_eq!(p.error, None, "{:?}", p.error);
         assert!(p.restored && p.wipe);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2020,7 +2035,7 @@ record 3113 boot 6 ms 23302\r\n\
     #[test]
     fn a_clear_stopped_while_waiting_to_be_asked_puts_the_flight_software_back_unerased() {
         let printed = (0..100).map(|_| Step::Silence(200)).collect();
-        let (p, did, dir, took) = pulled_stopping("wipe-stopped", printed, false, Some(Box::new(|s: &Shared| {
+        let (p, did, dir, took) = pulled_stopping("wipe-stopped", printed, true, Some(Box::new(|s: &Shared| {
             until(s, |p| p.note.starts_with("asking the dump firmware"));
             std::thread::sleep(std::time::Duration::from_millis(500));
         })));

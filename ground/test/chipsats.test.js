@@ -42,8 +42,6 @@ async function chipsats(o) {
   };
   if (o.fsw !== undefined) {
     hub.fsw = async () => o.fsw;
-    hub.fswMode = async (on) => { o.mode = on; o.fsw = Object.assign({}, o.fsw, { on }); o.healths = (o.healths || 0); return o.fsw; };
-    hub.fswRebuild = async () => { o.rebuilds = (o.rebuilds || 0) + 1; o.fsw = Object.assign({}, o.fsw, { job: { running: true, pct: 10, steps: ['building the flight LE'], note: '', error: null, seconds: 1 } }); return o.fsw; };
     hub.health = async () => { o.healths = (o.healths || 0) + 1; return o.health || null; };
     hub.radio = async () => { o.radios = (o.radios || 0) + 1; return null; };
   }
@@ -181,7 +179,9 @@ test('clear flash asks first, then runs the pull job told to wipe, and says so w
   const hub = p.hub || null;
   let h = p.sheet();
   assert.match(h, /data-wipe="1"[^>]*>Clear flash</);
-  assert.match(h, /Erases the log on the chip and nothing else/);
+  // unticked by default: nothing saved, nothing put back
+  assert.match(h, /<input type="checkbox" data-keepfsw="1"> Save the flight software that is on it and put it back/);
+  assert.match(h, /Erases the log on the chip and leaves the board on the dump firmware\./);
   assert.doesNotMatch(h, /data-wipego/);
   await p.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
   h = p.sheet();
@@ -192,6 +192,24 @@ test('clear flash asks first, then runs the pull job told to wipe, and says so w
   assert.match(h, /data-wipecancel="1">Cancel</);
   await p.fire('screen-chipsats', 'click', { 'data-wipecancel': '1' });
   assert.doesNotMatch(p.sheet(), /data-wipego/);
+});
+
+test('a clear sends the checkbox, and an unticked one ends on the dump firmware in plain words', async () => {
+  const boards = [{ port: '/dev/ttyUSB0', usb: '1a86:7523', state: 'waiting' }];
+  const p = await chipsats({ read: FLIGHT, boards, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  await p.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
+  await p.fire('screen-chipsats', 'click', { 'data-wipego': '1' });
+  assert.equal(p.o.pulled.keepFsw, false);
+  assert.equal(p.o.pulled.more.wipe, 1);
+  p.jobs.pull = { running: false, wipe: true, keepFsw: false, restored: false, pct: 100, error: null, board: '/dev/ttyUSB0', uid: UID9, steps: ['writing the dump firmware'] };
+  await p.jobEnded('pull');
+  assert.match(p.sheet(), /<p class="outcome bad inpane">Flash cleared\. The board is on the dump firmware: write a flight image next\.<\/p>/);
+
+  await p.fire('screen-chipsats', 'change', { 'data-keepfsw': '1' }, { type: 'checkbox', checked: true });
+  assert.match(p.sheet(), /The flight software is read off and put back, settings untouched\./);
+  await p.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
+  await p.fire('screen-chipsats', 'click', { 'data-wipego': '1' });
+  assert.equal(p.o.pulled.keepFsw, true);
 });
 
 test('clearing a board pulled before says when, off the newest of its pulls, and that nothing is saved', async () => {
@@ -431,7 +449,7 @@ test('a board shows its last saved flight software to put back and every log pul
 const WORDS_LE = 'flight LE built here 14:02 from abc1234 + config.h changed';
 const part = (name, label, kind, module, more) => Object.assign({ part: name, label, kind, module, built: null, failed: null, carried: 'c4fb204d8f79e725', same: null }, more || {});
 const FSW = (more) => Object.assign({
-  ok: true, tree: '/home/op/DeSCENT-repo/fsw', on: true,
+  ok: true, tree: '/home/op/DeSCENT-repo/fsw',
   source: { hash: 'aa', commit: 'abc1234def', dirty: true, changed: ['V2_6_X_Code/src/config.h'], words: 'from abc1234 + config.h changed' },
   parts: [
     part('flight-le', 'flight LE', 'flight', 'le', { built: { part: 'flight-le', words: WORDS_LE, id: '0a1b2c3d4e5f6071' }, same: false }),
@@ -441,39 +459,17 @@ const FSW = (more) => Object.assign({
     part('bench-hp', 'sensor bench HP', 'bench', 'hp', { failed: 'the flight software did not build.\nsensor_bench.ino:40:3: error: expected \';\' before \'}\' token' }),
     part('radio.json', 'radio table', 'radio', null),
   ],
-  job: { running: false, pct: 0, note: '', steps: [], error: null, seconds: 0 },
 }, more || {});
-const HEALTH_ON = { fswTree: true, fswLocal: true, flightImages: [{ id: 'c4fb204d8f79e725', module: 'le', bytes: 63396 }] };
+const HEALTH_ON = { fswTree: true, flightImages: [{ id: 'c4fb204d8f79e725', module: 'le', bytes: 63396 }] };
 
-test('the sheet says which tree, which commit and which files are changed, and each part as the app reports it', async () => {
-  const p = await chipsats({ fsw: FSW(), health: HEALTH_ON });
-  const h = p.sheet();
-  assert.match(h, /<h3>Flight software on this computer<\/h3>/);
-  assert.match(h, /<span class="path">\/home\/op\/DeSCENT-repo\/fsw<\/span>, from abc1234 \+ config.h changed/);
-  assert.match(h, /<input type="checkbox" data-fswon="1" checked> Use this computer's flight software/);
-  assert.match(h, /<span class="l">Flight LE<\/span><span class="grow"><span class="val">flight LE built here 14:02 from abc1234 \+ config.h changed<\/span> <span class="note">differs from the one this app carries<\/span>/);
-  assert.match(h, /<span class="l">Dump firmware<\/span><span class="grow"><span class="note">not built from these sources yet, built when first needed<\/span>/);
-  assert.match(h, /<span class="l">Sensor bench HP<\/span><span class="grow"><span class="mark bad">did not build<\/span> <span class="note">Nothing is written with it until it builds.<\/span><pre class="raw">the flight software did not build.\nsensor_bench.ino:40:3: error: expected (&#39;|')?;(&#39;|')? before (&#39;|')?}(&#39;|')? token<\/pre>/);
-  assert.match(h, /data-fswrebuild="1">Rebuild from this computer's flight software<\/button>/);
-});
-
-test('Rebuild starts the build and the sheet follows it; the switch is sent and the flashing way asked again', async () => {
-  const p = await chipsats({ fsw: FSW(), health: HEALTH_ON });
-  await p.fire('screen-chipsats', 'click', { 'data-fswrebuild': '1' });
-  assert.equal(p.o.rebuilds, 1);
-  assert.match(p.sheet(), /data-fswrebuild="1" disabled>Building…/);
-  assert.match(p.sheet(), /data-fswon="1" checked disabled>/, 'not switched while it builds');
-  p.o.fsw = FSW({ job: { running: false, pct: 83, note: '1 of 6 did not build', steps: ['x'], error: 'sensor bench HP: the flight software did not build.', seconds: 70 } });
-  const radios = p.o.radios;
-  await p.ticks(1);
-  assert.match(p.sheet(), /<p class="outcome bad inpane">1 of 6 did not build.<\/p>/);
-  assert.equal(p.o.radios, radios + 1, 'the radio table is asked again once a build ends');
-
-  const healths = p.o.healths;
-  await p.fire('screen-chipsats', 'change', { 'data-fswon': '1' }, { type: 'checkbox', checked: false });
-  assert.equal(p.o.mode, false);
-  assert.equal(p.o.healths, healths + 1);
-  assert.match(p.sheet(), /data-fswon="1"> Use this computer's flight software<\/label><span class="note">Off: they use the copies this app carries.<\/span>/);
+test('there is no flight software pane, switch or Rebuild button, tree or not', async () => {
+  for (const fsw of [FSW(), { ok: true, tree: null, source: null, parts: [] }, undefined]) {
+    const p = await chipsats({ fsw, health: HEALTH_ON });
+    const h = p.sheet();
+    assert.doesNotMatch(h, /Flight software on this computer/);
+    assert.doesNotMatch(h, /data-fswon|data-fswrebuild|Rebuild from/);
+    assert.doesNotMatch(h, /<pre class="raw">/, 'compiler output is shown where a write was asked for, not up front');
+  }
 });
 
 test('a board running an image built here is named by where it came from, and so is the image about to be written', async () => {
@@ -492,12 +488,12 @@ test('an HP image not built yet says it is built from the tree first', async () 
   assert.match(p.sheet(), /It is built from abc1234 \+ config.h changed first, about 13 seconds./);
 });
 
-test('with no tree the sheet says the carried images are used, and an older app gets no pane', async () => {
-  const none = await chipsats({ fsw: { ok: true, tree: null, on: false, source: null, parts: [], job: {} } });
-  assert.match(none.sheet(), /No flight software tree beside the app, so it uses the images it carries./);
-  assert.doesNotMatch(none.sheet(), /data-fswrebuild/);
-  const older = await chipsats({});
-  assert.doesNotMatch(older.sheet(), /Flight software on this computer/);
+test('a write whose build fails shows the compiler\'s own words on the sheet it was asked from', async () => {
+  const p = await chipsats({ read: FLIGHT, fsw: FSW(), health: HEALTH_ON, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  p.jobs.chip = { what: 'flash', uid: UID9, running: false, steps: ['building the flight LE'],
+    error: 'the flight LE from this computer\'s flight software did not build, so nothing was written. config.h:60:26: error: static assertion failed' };
+  await p.jobEnded('chip');
+  assert.match(p.sheet(), /<p class="outcome bad inpane">Flash failed: the flight LE from this computer(&#39;|')s flight software did not build, so nothing was written. config.h:60:26: error: static assertion failed<\/p>/);
 });
 
 test('a pull says which dump firmware read it and which flight software was on the board', async () => {
