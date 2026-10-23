@@ -341,19 +341,6 @@
       return answered(await fetch('/api/fsw'));
     }
 
-    async fswMode(on) {
-      const j = await answered(await fetch('/api/fsw/mode', { method: 'POST', body: JSON.stringify({ on: on ? 1 : 0 }) }));
-      if (!j.ok) throw new Error(j.error || 'the switch was not changed');
-      return j;
-    }
-
-    // returns straight away, poll fsw()
-    async fswRebuild() {
-      const j = await answered(await fetch('/api/fsw/rebuild', { method: 'POST' }));
-      if (!j.ok) throw new Error(j.error || 'the build did not start');
-      return j;
-    }
-
     // A pull's report.json, by the name logs() gives the pull's folder.
     async report(name) {
       const r = await fetch('/api/log/' + String(name).split('/').map(encodeURIComponent).join('/'));

@@ -156,10 +156,9 @@ fn main() {
     }
     match (local.tree(), local.origin()) {
         (Some(t), Some(o)) => println!(
-            "flight software tree {}, {}; {}",
+            "flight software tree {}, {}; the app builds its ChipSat images from it",
             t.display(),
-            localfw::origin_words(&o),
-            if local.on() { "the app builds its ChipSat images from it (switch on the ChipSats screen)" } else { "switched off, so the app uses the images it carries" }
+            localfw::origin_words(&o)
         ),
         _ => println!("no flight software tree beside this program, so the app uses the images it carries"),
     }

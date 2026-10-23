@@ -213,22 +213,17 @@
   // for the board's module has the settings written into its block. health is
   // /api/health; a build of the app from before it said which is taken to have a tree,
   // since building was all it did. stop is why nothing can be flashed this way.
-  // older apps only send fswTree and always built when they had one
   function flashWay(health, module) {
-    const local = health && typeof health.fswLocal === 'boolean' ? health.fswLocal : (!health || health.fswTree !== false);
-    if (local) {
+    if (!health || health.fswTree !== false) {
       return { way: 'build', verb: 'Build and flash', column: 'Build with', stop: '',
         says: 'A flight software tree is here, so this builds the exact image.' };
     }
-    const off = !!health && health.fswTree === true;
     const carried = { way: 'carried', verb: 'Patch and flash', column: 'Flash with', stop: '',
-      says: off ? 'This computer\'s flight software is switched off, so this patches the image this app carries.'
-        : 'No flight software tree, so this patches the image this app carries.' };
+      says: 'No flight software tree, so this patches the image this app carries.' };
     if (!module) return carried;
     const images = Array.isArray(health.flightImages) ? health.flightImages : [];
     if (images.some((i) => i.module === module)) return carried;
-    const none = (off ? 'This computer\'s flight software is switched off' : 'No flight software tree') +
-      ', and this build carries no flight image for the ' + MODULE[module] + ' module. Flash a file instead.';
+    const none = 'No flight software tree, and this build carries no flight image for the ' + MODULE[module] + ' module. Flash a file instead.';
     return Object.assign(carried, { says: none, stop: none });
   }
 

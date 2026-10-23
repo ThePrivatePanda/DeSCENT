@@ -1,6 +1,7 @@
 //! Images and radio.json built from the fsw tree on this laptop instead of the copies baked into
-//! the app, cached by source hash. Flight and bench images never fall back to the carried copy:
-//! writing the old image while someone thinks their edit is on the board is worse than refusing
+//! the app, cached by source hash. No tree, the carried copies. Flight and bench images never fall
+//! back to the carried copy: writing the old image while someone thinks their edit is on the board
+//! is worse than refusing
 use crate::fswbuild::{self, Origin};
 use crate::json::esc;
 use sha2::{Digest, Sha256};
@@ -11,7 +12,6 @@ use std::sync::{Arc, Mutex};
 // dot folder so the log/image lists skip it
 pub const FOLDER: &str = ".fsw-builds";
 const REGISTRY: &str = "registry.tsv";
-const MODE: &str = "mode.txt";
 
 // name is the file name in fsw/firmware
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -246,26 +246,13 @@ impl Use {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct Job {
-    pub running: bool,
-    pub pct: u32,
-    pub note: String,
-    pub steps: Vec<String>,
-    pub error: Option<String>,
-    pub started_ms: u128,
-    pub finished_ms: u128,
-}
-
 pub struct Local {
     tree: Option<PathBuf>,
     dir: PathBuf,
     builder: Box<dyn Builder>,
     carried: Carried,
-    on: Mutex<bool>,
-    // (source, part) -> compiler output, so a broken tree isn't rebuilt on every pull. Rebuild clears it
+    // (source, part) -> compiler output, so a broken tree isn't rebuilt on every pull. A write retries
     failed: Mutex<HashMap<(String, String), String>>,
-    job: Mutex<Job>,
     registry: Mutex<()>,
 }
 
@@ -273,7 +260,7 @@ pub type Shared = Arc<Local>;
 
 fn refused(label: &str, e: &str) -> String {
     format!(
-        "the {} from this computer's flight software did not build, so nothing was written. {} Switch off \"Use this computer's flight software\" on the ChipSats screen to write the copy this app carries",
+        "the {} from this computer's flight software did not build, so nothing was written. {}",
         label, e
     )
 }
@@ -283,39 +270,20 @@ fn now_s() -> u64 {
 }
 
 impl Local {
-    // switch defaults to on if never touched
+    // a mode.txt left by 1.2.0 and earlier is ignored
     pub fn new(tree: Option<PathBuf>, data: &Path, builder: Box<dyn Builder>, carried: Carried) -> Local {
-        let dir = data.join(FOLDER);
-        let on = std::fs::read_to_string(dir.join(MODE)).map(|t| t.trim() != "off").unwrap_or(true);
         Local {
             tree,
-            dir,
+            dir: data.join(FOLDER),
             builder,
             carried,
-            on: Mutex::new(on),
             failed: Mutex::new(HashMap::new()),
-            job: Mutex::new(Job::default()),
             registry: Mutex::new(()),
         }
     }
 
     pub fn tree(&self) -> Option<&Path> {
         self.tree.as_deref()
-    }
-
-    pub fn on(&self) -> bool {
-        self.tree.is_some() && *self.on.lock().unwrap()
-    }
-
-    pub fn set_on(&self, on: bool) -> Result<(), String> {
-        if on && self.tree.is_none() {
-            return Err(String::from("there is no flight software tree on this computer to use"));
-        }
-        std::fs::create_dir_all(&self.dir).map_err(|e| format!("cannot make {}: {}", self.dir.display(), e))?;
-        std::fs::write(self.dir.join(MODE), if on { "on\n" } else { "off\n" })
-            .map_err(|e| format!("cannot write {}: {}", self.dir.join(MODE).display(), e))?;
-        *self.on.lock().unwrap() = on;
-        Ok(())
     }
 
     pub fn origin(&self) -> Option<Origin> {
@@ -428,11 +396,11 @@ impl Local {
             .unwrap_or_default()
     }
 
-    // off or no tree: carried copy. On: the tree's, and if it won't build either the carried copy
-    // plus the reason (fallback) or just the reason
+    // no tree: carried copy. Tree: its part, and if it won't build either the carried copy plus the
+    // reason (fallback) or just the reason
     pub fn pick(&self, name: &str, fallback: bool, say: &dyn Fn(&str)) -> Result<Use, String> {
         let label = part(name).map(|p| p.label).unwrap_or(name);
-        if !self.on() {
+        if self.tree.is_none() {
             return self
                 .carried(name)
                 .map(|b| Use::Carried(b, None))
@@ -451,9 +419,12 @@ impl Local {
         }
     }
 
-    // for images about to be written, never falls back
+    // for images about to be written, never falls back. Builds again after a failure
     pub fn get_or_refuse(&self, name: &str, say: &dyn Fn(&str)) -> Result<(Vec<u8>, Identity), String> {
         let label = part(name).map(|p| p.label).unwrap_or(name);
+        if let Some(origin) = self.origin() {
+            self.failed.lock().unwrap().remove(&(origin.source, name.to_string()));
+        }
         self.get(name, say).map_err(|e| refused(label, &e))
     }
 
@@ -501,72 +472,7 @@ impl Local {
         }
     }
 
-    // builds whatever isn't cached yet, retries earlier failures
-    pub fn rebuild(self: &Arc<Self>) -> Result<(), String> {
-        let tree = self.tree.clone().ok_or_else(|| String::from("there is no flight software tree on this computer"))?;
-        {
-            let mut j = self.job.lock().unwrap();
-            if j.running {
-                return Err(String::from("already building"));
-            }
-            *j = Job { running: true, started_ms: crate::logfile::now_ms(), ..Job::default() };
-        }
-        let me = self.clone();
-        std::thread::spawn(move || me.rebuild_now(&tree));
-        Ok(())
-    }
-
-    fn step(&self, pct: u32, text: &str) {
-        let mut j = self.job.lock().unwrap();
-        j.pct = j.pct.max(pct);
-        j.note = text.to_string();
-        j.steps.push(text.to_string());
-    }
-
-    // same, on this thread (tests call it directly)
-    pub fn rebuild_now(&self, tree: &Path) {
-        {
-            let mut j = self.job.lock().unwrap();
-            if !j.running {
-                *j = Job { running: true, started_ms: crate::logfile::now_ms(), ..Job::default() };
-            }
-        }
-        let origin = self.builder.origin(tree);
-        self.failed.lock().unwrap().retain(|(source, _), _| source != &origin.source);
-        self.step(1, &format!("the flight software in {}, {}", tree.display(), origin_words(&origin)));
-        let mut errors = Vec::new();
-        let n = PARTS.len() as u32;
-        for (i, p) in PARTS.iter().enumerate() {
-            let pct = 100 * (i as u32 + 1) / (n + 1);
-            if self.cached(&origin, p.name).is_some() {
-                self.step(pct, &format!("the {} is already built from these sources", p.label));
-                continue;
-            }
-            match self.get(p.name, &|said| self.step(pct, said)) {
-                Ok((bytes, _)) => self.step(pct, &format!("built the {}, {} kB", p.label, bytes.len().div_ceil(1024))),
-                Err(e) => {
-                    self.step(pct, &format!("the {} did not build", p.label));
-                    errors.push(format!("{}: {}", p.label, e));
-                }
-            }
-        }
-        let mut j = self.job.lock().unwrap();
-        j.running = false;
-        j.finished_ms = crate::logfile::now_ms();
-        if errors.is_empty() {
-            j.pct = 100;
-            j.note = String::from("everything is built from these sources");
-        } else {
-            j.note = format!("{} of {} did not build", errors.len(), n);
-            j.error = Some(errors.join("\n"));
-        }
-    }
-
-    pub fn job(&self) -> Job {
-        self.job.lock().unwrap().clone()
-    }
-
-    // /api/fsw
+    // /api/fsw, for the write confirm
     pub fn state_json(&self) -> String {
         let now = now_s();
         let q = |s: &Option<String>| s.as_ref().map(|t| format!("\"{}\"", esc(t))).unwrap_or_else(|| String::from("null"));
@@ -607,21 +513,11 @@ impl Local {
             }
             None => String::from("null"),
         };
-        let j = self.job();
-        let end = if j.running { crate::logfile::now_ms() } else { j.finished_ms };
-        let steps: Vec<String> = j.steps.iter().map(|s| format!("\"{}\"", esc(s))).collect();
         format!(
-            "{{\"ok\":true,\"tree\":{},\"on\":{},\"source\":{},\"parts\":[{}],\"job\":{{\"running\":{},\"pct\":{},\"note\":\"{}\",\"steps\":[{}],\"error\":{},\"seconds\":{}}}}}",
+            "{{\"ok\":true,\"tree\":{},\"source\":{},\"parts\":[{}]}}",
             q(&self.tree.as_ref().map(|t| t.display().to_string())),
-            self.on(),
             source,
             parts.join(","),
-            j.running,
-            j.pct,
-            esc(&j.note),
-            steps.join(","),
-            q(&j.error),
-            if j.started_ms == 0 { 0 } else { end.saturating_sub(j.started_ms) / 1000 },
         )
     }
 }
@@ -834,35 +730,29 @@ mod tests {
     }
 
     #[test]
-    fn switched_off_or_with_no_tree_the_carried_copy_is_used_and_nothing_is_built() {
-        let (l, fake, data) = local("off", &[]);
-        l.set_on(false).unwrap();
-        assert!(!l.on());
-        match l.pick("flash_dump", true, &|_| {}).unwrap() {
+    fn with_no_tree_the_carried_copy_is_used_and_nothing_is_built() {
+        let (_, fake, data) = local("none", &[]);
+        let none = Local::new(None, &data, Box::new(fake.clone()), carried());
+        match none.pick("flash_dump", true, &|_| {}).unwrap() {
             Use::Carried(b, None) => assert_eq!(b, CARRIED_DUMP),
             _ => panic!("the carried dump, with nothing to say"),
         }
-        let e = l.pick("bench-le", false, &|_| {}).err().unwrap();
+        let e = none.pick("bench-le", false, &|_| {}).err().unwrap();
         assert!(e.contains("carries no sensor bench LE"), "{}", e);
+        assert_eq!(none.radio(true).unwrap().0.sf_min, 5);
         assert_eq!(fake.builds.load(Ordering::SeqCst), 0);
-        // persists
-        let again = Local::new(Some(data.join("fsw")), &data, Box::new(fake.clone()), carried());
-        assert!(!again.on());
-        again.set_on(true).unwrap();
-        assert!(Local::new(Some(data.join("fsw")), &data, Box::new(fake.clone()), carried()).on());
-
-        let none = Local::new(None, &data, Box::new(fake.clone()), carried());
-        assert!(!none.on(), "on with no tree means nothing");
-        assert!(none.set_on(true).is_err());
-        assert!(matches!(none.pick("flash_dump", true, &|_| {}).unwrap(), Use::Carried(_, None)));
-        assert!(none.state_json().contains("\"tree\":null,\"on\":false,\"source\":null,"), "{}", none.state_json());
+        assert!(none.state_json().starts_with("{\"ok\":true,\"tree\":null,\"source\":null,\"parts\":["), "{}", none.state_json());
+        assert!(none.state_json().contains("\"built\":null,\"failed\":null,"), "{}", none.state_json());
         let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
-    fn on_by_default_the_trees_part_is_used() {
-        let (l, _, data) = local("on", &[]);
-        assert!(l.on(), "a tree and a switch never touched is on");
+    fn with_a_tree_its_part_is_used_and_a_leftover_mode_file_is_ignored() {
+        let (_, fake, data) = local("tree", &[]);
+        // 1.2.0 wrote this when its switch was off
+        std::fs::create_dir_all(data.join(FOLDER)).unwrap();
+        std::fs::write(data.join(FOLDER).join("mode.txt"), "off\n").unwrap();
+        let l = Local::new(Some(data.join("fsw")), &data, Box::new(fake.clone()), carried());
         match l.pick("flash_dump", true, &|_| {}).unwrap() {
             Use::Tree(b, id) => {
                 assert_eq!(b, b"flash_dump built from aaaaaaaa");
@@ -874,6 +764,9 @@ mod tests {
         // fake tree table starts at SF6
         assert_eq!(l.radio(true).unwrap().0.sf_min, 6);
         assert_eq!(l.radio(false).unwrap().0.sf_min, 5, "asked for the carried one, it is the carried one");
+        let s = l.state_json();
+        assert!(s.starts_with("{\"ok\":true,\"tree\":\""), "{}", s);
+        assert!(!s.contains("\"on\":") && !s.contains("\"job\":"), "{}", s);
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -905,35 +798,29 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_builds_what_is_missing_tries_failures_again_and_reports_each() {
-        let (l, fake, data) = local("rebuild", &["V2_6_X_Code/src/config.h"]);
-        l.get("flight-le", &|_| {}).unwrap();
-        fake.broken.lock().unwrap().push("bench-hp");
-        let _ = l.get("bench-hp", &|_| {});
+    fn a_write_after_a_failed_build_builds_again_and_a_pull_does_not() {
+        let (l, fake, data) = local("retry", &["V2_6_X_Code/src/config.h"]);
+        fake.broken.lock().unwrap().extend(["flight-hp", "flash_dump"]);
+        let e = l.get_or_refuse("flight-hp", &|_| {}).unwrap_err();
+        assert!(e.starts_with("the flight HP from this computer's flight software did not build, so nothing was written. the flight software did not build.\nconfig.h:60:26: error:"), "{}", e);
+        assert!(!e.contains("Switch off"), "{}", e);
+        let _ = l.pick("flash_dump", true, &|_| {});
         let before = fake.builds.load(Ordering::SeqCst);
-        l.rebuild_now(&data.join("fsw"));
-        // flight-le was cached, the other 5 build (incl. the earlier failure)
-        assert_eq!(fake.builds.load(Ordering::SeqCst) - before, 5);
-        let j = l.job();
-        assert!(!j.running);
-        assert!(j.steps[0].ends_with("from abc1234 + config.h changed"), "{:?}", j.steps);
-        assert!(j.steps.iter().any(|s| s == "the flight LE is already built from these sources"), "{:?}", j.steps);
-        assert!(j.steps.iter().any(|s| s == "built the dump firmware, 1 kB"), "{:?}", j.steps);
-        assert_eq!(j.note, "1 of 6 did not build");
-        assert!(j.error.as_deref().unwrap().starts_with("sensor bench HP: the flight software did not build."), "{:?}", j.error);
+        let _ = l.pick("flash_dump", true, &|_| {});
+        assert_eq!(fake.builds.load(Ordering::SeqCst), before, "a pull uses the remembered failure");
         fake.broken.lock().unwrap().clear();
-        let before = fake.builds.load(Ordering::SeqCst);
-        l.rebuild_now(&data.join("fsw"));
-        assert_eq!(fake.builds.load(Ordering::SeqCst) - before, 1);
-        assert_eq!((l.job().pct, l.job().error), (100, None));
+        let (b, id) = l.get_or_refuse("flight-hp", &|_| {}).unwrap();
+        assert_eq!(b, b"flight-hp built from aaaaaaaa");
+        assert_eq!(fake.builds.load(Ordering::SeqCst), before + 1);
+        assert!(id.words(id.at).ends_with(" from abc1234 + config.h changed"), "{}", id.words(id.at));
+        l.get("flight-le", &|_| {}).unwrap();
         let s = l.state_json();
-        assert!(s.contains("\"on\":true,"), "{}", s);
         assert!(s.contains("\"changed\":[\"V2_6_X_Code/src/config.h\"],\"words\":\"from abc1234 + config.h changed\"}"), "{}", s);
         // fake flight-le happens to equal the carried one
-        assert!(s.contains("\"carried\":\"") && s.contains(",\"same\":true}"), "{}", s);
-        assert!(s.contains("\"part\":\"flash_dump\"") && s.contains(",\"same\":false}"), "{}", s);
+        assert!(s.contains("\"part\":\"flight-le\"") && s.contains(",\"same\":true}"), "{}", s);
         assert!(s.contains("\"part\":\"flight-hp\",\"label\":\"flight HP\",\"kind\":\"flight\",\"module\":\"hp\",\"built\":{\"part\":\"flight-hp\""), "{}", s);
         assert!(s.contains("\"carried\":null,\"same\":false}"), "nothing carried is never the same: {}", s);
+        assert!(s.contains("\"part\":\"flash_dump\",\"label\":\"dump firmware\",\"kind\":\"dump\",\"module\":null,\"built\":null,\"failed\":\"the flight software"), "{}", s);
         let _ = std::fs::remove_dir_all(&data);
     }
 

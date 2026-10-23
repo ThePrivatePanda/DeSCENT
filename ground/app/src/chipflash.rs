@@ -222,7 +222,7 @@ impl Known {
     pub fn with(local: &crate::localfw::Local) -> Known {
         Known {
             built: local.registered(),
-            source_now: if local.on() { local.origin().map(|o| o.source) } else { None },
+            source_now: local.origin().map(|o| o.source),
             ..Known::carried()
         }
     }
