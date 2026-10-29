@@ -92,6 +92,8 @@
   --mono: "Plex Mono", ui-monospace, Menlo, Consolas, monospace;
   --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
   --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+  /* 11 px: kickers, validity letters, axis text, units. 12 px: status pills.
+     Everything else 12.5 px or more; the operator is outdoors. */
   --t-title: 22px;
   --t-head: 15px;
   --t-body: 14px;
@@ -102,7 +104,9 @@
   --cf: 13px;
 }
 /* Dark: the handoff's swap, plus accent-200/700, accent-2-700 and neutral 400-700, which it
-   leaves light; contrast in the design guide. Kept twice, here and under [data-theme]. */
+   leaves light. Contrast is checked by the contrast script: solid fills on accent-700 (6.8:1
+   under white) and sage-700 (6.5:1), muted text at 70 % (5.7:1 or better); the design guide
+   gets the table in a later task. Kept twice, here and under [data-theme]. */
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
@@ -209,7 +213,7 @@ button.icon svg { width: 18px; height: 18px; }
 }
 .big { font-weight: 700; letter-spacing: -.02em; line-height: 1; }
 .note { color: var(--color-text-70); font-size: 12.5px; }
-.hint { color: var(--color-text-70); font-size: 12px; }
+.hint { color: var(--color-text-70); font-size: 12.5px; }
 .card { background: var(--color-neutral-100); border-radius: var(--radius-md); padding: 14px 16px; min-width: 0; }
 .card.sel { background: var(--color-neutral-100); }
 .ring { box-shadow: 0 0 0 2px var(--color-accent); }
@@ -245,18 +249,20 @@ pre.raw, .raw {
    Which class says which word:
      good  sage-200 / sage-800       OK, live, complete, reading, reading it, being read, this one,
                                      the one you replugged, finished, ok=1
-     off   neutral-300 / neutral-800 stale, quiet, not read, unconfigured, not touched, left alone,
-                                     disconnected by you, as recorded, no receiver being read
+     off   neutral-300 / neutral-800 stale, quiet, not read, not read yet, unconfigured, not touched,
+                                     left alone, disconnected by you, as recorded, no receiver being
+                                     read, no line for N s, last on the probe ...
      warn  accent-200 / accent-800   incomplete, newer, on the ST-Link, module never set, dump firmware,
                                      sensor bench, being flashed, pulling, flashing, never pulled,
-                                     nothing heard, not logging to a file
+                                     nothing heard, not logging to a file, started (a restart is
+                                     worth noticing, not a failure)
      bad   solid accent, white       Lost, failed, ok=0, no permission, a port that will not open */
 .mark {
   display: inline-block; padding: 2px 9px; border-radius: 999px; vertical-align: middle;
-  font: 700 11px/1.5 var(--font-body); white-space: nowrap;
+  font: 700 12px/1.5 var(--font-body); white-space: nowrap;
 }
 .mark.good { background: var(--color-accent-2-200); color: var(--color-accent-2-800); }
-.mark.off { background: var(--color-neutral-300); color: var(--color-neutral-800); }
+.mark.off, .rx .st.warning { background: var(--color-neutral-300); color: var(--color-neutral-800); }
 .mark.warn { background: var(--color-accent-200); color: var(--color-accent-800); }
 .mark.bad { background: var(--color-fill); color: #fff; }
 
@@ -281,7 +287,7 @@ pre.raw, .raw {
   display: inline-block; flex: none; max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
   border: 0; padding: 0 16px; line-height: 36px; font: 600 14px/36px var(--font-body); color: var(--color-text-70);
 }
-.views button small { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; margin-left: 3px; }
+.views button small { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; margin-left: 3px; }
 .views button:hover { color: var(--color-text); }
 .views button[aria-selected="true"] { background: var(--color-accent-2-200); color: var(--color-accent-2-800); }
 .bar-right { flex: 1 1 auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; min-width: 0; }
@@ -367,7 +373,7 @@ pre.raw, .raw {
 table { border-collapse: collapse; width: 100%; }
 .grid th {
   position: sticky; top: 0; z-index: 1; background: var(--color-surface); text-align: left;
-  font: 600 10.5px/1.3 var(--font-body); text-transform: uppercase; letter-spacing: .06em;
+  font: 600 11px/1.3 var(--font-body); text-transform: uppercase; letter-spacing: .06em;
   color: var(--color-text-70); padding: 8px 10px;
 }
 .raised .grid th { background: var(--color-neutral-100); }
@@ -383,7 +389,7 @@ table { border-collapse: collapse; width: 100%; }
 .grid.plain tbody tr:hover td { background: transparent; }
 
 /* The state word of a unit, as a pill */
-.state { display: inline-block; padding: 2px 9px; border-radius: 999px; font: 700 11px/1.5 var(--font-body); }
+.state { display: inline-block; padding: 2px 9px; border-radius: 999px; font: 700 12px/1.5 var(--font-body); }
 .state.OK { background: var(--color-accent-2-200); color: var(--color-accent-2-800); }
 .state.STALE { background: var(--color-neutral-300); color: var(--color-neutral-800); }
 .state.LOST { background: var(--color-fill); color: #fff; }
@@ -400,7 +406,7 @@ table { border-collapse: collapse; width: 100%; }
 .batt i b { display: block; height: 100%; background: var(--color-text-70); border-radius: 1px; }
 .batt.low { color: var(--color-accent-700); } .batt.low i { border-color: var(--color-accent-700); } .batt.low i b { background: var(--color-accent-700); }
 
-.gens, .act { min-height: 22px; font-size: 11px; padding: 0 8px; margin-left: 4px; }
+.gens, .act { min-height: 22px; font-size: 12.5px; padding: 0 8px; margin-left: 4px; }
 tr.gen td { background: var(--color-neutral-200); font-size: 12.5px; }
 tr.gen td.csid { font-weight: 600; padding-left: 20px; white-space: nowrap; }
 
@@ -410,11 +416,11 @@ tr.gen td.csid { font-weight: 600; padding-left: 20px; white-space: nowrap; }
 .rx .name { font-weight: 700; }
 .rx .meta { color: var(--color-text-70); font-size: 12.5px; }
 /* The st word: live, or quiet / no data, or the port's own status */
-.rx .st { margin-left: auto; padding: 2px 9px; border-radius: 999px; font: 700 11px/1.5 var(--font-body); background: var(--color-neutral-300); color: var(--color-neutral-800); }
+.rx .st { margin-left: auto; padding: 2px 9px; border-radius: 999px; font: 700 12px/1.5 var(--font-body); background: var(--color-neutral-300); color: var(--color-neutral-800); }
 .rx .st.good { background: var(--color-accent-2-200); color: var(--color-accent-2-800); }
 .rx .st.critical { background: var(--color-fill); color: #fff; }
 .rx button { min-height: 26px; padding: 0 9px; }
-.rx select { min-height: 26px; font-size: 12px; padding: 0 26px 0 10px; background-position: right 8px center; }
+.rx select { min-height: 26px; font-size: 12.5px; padding: 0 26px 0 10px; background-position: right 8px center; }
 
 /* ---------- unit detail ---------- */
 .detail { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; display: flex; flex-direction: column; }
@@ -454,7 +460,7 @@ tr.gen td.csid { font-weight: 600; padding-left: 20px; white-space: nowrap; }
 .chart h3 .readout { float: right; font: 700 18px/1 var(--font-body); color: var(--color-text); }
 .chart .none { color: var(--color-text-70); font-size: 12.5px; height: 190px; margin: 0 16px; display: grid; place-items: center; background: var(--color-surface); border-radius: var(--radius-sm); }
 .uplot { font-family: var(--font-body); }
-.u-legend { font-size: 12px; text-align: left; color: var(--color-text-70); }
+.u-legend { font-size: 12.5px; text-align: left; color: var(--color-text-70); }
 .u-legend .u-series:first-child { display: none; }
 .u-legend th { font-weight: 600; }
 .u-legend .u-marker { width: 10px; height: 3px; border: 0 !important; border-radius: 2px; }
