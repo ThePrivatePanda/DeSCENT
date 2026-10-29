@@ -28,7 +28,10 @@
     asked: '',          // boards the candidates were last asked for
     opts: new Map(),    // port -> {sf, backup, confirm}
     heard: new Map(),   // port -> what Listen said
+    looks: new Map(),   // port -> what Listen took it for, see LOOKS
     done: new Map(),    // port -> {bad, text}: how the last flash of it ended
+    lines: new Map(),   // receiver key -> its last three lines
+    hb: new Map(),      // receiver key -> {up, t}: uptime its last heartbeat gave, and when
     busy: null, pct: 0, note: '',
     forget: null,       // port of the board being asked about before it is forgotten
     timer: null,
@@ -38,6 +41,25 @@
     return state.opts.get(port);
   };
   const boards = () => hub.boards || [];
+  const grouped = new Intl.NumberFormat('en-US');
+  const count = (n) => grouped.format(n);
+  const clock = (t) => String(new Date(t).getHours()).padStart(2, '0') + ':' + String(new Date(t).getMinutes()).padStart(2, '0');
+  const upFor = (ms) => {
+    const m = Math.floor(ms / 60000);
+    if (m < 1) return Math.floor(ms / 1000) + ' s';
+    return m < 60 ? m + ' m' : Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' m';
+  };
+
+  // Only the app's own taps see every line of every port; the last three of each are the
+  // raw box, and a heartbeat's uptime is nowhere else (fleet.js keeps when, not how long).
+  A.taps.push((rx, text, t) => {
+    const seen = state.lines.get(rx) || [];
+    seen.push(String(text).replace(/\r$/, ''));
+    if (seen.length > 3) seen.shift();
+    state.lines.set(rx, seen);
+    const beat = /^HB,(\d+),/.exec(text);
+    if (beat) state.hb.set(rx, { up: Number(beat[1]), t });
+  });
 
   // Which physical board is /dev/ttyUSB0? Nobody can answer that from a port name, so
   // the app watches for one to be unplugged and plugged back in, and you name that one.
@@ -60,14 +82,32 @@
     render();
   }
 
-  function identBanner() {
-    if (ident.found) {
-      return '<div class="ident found"><b>' + esc(ident.found) + '</b> is the board you replugged. Name it on its sheet.</div>';
-    }
-    if (ident.watching) {
-      return '<div class="ident"><b>Unplug the board, then plug it back in.</b> Waiting ' + ident.left + ' s.</div>';
-    }
-    return '';
+  // The card under the list. index.html keeps its two buttons in the pane head, so they
+  // are moved here once, and only the text beside them is painted.
+  const whichBox = (() => {
+    const go = $('tb-ident');
+    if (!go.closest || !go.closest('.pane-head')) return null;
+    const card = document.createElement('div');
+    card.className = 'card tb-which';
+    const text = document.createElement('div');
+    const acts = document.createElement('div');
+    acts.className = 'tb-whichacts';
+    acts.append(go, $('tb-ident-stop'));
+    card.append(text, acts);
+    const foot = document.createElement('p');
+    foot.className = 'note tb-foot';
+    foot.textContent = 'Opening a port can reset the board on it. Boards the app was told to leave alone stay shut until replugged.';
+    $('tb-list').after(card, foot);
+    return text;
+  })();
+
+  function whichHtml() {
+    const say = ident.found
+      ? '<b>' + esc(ident.found) + '</b> is the board you replugged. Name it on its sheet.'
+      : ident.watching
+        ? '<b>Unplug the board, then plug it back in.</b> Waiting ' + ident.left + ' s.'
+        : 'Unplug one board and plug it back in. The app watches for it and opens its sheet so you can name it.';
+    return '<h3>Which board is which?</h3><p>' + say + '</p>';
   }
 
   // The receiver a board is being read as, if it is: {key, port, r} with r the live
@@ -85,101 +125,174 @@
     return rx ? B.receiverName(b.port, rx.port, rx.r, b) : (b.name || b.port);
   }
 
+  const usbOf = (b) => 'USB ' + String(b.usb).toUpperCase();
+
   function listHtml() {
     const all = boards();
-    if (!all.length) return identBanner() + '<p class="empty">Nothing plugged in.</p>';
-    return identBanner() + all.map((b) => {
+    const head = '<div class="tb-listhead"><span class="kicker">Plugged in · ' + all.length + (all.length === 1 ? ' board' : ' boards') +
+      '</span><span class="note">USB serial</span></div>';
+    if (!all.length) return head + '<p class="empty">Nothing plugged in.</p>';
+    return head + all.map((b) => {
       const [cls, word] = STATE_WORDS[b.state] || ['off', b.state];
       const rx = reading(b);
-      const sf = rx && rx.r && rx.r.info.sf ? '<span class="val">SF' + rx.r.info.sf + '</span>' : '';
-      return '<button class="item' + (b.port === state.sel ? ' on' : '') + '" data-pick="' + esc(b.port) + '">' +
-        '<b>' + esc(nameOf(b)) + '</b>' +
-        '<small>' + sf + mark(cls, word) + (state.busy === b.port ? ' ' + mark('warn', 'being flashed') : '') + '</small>' +
-        '<small>' + esc([b.label, b.port].filter(Boolean).join(', ')) + '</small>' +
-        '</button>';
+      const sf = rx && rx.r && rx.r.info.sf ? '<span class="tb-sf">SF' + esc(rx.r.info.sf) + '</span>' : '';
+      const name = nameOf(b);
+      const sub = [state.looks.has(b.port) ? LOOKS[state.looks.get(b.port)] || state.looks.get(b.port) : '',
+        name === b.port ? '' : b.port, usbOf(b)].filter(Boolean).join(' · ');
+      const on = b.port === state.sel;
+      return '<button class="card' + (on ? ' sel ring' : '') + ' tb-card" data-pick="' + esc(b.port) + '">' +
+        '<span class="tb-top"><b class="tb-name">' + esc(name) + '</b>' +
+        (state.busy === b.port ? mark('warn', 'being flashed') : mark(cls, word)) +
+        (ident.found === b.port ? mark('good', 'this one') : '') + sf + '</span>' +
+        '<span class="tb-sub">' + esc(sub) + '</span></button>';
     }).join('');
   }
 
-  function readingPane(b) {
+  const row = (label, value, cls) => '<div class="tb-row' + (cls ? ' ' + cls : '') + '"><span class="l">' + label + '</span><div class="tb-val">' + value + '</div></div>';
+  const val = (text) => '<span class="val">' + text + '</span>';
+  const unsaid = '<span class="note">not reported</span>';
+
+  // The head: who it is, what the app does about it, and the buttons that change that.
+  function headHtml(b) {
     const is = b.state === 'receiver';
+    const rx = reading(b);
+    const fw = B.receiverFirmware(rx ? rx.port : null, state.firmwareVersion);
+    const [cls, word] = STATE_WORDS[b.state] || ['off', b.state];
+    // A receiver that has announced its id is named by that id, and the name goes with
+    // the board to any port. Before that, a name can only be kept for the USB adapter.
+    const how = rx ? B.namedBy(rx.port, rx.r) : { by: 'port', id: '' };
+    const shown = how.by === 'board' ? nameOf(b) : how.by === 'computer' ? (rx.port.name || b.name || '') : (b.name || '');
+    const blank = how.id ? 'T-Beam ' + how.id : b.port;
+    const kept = how.by === 'board' ? 'name is on the board'
+      : how.by === 'computer' ? 'name kept on this computer'
+        : 'name kept for this USB adapter';
+    const line = [rx ? (how.id ? 'Receiver ' + how.id : 'receiver id not announced yet') : '', b.port, usbOf(b),
+      rx ? 'DeSCENT receiver' + (fw.onBoard === '—' ? '' : ' ' + fw.onBoard) : '',
+      b.serial ? 'serial ' + b.serial : '', rx ? '' : b.label].filter(Boolean).join(' · ');
     const decide = is
       ? '<button data-not="' + esc(b.port) + '">Stop reading it</button>'
       : '<button data-yes="' + esc(b.port) + '" class="primary">Read this one</button>' +
         (b.state === 'ignored' ? '' : '<button data-not="' + esc(b.port) + '">Leave it alone</button>');
     const said = state.heard.get(b.port);
-    return '<div class="pane"><h3>Reading</h3><div class="rows">' +
-      '<div>' + decide +
-        (is ? '' : '<span class="note">Opening a port can reset the board on it.</span>') +
-        (b.state === 'dismissed' ? '<span class="note">Stays shut until it is replugged.</span>' : '') + '</div>' +
-      '<div><button data-listen="' + esc(b.port) + '">Listen</button>' +
-        '<span class="note">Opens the port for 5 s and says what it heard.</span></div>' +
-      (said ? '<pre class="testout">' + esc(said) + '</pre>' : '') +
-      '</div></div>';
+    return '<div class="pane tb-head"><div class="tb-headrow">' +
+        '<input type="text" class="nameit" data-keep="name:' + esc(b.port) + '" data-name="' + esc(b.port) + '"' +
+          (how.id ? ' data-rxid="' + esc(how.id) + '"' : '') +
+          ' value="' + esc(shown) + '" placeholder="' + esc(blank) + '" style="' + nameWidth(shown || blank) +
+          '" maxlength="' + (how.id ? 24 : 40) + '" aria-label="Name of this board" title="Type a name and press Enter">' +
+        mark(cls, word) +
+        (ident.found === b.port ? mark('good', 'the one you replugged') : '') +
+        '<span class="tb-line">' + esc(line) + '</span>' +
+        '<span class="tb-acts"><button data-listen="' + esc(b.port) + '">Listen 5 s</button>' + decide +
+          '<button class="ghost" data-forget="' + esc(b.port) + '"' + (state.busy === b.port ? ' disabled' : '') + '>Forget this board</button></span>' +
+      '</div>' +
+      '<p class="tb-notes note">' + kept + '. ' +
+        (is ? '' : 'Opening a port can reset the board on it. ') +
+        (b.state === 'dismissed' ? 'Stays shut until it is replugged. ' : '') +
+        'Listen opens the port for 5 s and says what it heard.</p>' +
+      // Forgetting drops what the app keeps about the board and sends it nothing.
+      (state.forget === b.port
+        ? '<div class="confirm"><span class="grow">Forget <b>' + esc(nameOf(b)) + '</b>? Its name on this computer and whether to read it go, ' +
+            'and its port is shut. Nothing is sent to the board' + (how.by === 'board' ? ', so the name kept on it stays' : '') +
+            '. It goes back to not touched.</span>' +
+          '<button data-forgetgo="' + esc(b.port) + '" class="primary">Forget it</button>' +
+          '<button data-forgetcancel="1">Cancel</button></div>'
+        : '') +
+      (said ? '<pre class="raw">' + esc(said) + '</pre>' : '') +
+      '</div>';
   }
 
-  function receiverPane(b) {
+  // Receivers that hear the same spreading factor hear the same packets twice.
+  function sharedSf(rx, r) {
+    if (!r || !r.info.sf) return '';
+    const others = hub.ports.filter((p) => p.key !== rx.key).map((p) => ({ p, r: A.live.receivers.get(p.key) }))
+      .filter((o) => o.r && o.r.info.sf && Number(o.r.info.sf) === Number(r.info.sf))
+      .map((o) => B.receiverName(o.p.port, o.p, o.r, boards().find((x) => x.port === o.p.port)));
+    if (!others.length) return '';
+    const who = others.length > 1 ? others.slice(0, -1).join(', ') + ' and ' + others[others.length - 1] : others[0];
+    return '<p class="tb-shared"><b>' + esc(who) + '</b> ' + (others.length > 1 ? 'are' : 'is') + ' also on SF' + esc(r.info.sf) + '.' +
+      (others.length === 1 ? ' For an LE and HP test, put one receiver on SF9 and the other on SF12.' : '') + '</p>';
+  }
+
+  function radioCard(b) {
     const rx = reading(b);
     if (!rx) return '';
     const r = rx.r;
-    const row = (label, value) => '<div><span class="l">' + label + '</span>' + value + '</div>';
-    const val = (text) => '<span class="val">' + text + '</span>';
+    const info = r ? r.info : {};
+    const pair = (a, c) => (a || c ? val(esc([a, c].filter(Boolean).join(' · '))) : unsaid);
     const open = rx.port.status === 'open';
-    const id = B.namedBy(rx.port, r).id;
-    const rows = [
-      open ? '' : row('Port', mark('bad', rx.port.status) + (rx.port.error ? ' ' + esc(rx.port.error) : '')),
+    return '<div class="pane tb-card2"><h3>Radio</h3>' +
+      (open ? '' : row('Port', mark('bad', rx.port.status) + (rx.port.error ? ' ' + esc(rx.port.error) : ''))) +
       // The select is the board's own report of what it is on, so it stays plain ink.
-      row('Spreading factor', r && r.info.sf ? sfSelect(rx.key, r.info.sf) +
-        '<span class="note">Hears only boards on this spreading factor.</span>'
-        : '<span class="note">not reported yet</span>'),
-      row('Packets', r ? val(r.unique + ' new, ' + (r.packets - r.unique - r.badCrc) + ' duplicate' +
-        (r.badCrc ? ', ' + r.badCrc + ' bad CRC' : '') + (r.radioErrors ? ', ' + r.radioErrors + ' radio errors' : ''))
-        : '<span class="note">none yet</span>'),
-      row('Last heard', r ? val(age(Date.now() - r.lastT) + ' ago') : mark('warn', 'nothing heard') +
-        '<span class="note">Wrong spreading factor, or not a receiver. Listen to check.</span>'),
-      row('Receiver id', id ? '<span class="val hex">' + esc(id) + '</span>' : '<span class="note">not announced yet</span>'),
-      row('In the log as', val(esc(rx.key))),
-    ];
-    return '<div class="pane"><h3>Receiver</h3><div class="rows kvrows">' + rows.join('') + '</div></div>';
+      row('Spreading factor', info.sf ? sfSelect(rx.key, info.sf) +
+        '<span class="hint">Asked of the board; settles when its next header arrives. It hears only boards on this spreading factor.</span>'
+        : '<span class="note">not reported yet</span>', 'tb-sfrow') +
+      row('Frequency', info.f ? val(esc(info.f) + ' MHz') : unsaid) +
+      row('Bandwidth · CR', pair(info.bw ? String(Number(info.bw)) + ' kHz' : '', info.cr ? '4/' + info.cr : '')) +
+      row('Sync · preamble', pair(info.sync, info.pre)) +
+      sharedSf(rx, r) + '</div>';
   }
 
-  function firmwarePane(b) {
+  function sessionCard(b) {
+    const rx = reading(b);
+    if (!rx) return '';
+    const r = rx.r;
+    const now = Date.now();
+    if (!r) {
+      return '<div class="pane tb-card2"><h3>This session</h3><div class="tb-body">' + mark('warn', 'nothing heard') +
+        '<p class="note">Wrong spreading factor, or not a receiver. Listen to check.</p>' +
+        '<p class="note">In the log as <b>' + esc(rx.key) + '</b>.</p></div></div>';
+    }
+    const tile = (label, n) => '<div class="stat"><span>' + label + '</span><b>' + count(n) + '</b></div>';
+    const beat = state.hb.get(rx.key);
+    const beatT = beat ? beat.t : r.lastHbT;
+    const said = 'Last line ' + age(now - r.lastT) + ' ago. ' + (beatT
+      ? 'Last heartbeat ' + age(now - beatT) + ' ago' + (beat ? ', up ' + upFor(beat.up + (now - beat.t)) : '') + '.'
+      : 'No heartbeat yet.');
+    const raw = state.lines.get(rx.key);
+    return '<div class="pane tb-card2"><h3>This session' + (r.firstT ? ' <span class="note">since ' + clock(r.firstT) + '</span>' : '') + '</h3>' +
+      '<div class="tb-body"><div class="tb-tiles">' + tile('New packets', r.unique) + tile('Duplicates', r.packets - r.unique - r.badCrc) +
+        tile('Bad CRC', r.badCrc) + tile('Radio errors', r.radioErrors) + '</div>' +
+      '<p class="note">' + said + ' In the log as <b>' + esc(rx.key) + '</b>.</p>' +
+      (raw && raw.length ? '<pre class="raw">' + esc(raw.join('\n')) + '</pre>' : '') + '</div></div>';
+  }
+
+  function firmwareCard(b) {
     const o = optsFor(b.port);
     const busy = state.busy === b.port;
     const done = state.done.get(b.port);
-    const last = done ? '<p class="outcome' + (done.bad ? ' bad' : '') + '">' + esc(done.text) + '</p>' : '';
+    const last = done ? '<p class="outcome tb-last' + (done.bad ? ' bad' : '') + '">' + esc(done.text) + '</p>' : '';
+    const rx = reading(b);
+    const fw = B.receiverFirmware(rx ? rx.port : null, state.firmwareVersion);
+    const name = nameOf(b);
     let body;
     if (busy) {
       body = '<div class="job">' + track(state.pct) + '<p class="step">' + esc(state.note) + '</p></div>';
     } else if (!state.cands.includes(b.port)) {
       // flash.rs offers only boards the app was told to read: writing receiver firmware
       // to somebody's ChipSat is not a recoverable mistake.
-      body = '<div class="rows"><div><span class="note">Press Read this one first.</span></div></div>';
+      body = '<p class="note">Press Read this one first.</p>';
     } else if (!state.firmware) {
-      body = '<div class="rows"><div><span class="note">This build carries no receiver firmware.</span></div></div>';
+      body = '<p class="note">This build carries no receiver firmware.</p>';
     } else {
       const sf = '<select data-flashsf="' + esc(b.port) + '" aria-label="Spreading factor it comes up on">' +
         [6, 7, 8, 9, 10, 11, 12].map((n) => '<option value="' + n + '"' + (n === o.sf ? ' selected' : '') + '>SF' + n + '</option>').join('') +
         '</select>';
       const go = o.confirm
-        ? '<span class="grow">Erase <b>' + esc(nameOf(b)) + '</b> and write the receiver firmware?' +
+        ? '<div class="confirm"><span class="grow">Erase <b>' + esc(name) + '</b> and write the receiver firmware?' +
             (o.backup ? '' : ' Its current firmware is not saved.') + '</span>' +
           '<button data-flash="' + esc(b.port) + '" class="primary">Overwrite it</button>' +
-          '<button data-cancel="' + esc(b.port) + '">Cancel</button>'
-        : '<button data-ask="' + esc(b.port) + '"' + (state.busy ? ' disabled' : '') + '>Flash the receiver firmware</button>' +
-          '<span class="note">Writes ' + esc(state.firmware) + '.</span>';
-      body = '<div class="rows">' +
-        '<div><span class="l">Comes up on</span>' + sf + '</div>' +
-        '<div><label class="check"><input type="checkbox" data-backup="' + esc(b.port) + '"' + (o.backup ? ' checked' : '') +
-          '> Save the old firmware first</label><span class="note">Takes a few minutes.</span></div>' +
-        '<div>' + go + '</div></div>';
+          '<button data-cancel="' + esc(b.port) + '">Cancel</button></div>'
+        : '<button class="primary block" data-ask="' + esc(b.port) + '"' + (state.busy ? ' disabled' : '') + '>Flash ' + esc(name) +
+          (state.firmwareVersion ? ' to ' + esc(state.firmwareVersion) : '') + '</button>';
+      body = '<p>Writes ' + (state.firmwareVersion ? 'receiver firmware ' + esc(state.firmwareVersion) : esc(state.firmware)) +
+          ' over the serial port, then opens it again on ' + sf + '. Reading stops until the board is back.</p>' +
+        '<div class="tb-save"><label class="check"><input type="checkbox" data-backup="' + esc(b.port) + '"' + (o.backup ? ' checked' : '') +
+          '> Save what is on the board first</label><span class="note">Takes a few minutes.</span></div>' + go;
     }
-    const rx = reading(b);
-    const fw = B.receiverFirmware(rx ? rx.port : null, state.firmwareVersion);
-    const versions = '<div class="rows kvrows">' +
-      '<div><span class="l">On the board</span><span class="val">' + esc(fw.onBoard) + '</span></div>' +
-      '<div><span class="l">In this app</span><span class="val">' + esc(fw.inApp) + '</span>' + (fw.newer ? mark('warn', 'newer') : '') + '</div>' +
-      '</div>';
-    return '<div class="pane"><h3>Receiver firmware</h3>' + versions + body + last + '</div>';
+    return '<div class="pane tb-card2 tb-fw"><h3>Receiver firmware</h3>' +
+      row('On the board', val(fw.onBoard === '—' ? '—' : 'Receiver ' + esc(fw.onBoard))) +
+      row('App carries', val(esc(fw.inApp)) + (fw.newer ? mark('warn', 'newer') : '')) +
+      '<div class="tb-body">' + body + '</div>' + last + '</div>';
   }
 
   function sheetHtml() {
@@ -190,45 +303,16 @@
         : 'Plug a T-Beam in.') +
         '</p></div>';
     }
-    const [cls, word] = STATE_WORDS[b.state] || ['off', b.state];
-    const detail = [b.label, 'USB ' + b.usb, b.serial ? 'serial ' + b.serial : '', b.port].filter(Boolean).map(esc).join(', ');
-    // A receiver that has announced its id is named by that id, and the name goes with
-    // the board to any port. Before that, a name can only be kept for the USB adapter.
-    const rx = reading(b);
-    const how = rx ? B.namedBy(rx.port, rx.r) : { by: 'port', id: '' };
-    const shown = how.by === 'board' ? nameOf(b) : how.by === 'computer' ? (rx.port.name || b.name || '') : (b.name || '');
-    const blank = how.id ? 'T-Beam ' + how.id : b.port;
-    const kept = how.by === 'board' ? 'name is on the board'
-      : how.by === 'computer' ? 'name kept on this computer'
-        : 'name kept for this USB adapter';
-    return '<div class="pane sheet-head">' +
-        '<input type="text" class="nameit" data-keep="name:' + esc(b.port) + '" data-name="' + esc(b.port) + '"' +
-          (how.id ? ' data-rxid="' + esc(how.id) + '"' : '') +
-          ' value="' + esc(shown) + '" placeholder="' + esc(blank) + '" style="' + nameWidth(shown || blank) +
-          '" maxlength="' + (how.id ? 24 : 40) + '" aria-label="Name of this board" title="Type a name and press Enter">' +
-        mark(cls, word) +
-        (ident.found === b.port ? mark('good', 'the one you replugged') : '') +
-        '<span class="note">' + kept + '</span>' +
-        '<span class="spacer"></span><span class="note">' + detail + '</span>' +
-        '<button data-forget="' + esc(b.port) + '"' + (state.busy === b.port ? ' disabled' : '') + '>Forget this board</button>' +
-        // Forgetting drops what the app keeps about the board and sends it nothing.
-        (state.forget === b.port
-          ? '<div class="confirm"><span class="grow">Forget <b>' + esc(nameOf(b)) + '</b>? Its name on this computer and whether to read it go, ' +
-              'and its port is shut. Nothing is sent to the board' + (how.by === 'board' ? ', so the name kept on it stays' : '') +
-              '. It goes back to not touched.</span>' +
-            '<button data-forgetgo="' + esc(b.port) + '" class="primary">Forget it</button>' +
-            '<button data-forgetcancel="1">Cancel</button></div>'
-          : '') +
-      '</div>' +
-      '<div class="two"><div class="col">' + readingPane(b) + receiverPane(b) + '</div><div class="col">' + firmwarePane(b) + '</div></div>';
+    return headHtml(b) + '<div class="tb-cards">' + radioCard(b) + sessionCard(b) + firmwareCard(b) + '</div>';
   }
 
   function render() {
     const all = boards();
     if (!all.some((b) => b.port === state.sel)) state.sel = all.length ? all[0].port : null;
     $('tb-ident').disabled = ident.watching;
-    $('tb-ident').textContent = ident.watching ? 'Waiting for a replug' : 'Which board is which?';
+    $('tb-ident').textContent = ident.watching ? 'Waiting for a replug' : 'Start watching';
     $('tb-ident-stop').hidden = !ident.watching;
+    if (whichBox) paint(whichBox, whichHtml());
     paint($('tb-list'), listHtml());
     paint($('tb-sheet'), sheetHtml());
   }
@@ -338,6 +422,7 @@
       render();
       try {
         const j = await hub.testPort(listen);
+        state.looks.set(listen, j.looks_like);
         state.heard.set(listen, 'Heard ' + (LOOKS[j.looks_like] || j.looks_like) + (j.lines.length ? ':\n' + j.lines.slice(0, 6).join('\n') : '.'));
       } catch (err) {
         state.heard.set(listen, 'Could not listen: ' + (err.message || err));
@@ -420,5 +505,6 @@
       state.timer = setInterval(tick, 1000);
     },
     hide() { clearInterval(state.timer); state.timer = null; },
+    which: whichHtml,
   });
 })();
