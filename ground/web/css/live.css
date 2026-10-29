@@ -1,1 +1,159 @@
 /* Live and Replay. Only selectors under #dash or #replay; a class another screen needs goes in style.css */
+
+/* ---------- units ---------- */
+#dash #units { padding: 18px 14px 14px; }
+#dash #units > .pane-head { padding: 0 8px; min-height: 0; }
+#dash #summary { display: block; padding: 4px 8px 0; color: var(--color-text); }
+#dash #summary b { font: 700 24px/1.2 var(--font-body); letter-spacing: -.02em; }
+#dash #summary span { font-size: 14px; color: var(--color-text-70); }
+#dash #issues { padding: 2px 8px 0; font-size: 13px; }
+#dash #units > .scroll { padding: 12px 0 0; }
+#dash #units > #btn-restore { margin: 8px 8px 0; }
+
+/* #fleet is still the old table, so app.js can reach its tbody: one card per row */
+#dash #fleet, #dash #fleet tbody, #dash #fleet tr, #dash #fleet td { display: block; }
+#dash #fleet thead { display: none; }
+#dash #fleet tbody { display: flex; flex-direction: column; gap: 6px; }
+#dash #fleet td { padding: 0; border: 0; white-space: normal; background: transparent; }
+#dash #fleet tbody tr:hover td { background: transparent; }
+
+#dash .ucard {
+  padding: 10px 14px; border-radius: var(--radius-md); cursor: pointer; background: transparent;
+  transition: background-color 120ms ease-out;
+}
+#dash .ucard:hover { background: color-mix(in srgb, var(--color-neutral-100) 55%, transparent); }
+#dash .ucard.card.sel { background: var(--color-neutral-100); padding: 10px 14px; }
+#dash .ucard .u1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#dash .ucard .csid { font: 700 22px/1 var(--font-body); letter-spacing: -.02em; white-space: nowrap; }
+#dash .ucard .csid small, #dash .uhead .csid small {
+  font: 600 11px/1 var(--font-body); letter-spacing: .08em; color: var(--color-text-70); margin-right: 4px;
+}
+#dash .runs-pill {
+  min-height: 0; padding: 2px 9px; border: 0; border-radius: 999px; background: var(--color-surface);
+  color: var(--color-neutral-800); font: 700 11px/1.5 var(--font-body);
+}
+#dash .runs-pill:hover { background: var(--color-neutral-300); }
+#dash .ucard .ago { margin-left: auto; font-size: 12.5px; color: var(--color-text-70); white-space: nowrap; }
+/* Time since the last packet against this unit's stale limit, in the state's colour */
+#dash .stalebar { height: 4px; margin: 8px 0; border-radius: 999px; background: var(--color-neutral-200); overflow: hidden; }
+#dash .ucard:not(.sel) .stalebar { background: var(--color-neutral-300); }
+#dash .stalebar b { display: block; height: 100%; border-radius: 999px; background: var(--color-accent-2); }
+#dash .stalebar b.stale { background: var(--color-neutral-600); }
+#dash .stalebar b.lost { background: var(--color-accent); }
+#dash .ucard .u3 { display: flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; min-width: 0; }
+#dash .ucard .u3 i { font-style: normal; color: var(--color-text-70); }
+#dash .ucard .u3 .low { color: var(--color-accent-700); }
+#dash .ucard .u3 .rxn { margin-left: auto; font-size: 12.5px; color: var(--color-text-70); }
+#dash .ucard .u4 { margin-top: 7px; }
+
+/* ---------- receivers ---------- */
+#dash #rxpanel { padding: 16px 22px 14px; }
+#dash #rxpanel > .pane-head { padding: 0; min-height: 0; margin-bottom: 4px; }
+#dash #rxpanel .asrec { font-size: 12.5px; }
+/* Shown in a replay too, as the log's receivers; only Rescan is live chrome */
+#dash #receivers.live-only { display: flex; flex-direction: column; gap: 0; padding: 0; }
+#dash .rx {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center;
+  min-height: 0; padding: 9px 0; font-size: 13px; cursor: pointer;
+}
+#dash .rx.sel { background: var(--color-neutral-100); border-radius: var(--radius-md); margin: 0 -10px; padding: 9px 10px; }
+#dash .rx-name {
+  justify-content: flex-start; min-width: 0; min-height: 0; padding: 0; border: 0; background: none;
+  font: 400 13px/1.4 var(--font-body); overflow: hidden; text-overflow: ellipsis;
+}
+#dash .rx-name:hover { background: none; }
+#dash .rx-name b { font-weight: 700; }
+#dash .rx-name small { font-size: 12.5px; color: var(--color-text-70); }
+#dash .rx .sw { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+#dash .rx-meta { font-size: 12.5px; color: var(--color-text-70); white-space: nowrap; }
+#dash .rx-more { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 4px; }
+#dash .rx-more .note { flex: 1 1 100%; }
+#dash .rx-more select, #dash .rx-more button { min-height: 30px; }
+#dash .rx-note { margin: 6px 0 0; }
+
+/* ---------- unit detail ---------- */
+/* #latest is display: contents, so its head shares a row with the buttons in #detail's own
+   head and the Clear row opens between them and the readings */
+#dash #detail {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: start; column-gap: 16px;
+  grid-template-areas: "head acts" "clear clear" "read read";
+  padding: 20px 28px 8px; overflow-y: auto; container: detail / inline-size;
+}
+#dash #detail > .pane-head { grid-area: acts; align-self: start; padding: 2px 0 0; min-height: 0; flex-wrap: nowrap; }
+#dash #detail > .pane-head .spacer { display: none; }
+#dash #clear-opts { grid-area: clear; margin: 0 0 14px; }
+#dash #latest { display: contents; }
+#dash #latest > .none { grid-area: head; margin: 0; padding: 8px 0 16px; color: var(--color-text-70); }
+#dash .uhead { grid-area: head; display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; padding-bottom: 16px; min-width: 0; }
+#dash .uhead .csid { font: 700 40px/1 var(--font-body); letter-spacing: -.03em; white-space: nowrap; }
+#dash .uhead .mark { padding: 3px 10px; }
+#dash .uhead .when { font-size: 14px; color: var(--color-text-70); }
+#dash .uhead .when b { color: var(--color-text); font-weight: 700; }
+#dash .uhead .when .ghost { min-height: 0; padding: 0 0 0 4px; font-size: 14px; }
+#dash .readings { grid-area: read; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 28px; }
+#dash .readings .col { min-width: 0; }
+#dash .group { margin-bottom: 14px; }
+#dash .group h3 {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  margin: 0; padding: 6px 0; font: var(--font-heading-weight) 16px/1.3 var(--font-heading);
+}
+#dash .group h3 .kicker.bad { color: var(--color-accent-700); }
+#dash .group .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 4px 0; font-size: 13px; }
+#dash .group .row .l { color: var(--color-text-70); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#dash .group .row .v { font-weight: 700; white-space: nowrap; }
+#dash .group .row .v small { font-size: 12.5px; font-weight: 400; color: var(--color-text-70); }
+#dash .group .row .sat { color: var(--color-accent-700); }
+/* Not valid: the kicker says it; the rows go to the muted ink, not the handoff's 45 %
+   opacity, which is under the legibility floor */
+#dash .group.off .row .v { font-weight: 400; color: var(--color-text-70); }
+
+@container detail (max-width: 820px) {
+  #dash .readings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container detail (max-width: 380px) {
+  #dash .readings { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ---------- history ---------- */
+#dash #history { padding: 16px 28px 18px; }
+#dash #history > .pane-head { padding: 0; min-height: 0; margin-bottom: 12px; }
+/* The detail head above already names the unit; the title stays for screen readers */
+#dash #graph-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#dash #tabs button { font: 600 13px/1.2 var(--font-body); }
+#dash #charts { padding: 0; grid-auto-rows: max-content; }
+#dash #charts.custom { display: block; }
+#dash .chart { padding: 12px 0 10px; }
+#dash .chart h3 { display: flex; align-items: baseline; gap: 8px; padding: 0 16px 4px; }
+#dash .chart h3 .readout { float: none; margin-left: auto; letter-spacing: -.01em; white-space: nowrap; }
+#dash .chart h3 .readout small { font: 600 12.5px/1 var(--font-body); color: var(--color-text-70); }
+
+/* Runs tab */
+#dash .runs > .note { margin: 0 0 10px; }
+#dash .runs > p { margin: 0 0 10px; }
+#dash .runcard { margin-bottom: 8px; padding: 12px 16px; }
+#dash .runhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#dash .runlabel { min-height: 0; padding: 0; border: 0; font: 700 16px/1.3 var(--font-body); }
+#dash .runlabel:hover { background: none; text-decoration: underline; }
+#dash .runcard .acts { margin-top: 8px; }
+#dash .runcard .confirm { margin-top: 10px; }
+
+/* ---------- replay bar ---------- */
+#replay { border-radius: 999px; padding: 8px 10px 8px 8px; gap: 8px 10px; }
+#replay #rp-play { min-width: 76px; justify-content: center; }
+#replay #rp-pos { margin: 0 6px; accent-color: var(--color-accent); }
+#replay #rp-time { min-width: 70px; white-space: nowrap; }
+#replay .rp-prog { white-space: nowrap; }
+
+@media (max-width: 1100px) {
+  #dash #detail { overflow: visible; }
+  #replay { border-radius: var(--radius-lg); }
+}
+@media (max-width: 700px) {
+  /* A container query cannot restyle #detail itself; below 1100 px it is the full width */
+  #dash #detail { padding: 16px 16px 8px; grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "acts" "clear" "read"; }
+  #dash #detail > .pane-head { flex-wrap: wrap; padding: 0 0 14px; }
+  #dash #history { padding: 14px 12px 14px; }
+  #dash #rxpanel { padding: 14px 16px 12px; }
+  #dash .ucard .u3 { flex-wrap: wrap; white-space: normal; }
+  #replay .rp-prog { white-space: normal; }
+}

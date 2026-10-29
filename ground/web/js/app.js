@@ -6,6 +6,16 @@
   // What the other screens reach this file through. Filled in at the bottom; the hooks
   // on it (onView, onReceivers, onTransport) are set by js/screens.js once it has loaded.
   const api = {};
+  const V = window.DGLive;
+  // Regions redrawn on the timer go through the shell's paint, which holds a repaint while
+  // a press is down so the press and its release land on one node. The shell loads after
+  // this file; until it is there, the same skip when nothing changed.
+  function paint(el, html) {
+    if (api.shell) { api.shell.paint(el, html); return; }
+    if (el.dgHtml === html) return;
+    el.innerHTML = html;
+    el.dgHtml = html;
+  }
 
   let settings = S.loadSettings();
   const live = new F.Fleet(settings);
@@ -15,7 +25,9 @@
   let rxCount = 0;
 
   const view = {
-    sel: null, paused: false, sort: 'attention', expanded: new Set(), mode: 'live',
+    sel: null, paused: false, sort: 'attention', mode: 'live',
+    rxSel: null,     // the receiver row opened for its SF and disconnect
+    dropAsk: null,   // the run whose delete waits for its second click
     sels: { live: null, replay: null },
     replay: null,   // {events, pos, clock, playing, speed, fleet, names}
   };
@@ -278,7 +290,7 @@
     $('view-live').setAttribute('aria-selected', String(mode === 'live'));
     $('view-replay').setAttribute('aria-selected', String(mode === 'replay'));
     $('view-replay').disabled = !view.replay;
-    $('view-replay').textContent = view.replay ? 'Replay: ' + view.replay.names.join(', ') : 'Replay';
+    $('view-replay').textContent = view.replay ? 'Replay · ' + view.replay.names.join(', ') : 'Replay';
     $('view-replay').title = view.replay ? view.replay.names.join(', ') : 'Open a log, or pull one off a ChipSat';
     $('replay').hidden = mode !== 'replay';
     renderReplayFile();
@@ -356,7 +368,7 @@
       r.clock = r.pos ? r.events[r.pos - 1].t : r.events[0].t;
       $('rp-pos').value = r.pos;
       if (r.pos < target) {
-        $('rp-time').textContent = 'reading ' + r.pos.toLocaleString() + ' of ' + total.toLocaleString();
+        $('rp-time').textContent = 'reading ' + V.num(r.pos) + ' of ' + V.num(total);
         requestAnimationFrame(step);
         return;
       }
@@ -440,18 +452,30 @@
     return cur.slice(0, cut) + (slash > 0 ? cur[cut] + from.log.slice(0, slash) : '');
   }
 
+  // Where the replay is and what it has read, then which file and where it is kept. The
+  // second half is worked out once a log: R.sources walks every line.
   function renderReplayFile() {
     const r = view.replay;
-    const where = r && r.from ? onDisk(r.from) : '';
+    $('rp-raw').hidden = !(r && r.from && r.from.raw);
+    if (!r) { $('rp-file').textContent = ''; return; }
+    const where = r.from ? onDisk(r.from) : '';
     // The receiver strip is live chrome and is hidden here, so this line is where a
     // replay says its records came off a chip and which of them have a real clock.
-    const src = r ? R.sources(r.events) : { flash: 0, dated: 0 };
+    const src = R.sources(r.events);
     const undated = src.flash - src.dated;
     const chip = !src.flash ? '' : 'Off a chip, not a radio: ' + src.flash + (src.flash === 1 ? ' boot, ' : ' boots, ') +
       src.dated + ' with GPS time' + (undated ? ', ' + undated + ' not dated' : '') + '.';
-    const file = !r ? '' : where ? r.from.log.split('/').pop() + ' in ' + where : r.names.join(', ');
-    $('rp-file').textContent = [file, chip].filter(Boolean).join('. ');
-    $('rp-raw').hidden = !(r && r.from && r.from.raw);
+    const file = where ? r.from.log.split('/').pop() + ' in ' + where : r.names.join(', ');
+    r.words = [file, chip].filter(Boolean).join('. ');
+    renderReplayProgress();
+  }
+  function renderReplayProgress() {
+    const r = view.replay;
+    if (!r) return;
+    const html = '<span class="rp-prog">line ' + V.num(r.pos) + ' of ' + V.num(r.events.length) + ' · ' +
+      V.num(r.fleet.total) + ' packets · from ' + V.clock(r.events[0].t) + '</span>' +
+      (r.words ? ' <span class="rp-where">· ' + esc(r.words) + '</span>' : '');
+    paint($('rp-file'), html);
   }
 
   // The open file's own name less its extension. Several files merged get a new one.
@@ -565,7 +589,7 @@
       const label = view.sel;
       if (label && f.clearUnit(label)) { done.push('CSID ' + label); view.sel = null; }
     } else if (w.units) {
-      f.clearUnits(); view.sel = null; view.expanded.clear(); done.push('every unit');
+      f.clearUnits(); view.sel = null; done.push('every unit');
     }
     if (w.rx) { f.clearReceivers(); done.push('receiver counts'); }
     if (w.hidden) { f.hidden.clear(); done.push('hidden units'); }
@@ -581,44 +605,18 @@
     render(true);
   });
 
-  $('fleet').querySelector('tbody').addEventListener('click', (e) => {
-    const merge = e.target.getAttribute('data-merge');
-    if (merge) {
-      const into = fleet().mergeRun(merge);
-      if (into) {
-        toast('Merged ' + merge + ' into ' + into);
-        if (view.sel === merge) view.sel = into;
-      }
-      render(true);
-      return;
-    }
-    const mergeAll = e.target.getAttribute('data-mergeall');
-    if (mergeAll) {
-      const n = fleet().mergeAllRuns(Number(mergeAll));
-      toast(n ? 'Joined ' + n + (n === 1 ? ' earlier run' : ' earlier runs') + ' into CSID ' + mergeAll : 'Nothing to join');
-      view.sel = String(mergeAll);
-      render(true);
-      return;
-    }
-    const drop = e.target.getAttribute('data-drop');
-    if (drop) {
-      if (fleet().clearUnit(drop)) toast('Deleted run ' + drop);
-      if (view.sel === drop) view.sel = null;
-      render(true);
-      return;
-    }
-    const more = e.target.getAttribute('data-gens');
-    if (more) {
-      // Folding away a board that opened itself has to be remembered, or it reopens.
-      const auto = fleet().earlierRuns(Number(more)).length <= AUTO_OPEN_RUNS;
-      const isOpen = view.expanded.has(more) || (auto && !view.expanded.has('shut' + more));
-      view.expanded.delete(more); view.expanded.delete('shut' + more);
-      if (isOpen) view.expanded.add('shut' + more); else view.expanded.add(more);
-      render(true);
-      return;
-    }
+  // A card is the click target; its runs pill opens the Runs tab for that board.
+  function pickCard(e) {
+    const runs = e.target.closest('[data-runs]');
     const tr = e.target.closest('tr');
-    if (tr && tr.dataset.label) { view.sel = tr.dataset.label; render(true); }
+    if (!tr || !tr.dataset.label) return;
+    view.sel = tr.dataset.label;
+    if (runs) charts.showTab('runs');
+    render(true);
+  }
+  $('fleet').querySelector('tbody').addEventListener('click', pickCard);
+  $('fleet').querySelector('tbody').addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('ucard')) { e.preventDefault(); pickCard(e); }
   });
 
   // ---------- settings ----------
@@ -738,7 +736,6 @@
   });
 
   // ---------- rendering ----------
-  const fmt = (v, d) => (v === null || v === undefined || Number.isNaN(v) ? '—' : Number(v).toFixed(d));
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   function age(ms) {
@@ -749,143 +746,22 @@
     return Math.floor(s / 3600) + 'h' + String(Math.floor((s % 3600) / 60)).padStart(2, '0');
   }
 
-  function bits(mask) {
-    return '<span class="bits">' + P.VALIDITY_BITS.map((b) => {
-      const on = (mask >> b.bit) & 1;
-      return '<span class="' + (on ? '' : 'off') + '" title="' + b.name + (on ? ' valid' : ' NOT valid') + '">' + b.short + '</span>';
-    }).join('') + '</span>';
-  }
-
-  const STATE_LABEL = { OK: 'OK', STALE: 'Stale', LOST: 'Lost' };
-  const stateHtml = (st) => '<span class="state ' + st + '">' + STATE_LABEL[st] + '</span>';
-
   function renderSummary(f, t) {
-    const s = f.summary(t);
-    // Always: how many units and packets. Problems: only when there are some.
-    const base = [['heard', s.heard], ['active', s.active], ['packets', s.packets]]
-      .map(([k, v]) => '<span><b>' + v + '</b> ' + k + '</span>');
-    const issues = [
-      ['stale', s.stale, ''], ['lost', s.lost, 'bad'], ['bad CRC', s.badCrc, 'bad'], ['low battery', s.lowBattery, ''],
-      ['with invalid sensors', s.validityIssues, ''], ['weak RF', s.weakRf, ''], ['saturated', s.saturated, ''], ['resets', s.resets, ''],
-    ].filter(([, v]) => v > 0).map(([k, v, c]) => '<span class="issue ' + c + '"><b>' + v + '</b> ' + k + '</span>');
-    $('summary').innerHTML = base.concat(issues).join('');
-  }
-
-  function ageCell(f, u, a) {
-    const limit = f.staleAfterMs(u);
-    const frac = Math.min(1, a / limit);
-    const cls = a > limit ? 'over' : frac > 0.66 ? 'near' : '';
-    return '<span class="age" title="Stale after ' + fmt(limit / 1000, 1) + ' s without a packet">' + age(a) +
-      '<i><b class="' + cls + '" style="width:' + (a > limit ? 100 : Math.max(2, frac * 100)).toFixed(0) + '%"></b></i></span>';
-  }
-
-  // The bar spans 3.0 V (empty) to 4.2 V (a full lithium cell); the number is the voltage
-  function battCell(d) {
-    if (!d.valid.soc) return '<span class="muted">—</span>';
-    const v = d.values.battery;
-    const pct = Math.max(0, Math.min(100, (v - 3.0) / 1.2 * 100));
-    return '<span class="batt' + (v < settings.lowBatteryV ? ' low' : '') + '"><i><b style="width:' + pct.toFixed(0) + '%"></b></i>' + fmt(v, 2) + ' V</span>';
-  }
-
-  // An earlier run of a board, shown under the live one. Deliberately thin: it is
-  // history, and the row that matters is the one still transmitting.
-  const AUTO_OPEN_RUNS = 3;
-
-  // The Runs tab. A board's counter starts again from 0 every time it restarts, so its
-  // data is kept as separate runs. This is where they are put back together when the
-  // restart was an accident, and thrown away when the run was rubbish.
-  function renderRuns(el, unit) {
-    if (!unit) { el.innerHTML = '<p class="empty">Select a unit in the fleet list.</p>'; return; }
-    const f = fleet();
-    const csid = unit.csid;
-    const live = f.units.get(csid);
-    const earlier = f.earlierRuns(csid);
-    const all = earlier.concat(live ? [live] : []);
-    const t = now();
-
-    const head = '<p class="note">CSID ' + csid + ' has ' + (all.length === 1 ? 'one run' : all.length + ' runs') +
-      '. A run ends when the board restarts and its counter goes back to 0. ' +
-      (earlier.length ? 'If a restart was an accident, join the runs back together.' : 'Nothing to join.') + '</p>' +
-      (earlier.length > 1 ? '<p><button id="runs-joinall" class="primary">Join all ' + all.length + ' runs into one</button></p>' : '');
-
-    const rows = all.map((u) => {
-      const span = u.firstT === null ? '—' : age(u.lastT - u.firstT);
-      const when = u.firstT === null ? '' : new Date(u.firstT).toLocaleTimeString() + ' to ' + new Date(u.lastT).toLocaleTimeString();
-      const joinable = !u.live;
-      return '<div class="runrow' + (u.label === view.sel ? ' sel' : '') + '">' +
-        '<div class="runhead"><b data-pick="' + u.label + '">' + u.label + '</b>' +
-        (u.boot !== null && u.boot !== undefined ? '<span class="muted">boot ' + esc(u.boot) + '</span>' : '') +
-        (u.live ? '<span class="st good">transmitting now</span>' : '<span class="muted">earlier run</span>') + '</div>' +
-        '<div class="note">' + u.packets + ' packets, ' + u.missed + ' missed, ran for ' + span +
-          (when ? ' — ' + esc(when) : '') + '</div>' +
-        '<div class="setup-actions">' +
-          (joinable ? '<button data-merge="' + u.label + '" class="primary">Join into the next run</button>' : '') +
-          '<button data-drop="' + u.label + '">Delete this run</button>' +
-        '</div></div>';
-    }).join('');
-    el.innerHTML = '<div class="runs">' + head + rows + '</div>';
-  }
-
-  function earlierRow(f, u, t, rxTotal) {
-    const span = u.firstT === null ? '—' : age(u.lastT - u.firstT);
-    return '<tr class="gen' + (u.label === view.sel ? ' sel' : '') + '" data-label="' + u.label + '">' +
-      // Actions go in the first cell. The fleet table is fourteen columns wide and
-      // scrolls sideways, so anything in the last cell is off the edge of the window.
-      '<td class="csid">' + u.label +
-        ' <button data-merge="' + u.label + '" class="act" title="Join this run to the one after it">join</button>' +
-        ' <button data-drop="' + u.label + '" class="act" title="Delete this run">delete</button></td>' +
-      '<td><span class="muted">earlier run</span></td>' +
-      '<td class="r muted" title="Ended ' + esc(new Date(u.lastT).toLocaleString()) + '">' + age(t - u.lastT) + ' ago</td>' +
-      '<td class="r muted">' + u.lastCounter + '</td>' +
-      '<td class="r">' + u.packets + '</td>' +
-      '<td class="r' + (u.missed ? '' : ' muted') + '">' + u.missed + '</td>' +
-      '<td class="r muted">' + fmt(f.rxPercent(u), 1) + '</td>' +
-      '<td class="r muted">—</td>' +
-      '<td class="muted">ran for ' + span + '</td>' +
-      '<td colspan="5" class="muted">ended ' + esc(new Date(u.lastT).toLocaleTimeString()) + '</td>' +
-      '</tr>';
+    const r = view.mode === 'replay' ? view.replay : null;
+    paint($('summary'), V.summaryHtml(f, t, r ? r.pos : undefined));
+    // With nothing heard there are no issues to list, but bad CRCs still say so
+    const words = V.issuesText(f, t);
+    paint($('issues'), esc(f.summary(t).heard || words !== 'No issues' ? words : ''));
   }
 
   function renderFleet(f, t) {
     const rows = f.rows(t, view.sort);
     if (view.sel === null || !f.unit(view.sel) || f.hidden.has(Number(view.sel))) view.sel = rows.length ? rows[0].unit.label : null;
     $('fleet-empty').hidden = rows.length > 0;
-    const rxTotal = [...f.receivers.values()].filter((r) => r.packets > 0).length;
-    $('fleet').querySelector('tbody').innerHTML = rows.map(({ unit: u, state, age: a }) => {
-      const d = u.latest;
-      const rssiCls = u.bestRssi < settings.weakRssiDbm ? ' serious' : '';
-      const earlier = f.earlierRuns(u.csid);
-      // One or two earlier runs is the bench case: a knocked cable, and the operator
-      // wants to join them. Show them without making anyone find a button first.
-      // Thirty of them is a night of logs, which stays folded.
-      const open = view.expanded.has(String(u.csid)) ||
-        (earlier.length <= AUTO_OPEN_RUNS && !view.expanded.has('shut' + u.csid));
-      return '<tr data-label="' + u.label + '"' + (u.label === view.sel ? ' class="sel"' : '') + '>' +
-        '<td class="csid">' + u.label +
-          (earlier.length ? ' <button class="act" data-gens="' + u.csid + '" title="' +
-            (open ? 'Fold away the earlier runs of this board' : 'Show the runs of this board that ended when it restarted') + '">' +
-            (open ? 'hide earlier' : earlier.length + ' earlier') + '</button>' : '') +
-          // While they are on screen each run has its own join, so this one would be a
-          // second way to do the same thing. It is for the folded case.
-          (earlier.length && !open ? ' <button class="act" data-mergeall="' + u.csid + '" title="Join every earlier run into this one">' +
-            (earlier.length === 1 ? 'join it' : 'join all') + '</button>' : '') + '</td>' +
-        '<td>' + stateHtml(state) + (d.saturated ? '<span class="flag" title="Acceleration near the accelerometer limit">saturated</span>' : '') + '</td>' +
-        '<td class="r">' + ageCell(f, u, a) + '</td>' +
-        '<td class="r">' + u.lastCounter + '</td>' +
-        '<td class="r">' + u.packets + '</td>' +
-        // Off a chip there is no link and no transmission counter to reason from, so
-        // these say nothing rather than saying something wrong.
-        '<td class="r' + (u.fromChip || !u.missed ? ' muted' : '') + '">' + (u.fromChip ? '—' : u.missed) + '</td>' +
-        '<td class="r' + (u.fromChip ? ' muted' : '') + '">' + (u.fromChip ? '—' : fmt(f.rxPercent(u), 1)) + '</td>' +
-        '<td class="r' + (u.fromChip || !u.resets ? ' muted' : ' serious') + '">' + (u.fromChip ? '—' : u.resets) + '</td>' +
-        '<td>' + battCell(d) + '</td>' +
-        '<td>' + bits(d.values.validity) + '</td>' +
-        '<td class="r' + rssiCls + '">' + fmt(u.bestRssi, 1) + '</td>' +
-        '<td class="r">' + fmt(u.bestSnr, 1) + '</td>' +
-        '<td class="r">' + (Number.isFinite(u.intervalMs) ? fmt(u.intervalMs / 1000, u.intervalMs < 10000 ? 2 : 0) + ' s' : '—') + '</td>' +
-        '<td class="r" title="' + esc(u.receptions.map((r) => rxName(r.rx) + ': ' + fmt(r.rssi, 1) + ' dBm').join('\n')) + '">' + u.receptions.length + ' of ' + rxTotal + '</td>' +
-        '</tr>' + (open ? earlier.map((g) => earlierRow(f, g, t, rxTotal)).join('') : '');
-    }).join('');
+    paint($('fleet').querySelector('tbody'), V.fleetHtml(f, t, { sort: view.sort, sel: view.sel, rxName }));
+    const n = f.hidden.size;
+    $('btn-restore').hidden = !n;
+    $('btn-restore').textContent = 'Show hidden (' + n + ')';
     const sel = $('sel-unit');
     const want = [...f.allUnits().values()]
       .sort((a, b) => (a.csid - b.csid) || (b.live - a.live) || (a.gen - b.gen))
@@ -895,26 +771,16 @@
     if (view.sel !== null) sel.value = view.sel;
   }
 
-  // One list row. A field whose validity bit is clear shows the last trusted
-  // value in muted ink, or — if there never was one.
-  function fieldRow(u, label, key, dec, unit) {
-    const fd = P.FIELDS.find((x) => x.key === key);
-    const d = u.latest;
-    let v;
-    if (d.valid[fd.group]) {
-      const sat = fd.group === 'accel' && Math.abs(d.values[key]) >= settings.saturationMps2;
-      v = '<dd class="v' + (sat ? ' sat' : '') + '"' + (sat ? ' title="Near the accelerometer limit"' : '') + '>' + fmt(d.values[key], dec) + '</dd>';
-    } else {
-      const lv = u.lastValid[key];
-      v = '<dd class="v stale" title="Not valid in this packet' + (lv !== undefined ? '. Last trusted value shown.' : '') + '">' + (lv !== undefined ? fmt(lv, dec) : '—') + '</dd>';
-    }
-    return '<dt>' + label + '</dt>' + v + '<dd class="u">' + unit + '</dd>';
+  // Every run of a board, oldest first, the one transmitting now last
+  function runsOf(f, csid) {
+    const live = f.units.get(csid);
+    return f.earlierRuns(csid).concat(live ? [live] : []);
   }
-  const plainRow = (label, value, unit, cls) => '<dt>' + label + '</dt><dd class="v ' + (cls || '') + '">' + value + '</dd><dd class="u">' + (unit || '') + '</dd>';
 
-  function list(title, rows, group, d) {
-    const note = group && !d.valid[group] ? ' <span class="note bad">not valid</span>' : '';
-    return '<section class="list"><h3>' + title + note + '</h3><dl>' + rows.join('') + '</dl></section>';
+  // The Runs tab, drawn into the charts box in place of the plots
+  function renderRuns(el, unit) {
+    if (!unit) { paint(el, '<p class="empty">Select a unit in the list.</p>'); return; }
+    paint(el, V.runsHtml(unit.csid, runsOf(fleet(), unit.csid), { sel: view.sel, ask: view.dropAsk }));
   }
 
   // ---------- alarm ----------
@@ -959,37 +825,19 @@
   function renderLatest(f, t) {
     if (view.paused) return;
     const u = view.sel === null ? null : f.unit(view.sel);
-    const el = $('latest');
-    if (!u) { el.innerHTML = '<div class="none">Select a unit in the fleet list.</div>'; return; }
-    const d = u.latest;
-    const st = f.state(u, t);
-    const crcOk = d.crcOk
-      ? '<span class="good" title="' + (u.latestSource === 'csv' ? 'Old CSV receiver: packet rebuilt from the printed values to check the CRC' : 'CRC matches') + '">pass</span>'
-      : '<span class="bad">fail</span>';
-    const rx = u.receptions.map((r) => plainRow(esc(rxName(r.rx)), fmt(r.rssi, 1) + ' / ' + fmt(r.snr, 1), 'dBm/dB'));
-    el.innerHTML =
-      '<div class="unit-head"><span class="id"><small>CSID</small>' + u.csid + '</span>' + stateHtml(st) +
-        (d.saturated ? '<span class="flag">accel saturated</span>' : '') +
-        '<span class="when"><b>' + new Date(u.lastT).toTimeString().slice(0, 8) + '</b>' + age(t - u.lastT) + ' ago</span></div>' +
-      '<div class="validity-line">' + bits(d.values.validity) + '<span class="hex">0x' + d.values.validity.toString(16).toUpperCase().padStart(2, '0') + '</span></div>' +
-      '<div class="lists">' +
-        list('Link', [
-          plainRow('Counter', d.values.counter),
-          plainRow('Cell voltage', d.valid.soc ? fmt(d.values.battery, 2) : '—', 'V', d.valid.soc ? '' : 'stale'),
-          plainRow('Interval', Number.isFinite(u.intervalMs) ? fmt(u.intervalMs / 1000, 2) : '—', 's'),
-          plainRow('CRC', crcOk + ' <span class="hex muted">' + d.crcReceived.toString(16).toUpperCase().padStart(4, '0') + '</span>'),
-          plainRow('Packets', u.packets), plainRow('Missed', u.missed), plainRow('Resets', u.resets),
-          plainRow('Received', fmt(f.rxPercent(u), 1), '%'),
-        ].concat(rx)) +
-        list('GPS', [fieldRow(u, 'Latitude', 'lat', 6, '°'), fieldRow(u, 'Longitude', 'lon', 6, '°'), fieldRow(u, 'Altitude MSL', 'gpsAlt', 1, 'm')], 'gps', d) +
-        list('Environment', [fieldRow(u, 'Temperature', 'temp', 2, '°C'), fieldRow(u, 'Pressure', 'pressure', 1, 'hPa'),
-          fieldRow(u, 'Humidity', 'humidity', 1, '%'), fieldRow(u, 'Pressure altitude', 'envAlt', 1, 'm')], 'env', d) +
-        list('Accelerometer', ['x', 'y', 'z'].map((a) => fieldRow(u, a.toUpperCase(), 'a' + a, 2, 'm/s²')), 'accel', d) +
-        list('Gyroscope', ['x', 'y', 'z'].map((a) => fieldRow(u, a.toUpperCase(), 'g' + a, 1, 'deg/s')), 'gyro', d) +
-        list('Magnetometer', ['x', 'y', 'z'].map((a) => fieldRow(u, a.toUpperCase(), 'm' + a, 1, 'µT')), 'mag', d) +
-        list('Orientation', [['i', 'qi'], ['j', 'qj'], ['k', 'qk'], ['Real', 'qr']].map(([l, k]) => fieldRow(u, l, k, 4, '')), 'quat', d) +
-      '</div>';
+    let o = null;
+    if (u) {
+      const all = runsOf(f, u.csid);
+      o = { state: f.state(u, t), t, run: all.indexOf(u) + 1, runs: all.length, cfg: settings, replay: view.mode === 'replay',
+        rx: u.receptions.map((r) => ({ name: rxName(r.rx), rssi: r.rssi, snr: r.snr })) };
+    }
+    paint($('latest'), V.detailHtml(u, o));
   }
+  $('latest').addEventListener('click', (e) => {
+    if (!e.target.closest('[data-joinruns]')) return;
+    charts.showTab('runs');
+    render(true);
+  });
 
   // SF6 through 12. Six only works because the packet is a fixed 55 bytes, which the
   // receiver is told at boot; the radio cannot read a header at that rate. A board
@@ -1011,35 +859,48 @@
     return src.anchor_unix_ms && !Number.isNaN(d.getTime()) ? d.toISOString() : '';
   }
 
+  // In a replay the panel lists the log's receivers as they were recorded, not the ports
+  // plugged in now. Its head says so; the note sits where Rescan is in live.
+  function rxHead(replaying) {
+    const head = $('rxpanel').querySelector('.pane-head');
+    let note = head.querySelector('.asrec');
+    if (!note) {
+      note = document.createElement('span'); note.className = 'note asrec'; note.textContent = 'as recorded';
+      head.appendChild(note);
+    }
+    note.hidden = !replaying;
+    head.querySelector('.kicker').textContent = replaying ? 'Receivers in this log' : 'Receivers · T-Beams';
+  }
+
   function renderReceivers() {
     // The strip redraws every 250 ms, which would shut an open select under the operator.
     const focus = document.activeElement;
     if (focus && focus.tagName === 'SELECT' && $('receivers').contains(focus)) return;
     const f = fleet();
     const t = now();
-    const keys = new Set([...f.receivers.keys(), ...hub.ports.map((p) => p.key)]);
-    $('receivers').innerHTML = [...keys].map((k) => {
+    const replaying = view.mode === 'replay';
+    rxHead(replaying);
+    const keys = new Set([...f.receivers.keys(), ...(replaying ? [] : hub.ports.map((p) => p.key))]);
+    const rows = [...keys].map((k) => {
       const r = f.receivers.get(k);
-      const port = hub.ports.find((p) => p.key === k);
+      const port = replaying ? null : hub.ports.find((p) => p.key === k);
       const m = meta(k);
-      let st = 'no data'; let cls = 'warning';
-      if (port && port.status !== 'open') { st = port.status; cls = 'critical'; } else if (r && t - r.lastT < 7000) { st = 'live'; cls = 'good'; } else if (r) { st = 'quiet for ' + age(t - r.lastT); }
+      const st = V.receiverState(r, port, t);
       const kind = m.source === 'csv' ? 'CSV firmware' : m.source === 'raw' ? 'raw firmware' : '';
-      const detail = [kind, r && r.info.sf ? 'SF' + r.info.sf : '', r ? r.unique + ' new, ' + (r.packets - r.unique - r.badCrc) + ' duplicate' : '',
-        r && r.badCrc ? r.badCrc + ' bad CRC' : '', r && r.radioErrors ? r.radioErrors + ' radio errors' : '', port && port.usb ? 'USB ' + port.usb : '', port && port.error ? port.error : '']
+      const detail = [kind, r ? V.num(r.unique) + ' new, ' + V.num(r.packets - r.unique - r.badCrc) + ' duplicate' : '',
+        r && r.badCrc ? V.num(r.badCrc) + ' bad CRC' : '', r && r.radioErrors ? V.num(r.radioErrors) + ' radio errors' : '',
+        port && port.usb ? 'USB ' + port.usb : '', port && port.error ? port.error : '']
         .filter(Boolean).join('\n');
-      return '<span class="rx" title="' + esc(detail) + '">' +
-        '<span class="sw" style="background:var(--series-' + (m.index + 1) + ')"></span>' +
-        '<span class="name">' + esc(rxName(k)) + '</span><span class="st ' + cls + '">' + st + '</span>' +
-        (r ? '<span class="meta">' + r.unique + ' packets</span>' : '') +
-        (hub.native && r && r.info.sf ? sfSelect(k, r.info.sf) : '') +
-        (port && port.status === 'open' ? '<button data-close="' + k + '" title="Disconnect" aria-label="Disconnect ' + esc(k) + '">✕</button>' : '') + '</span>';
-    }).join('');
+      const controls = replaying ? '' : (hub.native && r && r.info.sf ? sfSelect(k, r.info.sf) : '') +
+        (port && port.status === 'open' ? '<button data-close="' + esc(k) + '" title="Disconnect" aria-label="Disconnect ' + esc(rxName(k)) + '">✕</button>' : '');
+      return V.receiverRowHtml({ key: k, name: rxName(k), id: r && r.id, sf: r && r.info.sf, packets: r ? r.unique : 0,
+        word: st.word, cls: st.cls, index: m.index, detail, controls, sel: view.rxSel === k });
+    });
     // Lines that did not come off a radio. Said plainly, because an absent RSSI is an
     // absence and not a fault, and a screenshot of a replay should not read as live.
-    for (const [rx, src] of fleet().sources) {
+    for (const [rx, src] of f.sources) {
       const what = src.kind === 'flash' ? 'Flash dump' : (src.kind || 'Not a radio');
-      const bits = [src.from, src.boot ? 'boot ' + src.boot : '', src.packets ? src.packets + ' records' : '']
+      const bits = [src.from, src.boot ? 'boot ' + src.boot : '', src.packets ? V.num(src.packets) + ' records' : '']
         .filter(Boolean).join(', ');
       // Anything not anchored to GPS is a derived time, however it was derived, and
       // once it is epoch milliseconds it looks exactly like a real one. Tested the
@@ -1050,27 +911,32 @@
       const when = guessed ? '\nTimes are not from GPS (' + src.time_source + '), so the time axis is derived.'
         : (anchor ? '\nTime anchored at ' + anchor +
             (src.anchor_tacc_ns ? ' (receiver accuracy ' + src.anchor_tacc_ns + ' ns)' : '') : '');
-      $('receivers').insertAdjacentHTML('beforeend', '<span class="rx" title="' +
-        esc('No RSSI or SNR: these lines came off a chip, not a radio.' + when) +
-        '"><span class="name">' + esc(rx) + '</span><span class="st warning">' + esc(what) + '</span>' +
-        (bits ? '<span class="meta">' + esc(bits) + '</span>' : '') +
-        (guessed ? '<span class="st serious">times not from GPS</span>' : '') + '</span>');
+      const key = 'src:' + rx;
+      rows.push(V.receiverRowHtml({ key, name: rx, meta: bits, word: what, cls: 'off', sel: view.rxSel === key,
+        detail: 'No RSSI or SNR: these lines came off a chip, not a radio.' + when,
+        extra: guessed ? V.mark('warn', 'times not from GPS') : '' }));
     }
-    if (api.onReceivers) api.onReceivers();
-    renderClear();
     // Two spreading factors is the normal setup for a test: the LE boards are on SF9, the HP
     // boards on SF12, and one receiver hears only one of them.
     const onSf = [...f.receivers.entries()].filter(([, r]) => r.info.sf);
     if (new Set(onSf.map(([, r]) => r.info.sf)).size > 1) {
-      $('receivers').insertAdjacentHTML('beforeend', '<span class="rx"><span class="meta">' +
-        esc(onSf.map(([k, r]) => rxName(k) + ' on SF' + r.info.sf).join(', ')) + '</span></span>');
+      rows.push('<p class="rx-note note">' + esc(onSf.map(([k, r]) => rxName(k) + ' on SF' + r.info.sf).join(', ')) + '</p>');
     }
+    paint($('receivers'), rows.join(''));
+    if (api.onReceivers) api.onReceivers();
+    renderClear();
     $('mode').textContent = view.replay ? '' : (recorder.lines ? recorder.lines + ' lines this session' : '');
   }
   $('receivers').addEventListener('click', (e) => {
     const k = e.target.dataset.close;
     const p = k && hub.ports.find((x) => x.key === k);
-    if (p) { toast('Disconnected ' + rxName(k)); hub.close(p); }
+    if (p) { toast('Disconnected ' + rxName(k)); hub.close(p); return; }
+    // A row opens for its SF and disconnect; touching the open select must not shut it
+    if (e.target.closest('.rx-more')) return;
+    const row = e.target.closest('.rx[data-rx]');
+    if (!row) return;
+    view.rxSel = view.rxSel === row.dataset.rx ? null : row.dataset.rx;
+    renderReceivers();
   });
   $('receivers').addEventListener('change', (e) => {
     const k = e.target.dataset.sf;
@@ -1086,23 +952,32 @@
   const charts = new DG.Charts($('charts'), $('tabs'), (k) => ({ label: rxName(k), index: meta(k).index }));
   charts.custom = renderRuns;
 
-  // The Runs tab owns its own buttons; the fleet table's copies do the same work.
+  // The Runs tab's buttons. Delete asks first, in a row under the run.
   $('charts').addEventListener('click', (e) => {
-    const merge = e.target.getAttribute('data-merge');
-    const drop = e.target.getAttribute('data-drop');
-    const pick = e.target.getAttribute('data-pick');
+    const b = e.target.closest('button');
+    if (!b) return;
+    const at = (n) => b.getAttribute(n);
     const f = fleet();
-    if (e.target.id === 'runs-joinall') {
+    if (b.id === 'runs-joinall') {
       const u = view.sel === null ? null : f.unit(view.sel);
       if (u) { const n = f.mergeAllRuns(u.csid); view.sel = String(u.csid); toast('Joined ' + n + ' earlier ' + (n === 1 ? 'run' : 'runs')); }
-    } else if (merge) {
+      view.dropAsk = null;
+    } else if (at('data-merge')) {
+      const merge = at('data-merge');
       const into = f.mergeRun(merge);
       if (into) { toast('Joined ' + merge + ' into ' + into); if (view.sel === merge) view.sel = into; }
-    } else if (drop) {
+      view.dropAsk = null;
+    } else if (at('data-drop')) {
+      view.dropAsk = at('data-drop');
+    } else if (at('data-dropgo')) {
+      const drop = at('data-dropgo');
       if (f.clearUnit(drop)) toast('Deleted run ' + drop);
       if (view.sel === drop) view.sel = null;
-    } else if (pick) {
-      view.sel = pick;
+      view.dropAsk = null;
+    } else if (at('data-dropno') !== null) {
+      view.dropAsk = null;
+    } else if (at('data-pick')) {
+      view.sel = at('data-pick');
     } else {
       return;
     }
@@ -1127,6 +1002,7 @@
     watchForLost(f, t);
     renderReceivers();
     renderRecorder();
+    if (view.mode === 'replay') renderReplayProgress();
     if (force || Date.now() - lastChart > 500) {
       lastChart = Date.now();
       const u = view.sel === null ? null : f.unit(view.sel);

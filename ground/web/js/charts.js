@@ -7,11 +7,19 @@
 
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-  // Series colour at 70% opacity: noisy data reads calmer.
-  function seriesColor(i) {
-    const hex = css('--series-' + (i + 1)).replace('#', '');
+  // A token's hex at some opacity. Anything not a 6-digit hex comes back as it is.
+  function alpha(value, a) {
+    const hex = value.replace('#', '');
+    if (!/^[0-9a-f]{6}$/i.test(hex)) return value;
     const n = parseInt(hex, 16);
-    return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',0.7)';
+    return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+  // Series colour at 70% opacity: noisy data reads calmer.
+  const seriesColor = (i) => alpha(css('--series-' + (i + 1)), 0.7);
+  const readoutFormats = new Map();
+  function readoutNum(v, d) {
+    if (!readoutFormats.has(d)) readoutFormats.set(d, new Intl.NumberFormat('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }));
+    return readoutFormats.get(d).format(v);
   }
 
   // Tab -> panels -> series. `key` reads unit.history[key]; `rx` = per receiver.
@@ -19,10 +27,10 @@
   // because a board's earlier runs are a list to act on, not a graph.
   const TABS = [
     { id: 'overview', label: 'Overview', panels: [
-      { title: 'Cell voltage', unit: 'V', series: [{ key: 'battery', label: 'Cell voltage' }] },
-      { title: 'Pressure altitude', unit: 'm', series: [{ key: 'envAlt', label: 'Altitude' }] },
-      { title: 'RSSI, best receiver', unit: 'dBm', series: [{ key: 'rssi', label: 'RSSI' }] },
-      { title: 'SNR, best receiver', unit: 'dB', series: [{ key: 'snr', label: 'SNR' }] },
+      { title: 'Cell voltage', unit: 'V', dec: 2, series: [{ key: 'battery', label: 'Cell voltage' }] },
+      { title: 'Pressure altitude', unit: 'm', dec: 1, series: [{ key: 'envAlt', label: 'Altitude' }] },
+      { title: 'RSSI, best receiver', unit: 'dBm', dec: 1, series: [{ key: 'rssi', label: 'RSSI' }] },
+      { title: 'SNR, best receiver', unit: 'dB', dec: 1, series: [{ key: 'snr', label: 'SNR' }] },
     ] },
     { id: 'imu', label: 'IMU', panels: [
       { title: 'Linear acceleration', unit: 'm/s²', band: 'saturationMps2', series: [{ key: 'ax', label: 'X' }, { key: 'ay', label: 'Y' }, { key: 'az', label: 'Z' }] },
@@ -31,25 +39,26 @@
       { title: 'Quaternion', series: [{ key: 'qi', label: 'i' }, { key: 'qj', label: 'j' }, { key: 'qk', label: 'k' }, { key: 'qr', label: 'real' }] },
     ] },
     { id: 'env', label: 'Environment', panels: [
-      { title: 'Temperature', unit: '°C', series: [{ key: 'temp', label: 'Temperature' }] },
-      { title: 'Pressure', unit: 'hPa', series: [{ key: 'pressure', label: 'Pressure' }] },
-      { title: 'Humidity', unit: '%RH', series: [{ key: 'humidity', label: 'Humidity' }] },
-      { title: 'Pressure altitude', unit: 'm', series: [{ key: 'envAlt', label: 'Altitude' }] },
+      { title: 'Temperature', unit: '°C', dec: 2, series: [{ key: 'temp', label: 'Temperature' }] },
+      { title: 'Pressure', unit: 'hPa', dec: 1, series: [{ key: 'pressure', label: 'Pressure' }] },
+      { title: 'Humidity', unit: '%RH', dec: 1, series: [{ key: 'humidity', label: 'Humidity' }] },
+      { title: 'Pressure altitude', unit: 'm', dec: 1, series: [{ key: 'envAlt', label: 'Altitude' }] },
     ] },
     { id: 'gps', label: 'GPS', panels: [
-      { title: 'GPS altitude MSL', unit: 'm', series: [{ key: 'gpsAlt', label: 'Altitude' }] },
-      { title: 'Latitude', unit: 'deg', series: [{ key: 'lat', label: 'Latitude' }] },
-      { title: 'Longitude', unit: 'deg', series: [{ key: 'lon', label: 'Longitude' }] },
+      { title: 'GPS altitude MSL', unit: 'm', dec: 1, series: [{ key: 'gpsAlt', label: 'Altitude' }] },
+      { title: 'Latitude', unit: 'deg', dec: 6, series: [{ key: 'lat', label: 'Latitude' }] },
+      { title: 'Longitude', unit: 'deg', dec: 6, series: [{ key: 'lon', label: 'Longitude' }] },
     ] },
     { id: 'radio', label: 'Radio', panels: [
-      { title: 'RSSI per receiver', unit: 'dBm', rx: 'rssi' },
-      { title: 'SNR per receiver', unit: 'dB', rx: 'snr' },
+      { title: 'RSSI per receiver', unit: 'dBm', dec: 1, rx: 'rssi' },
+      { title: 'SNR per receiver', unit: 'dB', dec: 2, rx: 'snr' },
     ] },
     { id: 'runs', label: 'Runs', custom: true },
   ];
 
   const clock = (s) => new Date(s * 1000).toTimeString().slice(0, 8);
   const PLOT_H = 190;
+  const CARD_HEAD = 50;   // a chart card's title row and padding, around the plot
 
   class Charts {
     constructor(container, tabsEl, rxLabel) {
@@ -70,12 +79,28 @@
       new ResizeObserver(() => this.resize()).observe(container);
     }
 
+    // Another part of the page asks for a tab, like the runs pill on a unit card
+    showTab(id) {
+      if (!TABS.some((t) => t.id === id) || id === this.tab) return;
+      this.tab = id; this.sig = ''; this.markTabs();
+    }
+
     markTabs() {
       for (const b of this.tabsEl.children) b.classList.toggle('on', b.dataset.tab === this.tab);
     }
 
+    // The cards fill the panel, as many rows as the tab needs. Where the panel grows with
+    // what is in it (stacked, narrow windows) a plot sized to it would grow it again, so
+    // there it stays at PLOT_H.
     plotSize(box) {
-      return { width: Math.max(240, box.clientWidth), height: PLOT_H };
+      const width = Math.max(240, box.clientWidth);
+      const st = getComputedStyle(this.el);
+      if (st.overflowY === 'visible' || !this.el.clientHeight) return { width, height: PLOT_H };
+      const cols = st.gridTemplateColumns.split(' ').length;
+      const rows = Math.max(1, Math.ceil((this.count || 1) / cols));
+      const gap = parseFloat(st.rowGap) || 0;
+      const each = (this.el.clientHeight - gap * (rows - 1)) / rows - CARD_HEAD;
+      return { width, height: Math.round(Math.max(110, Math.min(320, each))) };
     }
 
     resize() {
@@ -122,6 +147,10 @@
     build(panels, opt) {
       this.el.classList.remove('custom');
       this.el.innerHTML = '';
+      this.count = panels.length;
+      // The Runs tab paints this box through shell.paint, which skips html it thinks is
+      // already there. It is not any more.
+      delete this.el.dgHtml;
       this.plots = [];
       const boxes = panels.map(({ panel }) => {
         const box = document.createElement('div');
@@ -141,31 +170,33 @@
           box.appendChild(n);
           return;
         }
+        // The plain-hex aliases: getComputedStyle hands a color-mix() back unresolved.
+        // --ink is --color-text, --rule is --color-neutral-200, --accent is --color-accent.
+        // A faint horizontal grid only; the handoff has none, it stays to read values off.
+        const axis = { stroke: alpha(css('--ink'), 0.7), ticks: { show: false }, font: '600 11px ' + css('--sans') };
         const grid = { stroke: css('--rule'), width: 1 };
-        const axis = { stroke: css('--ink-2'), grid, ticks: { stroke: css('--rule') }, font: '11px ' + css('--sans') };
         const few = pd.data[0].length < 40;
         const single = pd.labels.length === 1;
+        // One series in the accent; several, and every receiver, in the series palette, so a
+        // receiver keeps the colour of its dot in the receivers panel
+        const accent = single && !panel.rx;
+        const width = accent ? 2.25 * opt.lineWidth / 1.25 : opt.lineWidth;
         const readout = box.querySelector('.readout');
         const opts = Object.assign(this.plotSize(box), {
           // One series: the title names it, so no legend; hover value goes next to the title.
           legend: { show: !single, live: true },
           cursor: { points: { size: 7 }, drag: { x: false, y: false } },
           scales: { x: { time: true } },
-          axes: [Object.assign({ values: (u, splits) => splits.map(clock) }, axis), Object.assign({ size: 56 }, axis)],
+          axes: [Object.assign({ values: (u, splits) => splits.map(clock), grid: { show: false } }, axis), Object.assign({ size: 56, grid }, axis)],
           series: [{ value: (u, v) => (v == null ? '—' : clock(v)) }].concat(pd.labels.map((l) => ({
-            label: l.label, stroke: seriesColor(l.index), width: opt.lineWidth, spanGaps: false,
+            label: l.label, stroke: accent ? css('--accent') : seriesColor(l.index), width, spanGaps: false,
             points: { show: few, size: 4, width: 1 },
             value: (u, v) => (v == null ? '—' : +v.toFixed(5)),
           }))),
         });
         opts.hooks = {};
-        if (single) {
-          opts.hooks.setCursor = [(u) => {
-            const i = u.cursor.idx;
-            const v = i == null ? null : u.data[1][i];
-            readout.textContent = v == null ? '' : +v.toFixed(5) + ' at ' + clock(u.data[0][i]);
-          }];
-        }
+        const plot = { box, panel, readout, single };
+        if (single) opts.hooks.setCursor = [(u) => this.readout(plot, u.cursor.idx)];
         const lim = panel.band && opt[panel.band];
         if (lim) {
           opts.hooks.draw = [(u) => {
@@ -180,8 +211,26 @@
             ctx.restore();
           }];
         }
-        this.plots.push({ u: new uPlot(opts, pd.data, box), box, panel });
+        plot.u = new uPlot(opts, pd.data, box);
+        this.plots.push(plot);
+        if (single) this.readout(plot, null);
       });
+    }
+
+    // One series: its newest value in the card head, or the one under the cursor with its time
+    readout(p, idx) {
+      if (!p.single || !p.u) return;
+      const ys = p.u.data[1];
+      let i = idx;
+      if (i == null) { i = ys.length - 1; while (i >= 0 && ys[i] == null) i--; }
+      const v = i >= 0 ? ys[i] : null;
+      const d = p.panel.dec === undefined ? 2 : p.panel.dec;
+      p.readout.textContent = v == null ? '' : readoutNum(v, d) + (p.panel.unit ? ' ' + p.panel.unit : '');
+      if (v != null && idx != null) {
+        const at = document.createElement('small');
+        at.textContent = ' at ' + clock(p.u.data[0][i]);
+        p.readout.appendChild(at);
+      }
     }
 
     // Redraw for the selected unit. Rebuilds DOM only when the shape changes.
@@ -205,7 +254,9 @@
       let i = 0;
       for (const { pd } of panels) {
         if (!pd || !pd.data[0].length) continue;
-        this.plots[i++].u.setData(pd.data);   // x and y rescale to the data
+        const p = this.plots[i++];
+        p.u.setData(pd.data);   // x and y rescale to the data
+        if (p.u.cursor.idx == null) this.readout(p, null);
       }
     }
 
