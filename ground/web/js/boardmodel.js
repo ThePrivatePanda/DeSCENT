@@ -403,7 +403,7 @@
       const quiet = now - r.lastT;
       if (quiet < 7000) return { key: p.key, name, sf, word: 'reading', cls: 'good' };
       const min = Math.floor(quiet / 60000);
-      return { key: p.key, name, sf, word: 'quiet for ' + (min ? min + ' min' : Math.floor(quiet / 1000) + ' s'), cls: 'warn' };
+      return { key: p.key, name, sf, word: 'quiet for ' + (min ? min + ' min' : Math.floor(quiet / 1000) + ' s'), cls: 'off' };
     });
   }
 

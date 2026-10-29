@@ -652,8 +652,14 @@
   function buildSettingsForm() {
     const form = $('settings-form');
     form.innerHTML = '';
+    let card = form;
     for (const f of FIELDS) {
-      if (f.section) { const h = document.createElement('h3'); h.textContent = f.section; form.appendChild(h); continue; }
+      if (f.section) {
+        card = document.createElement('section'); card.className = 'card';
+        const h = document.createElement('h3'); h.textContent = f.section;
+        card.appendChild(h); form.appendChild(card);
+        continue;
+      }
       const row = document.createElement('div'); row.className = 'field';
       const id = 'set-' + f.key;
       let input;
@@ -675,9 +681,16 @@
       }
       input.id = id; input.dataset.key = f.key;
       const label = document.createElement('label'); label.htmlFor = id; label.textContent = f.label;
-      row.append(label, input);
+      // The checkbox stays the input that change listens to; On and Off are drawn round it
+      let control = input;
+      if (f.type === 'checkbox') {
+        control = document.createElement('label'); control.className = 'toggle';
+        control.innerHTML = '<span class="t-on">On</span><span class="t-off">Off</span>';
+        control.prepend(input);
+      }
+      row.append(label, control);
       if (f.hint) { const h = document.createElement('div'); h.className = 'hint'; h.textContent = f.hint; row.appendChild(h); }
-      form.appendChild(row);
+      card.appendChild(row);
     }
   }
 

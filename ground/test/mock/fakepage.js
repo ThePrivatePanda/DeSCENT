@@ -53,6 +53,10 @@ function page(scripts, hub, o) {
   return {
     parts, jobs, toasts, settle, target, taps: sandbox.DGApp.taps, shell: sandbox.DGApp.shell,
     html: (id) => el(id).html,
+    // What a person reads: tags out, entities back, runs of space as one
+    text: (id) => el(id).html.replace(/<[^>]*>/g, ' ')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ').trim(),
     async fire(id, type, attrs, more) {
       for (const fn of handlers[id + ':' + type] || []) await fn({ target: target(attrs || {}, more) });
       await settle();

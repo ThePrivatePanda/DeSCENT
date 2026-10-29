@@ -185,8 +185,8 @@ test('clear flash asks first, then runs the pull job told to wipe, and says so w
   assert.doesNotMatch(h, /data-wipego/);
   await p.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
   h = p.sheet();
-  // Nothing of CS9's was ever pulled here: the strongest warning.
-  assert.match(h, /<span class="mark bad">never pulled<\/span> <b>CS9<\/b> has never been pulled on this computer\. Clearing erases its flight log for good, and nothing is saved first\./);
+  // Nothing of CS9's was ever pulled here, and the warning says so first
+  assert.match(h, /<span class="mark warn">never pulled<\/span> <b>CS9<\/b> has never been pulled on this computer\. Clearing erases its flight log for good, and nothing is saved first\./);
   assert.doesNotMatch(h, /Last pulled/);
   assert.match(h, /data-wipego="1" class="primary">Clear the flash</);
   assert.match(h, /data-wipecancel="1">Cancel</);

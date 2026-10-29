@@ -12,7 +12,7 @@
   const STATE_WORDS = {
     receiver: ['good', 'reading it'],
     waiting: ['off', 'not touched'],
-    dismissed: ['warn', 'disconnected by you'],
+    dismissed: ['off', 'disconnected by you'],
     ignored: ['off', 'left alone'],
   };
   const LOOKS = {
@@ -207,7 +207,7 @@
           ' value="' + esc(shown) + '" placeholder="' + esc(blank) + '" style="' + nameWidth(shown || blank) +
           '" maxlength="' + (how.id ? 24 : 40) + '" aria-label="Name of this board" title="Type a name and press Enter">' +
         mark(cls, word) +
-        (ident.found === b.port ? mark('warn', 'the one you replugged') : '') +
+        (ident.found === b.port ? mark('good', 'the one you replugged') : '') +
         '<span class="note">' + kept + '</span>' +
         '<span class="spacer"></span><span class="note">' + detail + '</span>' +
         '<button data-forget="' + esc(b.port) + '"' + (state.busy === b.port ? ' disabled' : '') + '>Forget this board</button>' +

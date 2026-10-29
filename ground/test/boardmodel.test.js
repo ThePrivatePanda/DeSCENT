@@ -458,7 +458,7 @@ test('receivers for the bar: a name, a spreading factor and a state word', () =>
   ]);
   assert.deepStrictEqual(B.receiverWords(ports, boards, heard, now), [
     { key: 'rx1', name: '01', sf: 'SF7', word: 'reading', cls: 'good' },
-    { key: 'rx2', name: 'T-Beam B2B2B2', sf: 'SF9', word: 'quiet for 2 min', cls: 'warn' },
+    { key: 'rx2', name: 'T-Beam B2B2B2', sf: 'SF9', word: 'quiet for 2 min', cls: 'off' },
     { key: 'rx3', name: 'Spare', sf: '', word: 'nothing heard', cls: 'warn' },
     { key: 'rx4', name: 'rx4', sf: '', word: 'error', cls: 'bad' },
   ]);
