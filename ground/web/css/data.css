@@ -1,1 +1,83 @@
 /* Data. Only selectors under #screen-data; a class another screen needs goes in style.css */
+
+/* ---------- filters ---------- */
+#screen-data .filters { gap: 10px 22px; padding: 6px 24px 10px; }
+#screen-data .fgroup { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+#screen-data .fgroup .kicker { margin-right: 4px; }
+#screen-data .fpill { transition: background-color 120ms ease-out; }
+#screen-data .fpill:not(.on):hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+#screen-data .fpill.on:hover { background: var(--color-accent-2-300); border-color: var(--color-accent-2-300); }
+
+/* ---------- table ---------- */
+/* A row is a rounded bar of its own: the cells carry the colour, the first and last the ends. */
+#screen-data #data-table { border-collapse: separate; border-spacing: 0 4px; }
+#screen-data #data-table th { background: var(--color-neutral-100); font-size: 11px; padding: 4px 14px; border: 0; }
+#screen-data #data-table td { padding: 10px 14px; border: 0; white-space: nowrap; font-size: var(--t-body); }
+#screen-data #data-table td:first-child { border-radius: 12px 0 0 12px; white-space: normal; }
+#screen-data #data-table td:last-child { border-radius: 0 12px 12px 0; padding: 6px 14px; }
+#screen-data #data-table td b { font-size: var(--t-body); }
+#screen-data #data-table td.size { font-weight: 600; }
+#screen-data #data-table td .mark { margin-left: 8px; }
+/* Selected is the surface colour, one step off the white panel; hover is half of it.
+   White on white, as drawn, shows nothing. */
+#screen-data #data-table tbody tr:hover td { background: color-mix(in srgb, var(--color-surface) 50%, transparent); }
+#screen-data #data-table tbody tr.sel td { background: var(--color-surface); }
+#screen-data #data-table .note.path { margin-left: 8px; font-size: 12.5px; }
+#screen-data #data-table .acts { justify-content: flex-end; }
+#screen-data #data-table .acts button,
+#screen-data #data-table .acts .button {
+  min-height: 30px; padding: 0 12px; font-size: 12.5px; border-color: transparent;
+  background: var(--color-accent-100); color: var(--color-accent-700);
+}
+#screen-data #data-table .acts button:hover,
+#screen-data #data-table .acts .button:hover { background: var(--color-accent-200); color: var(--color-accent-800); }
+#screen-data #data-empty { padding: 18px 14px; }
+
+/* ---------- report panel ---------- */
+#screen-data #data-detail {
+  display: block; grid-template-columns: none; max-height: 42vh; overflow: auto;
+  background: var(--color-surface); border-radius: var(--radius-lg); padding: 18px 24px 20px;
+}
+#screen-data .collapsed { margin: 0; color: var(--color-text-70); font-size: var(--t-body); }
+#screen-data .report { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; }
+#screen-data .rmain, #screen-data .rside { min-width: 0; }
+#screen-data .rhead { display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; }
+#screen-data .rhead h3 { font: var(--font-heading-weight) 18px/1.3 var(--font-heading); }
+#screen-data .bootwrap { overflow-x: auto; margin-top: 10px; }
+#screen-data .boots { border-collapse: collapse; font-size: 13px; }
+#screen-data .boots th {
+  text-align: left; white-space: nowrap; padding: 0 16px 4px 0;
+  font: 600 11px/1.3 var(--font-body); text-transform: uppercase; letter-spacing: .06em; color: var(--color-text-70);
+}
+#screen-data .boots td { padding: 6px 16px 6px 0; white-space: nowrap; }
+#screen-data .boots tr.undated td { opacity: .7; }
+#screen-data .boots tr.undated td b { font-weight: 600; }
+#screen-data .expander { margin-top: 8px; padding-left: 0; }
+#screen-data .xfer { margin-top: 6px; max-width: 640px; }
+#screen-data .xfer > div { display: flex; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; padding: 5px 0; border-bottom: 1px solid var(--color-neutral-300); font-size: 13px; }
+#screen-data .xfer > div:last-child { border-bottom: 0; }
+#screen-data .xfer span { flex: 1 1 260px; color: var(--color-text-70); }
+#screen-data .rside { display: flex; flex-direction: column; gap: 8px; justify-content: center; }
+#screen-data .rside .note { margin: 0; line-height: 1.5; }
+#screen-data .rside .acts { gap: 8px; }
+
+/* ---------- narrow ---------- */
+@media (max-width: 1100px) {
+  #screen-data #data-detail { max-height: none; }
+}
+@media (max-width: 900px) {
+  #screen-data .report { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+}
+/* A phone: each row is a small card, the actions under it, and nothing scrolls sideways. */
+@media (max-width: 700px) {
+  #screen-data .filters { padding: 4px 16px 8px; }
+  #screen-data #data-detail { padding: 16px; }
+  #screen-data #data-table, #screen-data #data-table tbody { display: block; }
+  #screen-data #data-table thead { display: none; }
+  #screen-data #data-table tr { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; padding: 10px 12px; margin-bottom: 4px; border-radius: 12px; }
+  #screen-data #data-table td, #screen-data #data-table td:first-child, #screen-data #data-table td:last-child { padding: 0; border-radius: 0; background: none !important; }
+  #screen-data #data-table td:first-child, #screen-data #data-table td:last-child { flex-basis: 100%; }
+  #screen-data #data-table td:last-child { margin-top: 6px; }
+  #screen-data #data-table tbody tr.sel { background: var(--color-surface); }
+  #screen-data #data-table .acts { justify-content: flex-start; }
+}
