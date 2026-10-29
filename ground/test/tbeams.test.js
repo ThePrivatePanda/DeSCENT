@@ -295,3 +295,20 @@ test('nothing plugged in', async () => {
   assert.match(p.text('tb-list'), /Plugged in . 0 boards USB serial Nothing plugged in\./);
   assert.match(p.text('tb-sheet'), /Plug a T-Beam in\./);
 });
+
+test('the watch card is in index.html under the list, and the head sentence is whole', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'web', 'index.html'), 'utf8');
+  const pane = /<section id="screen-tbeams"[\s\S]*?<div id="tb-sheet"/.exec(html)[0];
+  assert.ok(pane.indexOf('id="tb-list"') < pane.indexOf('Which board is which?'), 'card under the list');
+  assert.ok(pane.indexOf('Which board is which?') < pane.indexOf('class="note tb-foot"'), 'card above the foot note');
+  assert.match(pane, /Unplug one board and plug it back in\. The app watches for it and opens its sheet so you can name it\./);
+  assert.match(pane, /<button id="tb-ident"[^>]*>Start watching<\/button>/);
+  assert.match(pane, /<button id="tb-ident-stop" hidden>Stop<\/button>/);
+  assert.doesNotMatch(pane, /pane-head/);
+
+  const { p, rx } = rig();
+  rx('rx1', 7);
+  p.parts.tbeams.show();
+  await p.settle();
+  assert.match(p.text('tb-sheet'), /The name is kept on the board\. Listen opens the port for 5 s and says what it heard\./);
+});

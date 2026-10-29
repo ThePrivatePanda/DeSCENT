@@ -1,9 +1,7 @@
 /* T-Beams. Only selectors under #screen-tbeams; a class another screen needs goes in style.css */
 
 /* ---------- the list ---------- */
-/* The head's buttons are moved under the list by tbeams.js; what is left of it is empty */
 #screen-tbeams .picklist { padding: 14px 12px 4px; }
-#screen-tbeams .picklist > .pane-head { display: none; }
 #screen-tbeams #tb-list { flex: 0 1 auto; padding: 0 0 8px; display: flex; flex-direction: column; gap: 4px; }
 #screen-tbeams .tb-listhead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 0 10px 8px; }
 #screen-tbeams .tb-card {

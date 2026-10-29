@@ -82,25 +82,6 @@
     render();
   }
 
-  // The card under the list. index.html keeps its two buttons in the pane head, so they
-  // are moved here once, and only the text beside them is painted.
-  const whichBox = (() => {
-    const go = $('tb-ident');
-    if (!go.closest || !go.closest('.pane-head')) return null;
-    const card = document.createElement('div');
-    card.className = 'card tb-which';
-    const text = document.createElement('div');
-    const acts = document.createElement('div');
-    acts.className = 'tb-whichacts';
-    acts.append(go, $('tb-ident-stop'));
-    card.append(text, acts);
-    const foot = document.createElement('p');
-    foot.className = 'note tb-foot';
-    foot.textContent = 'Opening a port can reset the board on it. Boards the app was told to leave alone stay shut until replugged.';
-    $('tb-list').after(card, foot);
-    return text;
-  })();
-
   function whichHtml() {
     const say = ident.found
       ? '<b>' + esc(ident.found) + '</b> is the board you replugged. Name it on its sheet.'
@@ -163,9 +144,9 @@
     const how = rx ? B.namedBy(rx.port, rx.r) : { by: 'port', id: '' };
     const shown = how.by === 'board' ? nameOf(b) : how.by === 'computer' ? (rx.port.name || b.name || '') : (b.name || '');
     const blank = how.id ? 'T-Beam ' + how.id : b.port;
-    const kept = how.by === 'board' ? 'name is on the board'
-      : how.by === 'computer' ? 'name kept on this computer'
-        : 'name kept for this USB adapter';
+    const kept = how.by === 'board' ? 'The name is kept on the board'
+      : how.by === 'computer' ? 'The name is kept on this computer'
+        : 'The name is kept for this USB adapter';
     const line = [rx ? (how.id ? 'Receiver ' + how.id : 'receiver id not announced yet') : '', b.port, usbOf(b),
       rx ? 'DeSCENT receiver' + (fw.onBoard === '—' ? '' : ' ' + fw.onBoard) : '',
       b.serial ? 'serial ' + b.serial : '', rx ? '' : b.label].filter(Boolean).join(' · ');
@@ -312,7 +293,7 @@
     $('tb-ident').disabled = ident.watching;
     $('tb-ident').textContent = ident.watching ? 'Waiting for a replug' : 'Start watching';
     $('tb-ident-stop').hidden = !ident.watching;
-    if (whichBox) paint(whichBox, whichHtml());
+    paint($('tb-which'), whichHtml());
     paint($('tb-list'), listHtml());
     paint($('tb-sheet'), sheetHtml());
   }
