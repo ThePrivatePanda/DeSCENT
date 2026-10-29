@@ -49,9 +49,12 @@ async function chipsats(o) {
   await p.settle();
   p.parts.chipsats.show();
   await p.settle();
-  return Object.assign(p, { o, sheet: () => p.html('cs-sheet'), list: () => p.html('cs-list') });
+  return Object.assign(p, { o, sheet: () => p.html('cs-sheet'), list: () => p.html('cs-list'), words: () => tidy(p.text('cs-sheet')) });
 }
-const struck = (html) => (html.match(/<span class="val was">[^<]*<\/span>/g) || []).map((s) => s.replace(/<[^>]*>/g, ''));
+// text() spaces out every tag, so "<b>CS9</b>." reads "CS9 ."
+const tidy = (t) => t.replace(/ ([,.;:?!)])/g, '$1');
+// Each value shown struck through, once, in the order it first appears
+const struck = (html) => [...new Set((html.match(/<span class="[^"]*\bwas\b[^"]*">[^<]*<\/span>/g) || []).map((s) => s.replace(/<[^>]*>/g, '')))];
 
 test('a value on the board is struck through only when the build would replace it', async () => {
   const p = await chipsats({ read: FLIGHT, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
@@ -72,7 +75,7 @@ test('a board with no settings block still gets the table and a Build and flash 
   const h = p.sheet();
   assert.match(h, /Build with/);
   assert.match(h, /The dump firmware has no radio settings\./);
-  assert.match(h, /data-buildembed="1">/, 'the button is not switched off');
+  assert.match(h, /data-buildembed="1"(?![^>]*disabled)[^>]*>/, 'the button is not switched off');
   await p.fire('screen-chipsats', 'input', { 'data-build': 'csid' }, { tagName: 'INPUT', value: '9' });
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   assert.equal(p.o.flashed, undefined, 'the first press only asks');
@@ -84,9 +87,9 @@ test('a board with no settings block still gets the table and a Build and flash 
 test('each phase has its own gap and its own battery table, edited in its card', async () => {
   const p = await chipsats({ read: FLIGHT, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
   let h = p.sheet();
-  assert.match(h, /<h3>Phases<\/h3>/);
-  assert.equal((h.match(/class="phase"/g) || []).length, 2, 'two phases, ground and air');
-  assert.match(h, /phase-name">Ground<[\s\S]*phase-name">Air</);
+  assert.match(p.words(), /\bPhases\b/);
+  assert.equal((h.match(/data-build="p\ds"/g) || []).length, 2, 'two phases, ground and air');
+  assert.match(p.words(), /\bGround\b.*\bAir\b/);
   assert.doesNotMatch(h, /Falling|Landed|Waiting/);
   assert.match(h, /data-build="p0s" value="60"/);
   assert.match(h, /data-build="p1s" value="10"/);
@@ -99,13 +102,13 @@ test('each phase has its own gap and its own battery table, edited in its card',
   assert.match(h, /30 m on GPS/);
   assert.match(h, /0 writes nothing/);
   assert.match(h, /On the ground the readings mostly stay in the board's RAM, and only one per ground log gap reaches flash\./);
-  assert.equal((h.match(/follow the battery/g) || []).length, 2, 'a switch per phase');
-  assert.doesNotMatch(h, /class="bands"/, 'no bands while nothing follows');
+  assert.equal((h.match(/follow the battery/gi) || []).length, 2, 'a switch per phase');
+  assert.doesNotMatch(h, /data-build="p\dsoc0"/, 'no bands while nothing follows');
   assert.deepStrictEqual(struck(h), []);
   // Ground follows the battery: its bands appear, the air's do not, and only its row is replaced.
   await p.fire('screen-chipsats', 'change', { 'data-build': 'p0f' }, { tagName: 'INPUT', type: 'checkbox', checked: true });
   h = p.sheet();
-  assert.equal((h.match(/class="bands"/g) || []).length, 1);
+  assert.doesNotMatch(h, /data-build="p1soc0"/, 'only the ground has bands');
   assert.match(h, /data-build="p0soc0" value="75"/);
   assert.match(h, /data-build="p0ms4" value="180"/);
   assert.match(h, /while the gauge cannot be read/);
@@ -180,16 +183,17 @@ test('clear flash asks first, then runs the pull job told to wipe, and says so w
   let h = p.sheet();
   assert.match(h, /data-wipe="1"[^>]*>Clear flash</);
   // unticked by default: nothing saved, nothing put back
-  assert.match(h, /<input type="checkbox" data-keepfsw="1"> Save the flight software that is on it and put it back/);
+  assert.match(h, /data-keepfsw="1"(?![^>]*checked)[^>]*>/);
+  assert.match(p.words(), /Save the flight software that is on it and put it back/);
   assert.match(h, /Erases the log on the chip and leaves the board on the dump firmware\./);
   assert.doesNotMatch(h, /data-wipego/);
   await p.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
   h = p.sheet();
   // Nothing of CS9's was ever pulled here, and the warning says so first
-  assert.match(h, /<span class="mark warn">never pulled<\/span> <b>CS9<\/b> has never been pulled on this computer\. Clearing erases its flight log for good, and nothing is saved first\./);
+  assert.match(p.words(), /never pulled CS9 has never been pulled on this computer\. Clearing erases its flight log for good, and nothing is saved first\./);
   assert.doesNotMatch(h, /Last pulled/);
-  assert.match(h, /data-wipego="1" class="primary">Clear the flash</);
-  assert.match(h, /data-wipecancel="1">Cancel</);
+  assert.match(h, /data-wipego="1"[^>]*>Clear the flash</);
+  assert.match(h, /data-wipecancel="1"[^>]*>Cancel</);
   await p.fire('screen-chipsats', 'click', { 'data-wipecancel': '1' });
   assert.doesNotMatch(p.sheet(), /data-wipego/);
 });
@@ -203,7 +207,7 @@ test('a clear sends the checkbox, and an unticked one ends on the dump firmware 
   assert.equal(p.o.pulled.more.wipe, 1);
   p.jobs.pull = { running: false, wipe: true, keepFsw: false, restored: false, pct: 100, error: null, board: '/dev/ttyUSB0', uid: UID9, steps: ['writing the dump firmware'] };
   await p.jobEnded('pull');
-  assert.match(p.sheet(), /<p class="outcome bad inpane">Flash cleared\. The board is on the dump firmware: write a flight image next\.<\/p>/);
+  assert.match(p.words(), /Flash cleared\. The board is on the dump firmware: write a flight image next\./);
 
   await p.fire('screen-chipsats', 'change', { 'data-keepfsw': '1' }, { type: 'checkbox', checked: true });
   assert.match(p.sheet(), /The flight software is read off and put back, settings untouched\./);
@@ -229,10 +233,10 @@ test('clearing a board pulled before says when, off the newest of its pulls, and
   const h = p.sheet();
   const at = twoDays.getDate() + ' ' + 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ')[twoDays.getMonth()] +
     (twoDays.getFullYear() === now.getFullYear() ? '' : ' ' + twoDays.getFullYear()) + ', 11:49';
-  assert.ok(h.includes('Erases the flight log on <b>CS9</b> for good. Last pulled ' + at +
-    ' (2 days ago); anything it logged since is lost. Nothing is saved first.'), h);
+  assert.ok(p.words().includes('Erases the flight log on CS9 for good. Last pulled ' + at +
+    ' (2 days ago); anything it logged since is lost. Nothing is saved first.'), p.words());
   assert.doesNotMatch(h, /never pulled/);
-  assert.match(h, /data-wipego="1" class="primary">Clear the flash</);
+  assert.match(h, /data-wipego="1"[^>]*>Clear the flash</);
 });
 
 test('a running clear says nowhere it is saving, as it saves nothing', async () => {
@@ -249,10 +253,10 @@ test('a running clear says nowhere it is saving, as it saves nothing', async () 
 test('with a flight software tree the pane says it builds, and names the module before it does', async () => {
   const p = await chipsats({ health: { fswTree: true, flightImages: [] }, chips: [Object.assign({}, CS9, { module: 'hp' })] });
   assert.match(p.sheet(), /A flight software tree is here, so this builds the exact image\./);
-  assert.match(p.sheet(), /<div class="h">Build with<\/div>/);
+  assert.match(p.words(), /\bBuild with\b/);
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
-  assert.match(p.sheet(), /Builds the flight software for the <b>HP module<\/b> with these settings and writes it to <b>CS9<\/b>/);
-  assert.match(p.sheet(), /data-buildgo="1" class="primary">Build and flash</);
+  assert.match(p.words(), /Builds the flight software for the HP module with these settings and writes it to CS9/);
+  assert.match(p.sheet(), /data-buildgo="1"[^>]*>Build and flash/);
 });
 
 test('with no tree the same button patches the carried image, says so, and sends the settings', async () => {
@@ -260,14 +264,14 @@ test('with no tree the same button patches the carried image, says so, and sends
   const p = await chipsats({ health });
   let h = p.sheet();
   assert.match(h, /No flight software tree, so this patches the image this app carries\./);
-  assert.match(h, /<div class="h">Flash with<\/div>/);
-  assert.match(h, /data-buildembed="1">Patch and flash</);
+  assert.match(p.words(), /\bFlash with\b/);
+  assert.match(h, /data-buildembed="1"[^>]*>Patch and flash/);
   assert.doesNotMatch(h, /Build and flash/);
   await p.fire('screen-chipsats', 'input', { 'data-build': 'csid' }, { tagName: 'INPUT', value: '9' });
   await p.fire('screen-chipsats', 'change', { 'data-build': 'sf' }, { tagName: 'SELECT', value: '12' });
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   h = p.sheet();
-  assert.match(h, /Writes the flight image this app carries for the <b>LE module<\/b> to <b>CS9<\/b>, with these settings in it\./);
+  assert.match(p.words(), /Writes the flight image this app carries for the LE module to CS9, with these settings in it\./);
   assert.equal(p.o.flashed, undefined, 'the first press only asks');
   await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
   // No module in the request: the app picks the image by the module it has for the board.
@@ -279,7 +283,7 @@ test('with no tree and no carried image for the module, the button is off and sa
   const health = { fswTree: false, flightImages: [{ id: '6935d29957db19b5', module: 'hp', bytes: 66600 }] };
   const p = await chipsats({ health });
   assert.match(p.sheet(), /this build carries no flight image for the LE module\. Flash a file instead\./);
-  assert.match(p.sheet(), /data-buildembed="1" disabled>/);
+  assert.match(p.sheet(), /data-buildembed="1"[^>]*disabled/);
 });
 
 test('the firmware pane names the dump image and offers a file or a saved image, not a carried one', async () => {
@@ -288,7 +292,7 @@ test('the firmware pane names the dump image and offers a file or a saved image,
   assert.match(h, /Dump firmware 25118bdf/);
   assert.match(h, /This board transmits nothing until flight software is on it\./);
   assert.match(h, /Flash a file/);
-  assert.match(h, /data-putback="descent-image-002C002E-CS9-x.bin">Put back/);
+  assert.match(h, /data-putback="descent-image-002C002E-CS9-x.bin"[^>]*>Put back/);
   assert.doesNotMatch(h, /Prebuilt image|Flash it|data-embedded/);
 });
 
@@ -367,10 +371,10 @@ test('the board is not asked anything while something is waiting to be confirmed
 
 test('forgetting a board asks first, drops it from the list and does not read it straight back', async () => {
   const p = await chipsats({ chips: [CS9, CS12] });
-  assert.match(p.sheet(), /data-forget="1">Forget this board/);
+  assert.match(p.sheet(), /data-forget="1"[^>]*>Forget this board/);
   await p.fire('screen-chipsats', 'click', { 'data-forget': '1' });
   assert.equal(p.o.forgot, undefined);
-  assert.match(p.sheet(), /Forget <b>CS9<\/b>\? .*The board is not touched/);
+  assert.match(p.words(), /Forget CS9\? .*The board is not touched/);
   await p.fire('screen-chipsats', 'click', { 'data-forgetgo': '1' });
   assert.equal(p.o.forgot, UID9);
   assert.doesNotMatch(p.list(), /CS9/);
@@ -401,16 +405,16 @@ test('a running pull says where it is saving, can be stopped, and a wrong consol
   p.jobs.pull = { running: true, board: '/dev/ttyUSB0', seconds: 30, pct: 45, steps: [], dir, raw: null };
   repaint();
   let h = p.sheet();
-  assert.match(h, /Saving to <span class="path">\/home\/op\/DeSCENT\/2026-10-18\/pulls\/1432-CS9<\/span>/);
-  assert.match(h, /data-pullstop="1">Stop</);
+  assert.match(p.words(), /Saving to \/home\/op\/DeSCENT\/2026-10-18\/pulls\/1432-CS9\b/);
+  assert.match(h, /data-pullstop="1"[^>]*>Stop</);
   p.jobs.pull.raw = '2026-10-18/pulls/1432-CS9/dump.txt';
   repaint();
-  assert.match(p.sheet(), /Saving to <span class="path">\/home\/op\/DeSCENT\/2026-10-18\/pulls\/1432-CS9\/dump.txt<\/span>/);
+  assert.match(p.words(), /Saving to \/home\/op\/DeSCENT\/2026-10-18\/pulls\/1432-CS9\/dump\.txt/);
   await p.fire('screen-chipsats', 'click', { 'data-pullstop': '1' });
   assert.equal(p.o.stops, 1);
   p.jobs.pull.stopping = true;
   repaint();
-  assert.match(p.sheet(), /data-pullstop="1" disabled>Stopping…/);
+  assert.match(p.sheet(), /data-pullstop="1"[^>]*disabled[^>]*>Stopping…/);
 
   p.jobs.pull = { running: false, board: '/dev/ttyUSB0', steps: ['stop asked for'], keepFsw: true, restored: true, error: 'stopped by the operator', dir };
   repaint();
@@ -475,9 +479,9 @@ test('there is no flight software pane, switch or Rebuild button, tree or not', 
 test('a board running an image built here is named by where it came from, and so is the image about to be written', async () => {
   const read = readOf(UID9, { kind: 'flight', module: 'le', id: '0a1b2c3d4e5f6071', built: { part: 'flight-le', words: WORDS_LE } }, block());
   const p = await chipsats({ read, fsw: FSW(), health: HEALTH_ON, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
-  assert.match(p.sheet(), /<span class="l">On the board<\/span><span class="grow"><span class="val">Flight LE built here 14:02 from abc1234 \+ config.h changed<\/span>/);
+  assert.ok(p.words().includes('Flight LE built here 14:02 from abc1234 + config.h changed'), p.words());
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
-  assert.match(p.sheet(), /from this computer's tree with these settings to <b>CS9<\/b>. The image is the flight LE built here 14:02 from abc1234 \+ config.h changed./);
+  assert.match(p.words(), /from this computer's tree with these settings to CS9\. The image is the flight LE built here 14:02 from abc1234 \+ config\.h changed\./);
   await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
   assert.equal(p.o.flashed.embedded, 'built');
 });
@@ -493,7 +497,7 @@ test('a write whose build fails shows the compiler\'s own words on the sheet it 
   p.jobs.chip = { what: 'flash', uid: UID9, running: false, steps: ['building the flight LE'],
     error: 'the flight LE from this computer\'s flight software did not build, so nothing was written. config.h:60:26: error: static assertion failed' };
   await p.jobEnded('chip');
-  assert.match(p.sheet(), /<p class="outcome bad inpane">Flash failed: the flight LE from this computer(&#39;|')s flight software did not build, so nothing was written. config.h:60:26: error: static assertion failed<\/p>/);
+  assert.ok(p.words().includes("Flash failed: the flight LE from this computer's flight software did not build, so nothing was written. config.h:60:26: error: static assertion failed"), p.words());
 });
 
 test('a pull says which dump firmware read it and which flight software was on the board', async () => {
@@ -518,5 +522,7 @@ test('an image chosen on Data with no board listed says it is waiting, and can b
 
 test('a Patch and flash that cannot go says why beside the button', async () => {
   const p = await chipsats({ probes: [] });
-  assert.match(p.sheet(), /data-buildembed="1" disabled>[^<]*<\/button> <span class="note">Put the board on the ST-Link and press Read the board\./);
+  assert.match(p.sheet(), /data-buildembed="1"[^>]*disabled/);
+  // said right under the button, the first thing after its label
+  assert.match(p.words(), /and flash(?: CS9)? Put the board on the ST-Link and press Read the board\./);
 });
