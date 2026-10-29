@@ -199,16 +199,16 @@
       } else if (r.unread) {
         lines = '<small>' + mark('off', 'not read') + '</small><small>' + esc(r.probe.kind + ' ' + r.probe.serial) + '</small>';
       } else {
-        lines = '<small>' + (r.module ? '<span class="val">' + B.MODULE[r.module] + '</span>' : mark('bad', 'module never set')) +
-            (r.firmware === 'dump' ? ' ' + mark('bad', 'dump firmware') : '') +
-            (r.firmware === 'bench' ? ' ' + mark('bad', 'sensor bench') : '') + '</small>' +
-          '<small>' + (r.onProbe ? mark('good', 'on the ST-Link')
+        lines = '<small>' + (r.module ? '<span class="val">' + B.MODULE[r.module] + '</span>' : mark('warn', 'module never set')) +
+            (r.firmware === 'dump' ? ' ' + mark('warn', 'dump firmware') : '') +
+            (r.firmware === 'bench' ? ' ' + mark('warn', 'sensor bench') : '') + '</small>' +
+          '<small>' + (r.onProbe ? mark('warn', 'on the ST-Link')
             : (r.lastSeen ? 'last on the probe ' + esc(when(r.lastSeen)) : 'not read yet')) + '</small>';
       }
       const job = (jobs.pull && jobs.pull.running && pullOwner() === r.uid && r.uid) ? mark('warn', 'pulling')
         : (jobs.chip && jobs.chip.running && chipOwner() === r.uid && r.uid) ? mark('warn', 'flashing') : '';
       return '<button class="item' + (r.id === state.sel ? ' on' : '') + '" data-pick="' + esc(r.id) + '">' +
-        '<b>' + esc(titleOf(r)) + '</b>' + (unconfigured(r) ? '<small>' + mark('warn', 'unconfigured') + '</small>' : '') + lines + (job ? '<small>' + job + '</small>' : '') + '</button>';
+        '<b>' + esc(titleOf(r)) + '</b>' + (unconfigured(r) ? '<small>' + mark('off', 'unconfigured') + '</small>' : '') + lines + (job ? '<small>' + job + '</small>' : '') + '</button>';
     }).join('');
   }
 
@@ -236,13 +236,13 @@
       ? '<button data-read="' + esc(probe.serial) + '"' + (busy() ? ' disabled' : '') + ' title="' + esc(READ_WARNING) + '">' +
         (state.reading ? 'Reading the board' : r.onProbe ? 'Read again' : 'Read the board') + '</button>'
       : '';
-    const where = r.onProbe ? mark('good', 'on the ST-Link') + '<span class="note">' + esc((r.probe.kind || '') + ' ' + (r.probe.serial || '')) + '</span>'
+    const where = r.onProbe ? mark('warn', 'on the ST-Link') + '<span class="note">' + esc((r.probe.kind || '') + ' ' + (r.probe.serial || '')) + '</span>'
       : mark('off', r.lastSeen ? 'last on the probe ' + when(r.lastSeen) : 'not read yet');
     const running = B.firmwareWords(r.fw, r.module);
     const alarms = [
-      running.head ? mark('bad', running.head) +
+      running.head ? mark('warn', running.head) +
         (r.onProbe && !state.stale ? '' : '<span class="note">when it was last read</span>') : '',
-      r.module ? '' : mark('bad', 'module never set'),
+      r.module ? '' : mark('warn', 'module never set'),
     ].filter(Boolean).join('');
     // Forgetting drops the app's record of the board and nothing else.
     const forgetting = state.pick && state.pick.kind === 'forget' && state.pickFor === r.uid
@@ -542,7 +542,7 @@ async function buildAndFlash() {
     const was = fw.value ? ' ' + fw.value.charAt(0).toUpperCase() + fw.value.slice(1) + ' when last read.' : '';
     const on = !r.onProbe ? '<span class="note">Not on the ST-Link.' + esc(was) + '</span>'
       : state.stale ? '<span class="note">Changed by the ' + esc(state.stale) + '. Read again.</span>'
-        : (fw.bad ? mark('bad', fw.value) : '<span class="val">' + esc(fw.value || 'Not read') + '</span>') +
+        : (fw.bad ? mark('warn', fw.value) : '<span class="val">' + esc(fw.value || 'Not read') + '</span>') +
           (fw.note ? '<br><span class="note">' + esc(fw.note) + '</span>' : '') +
           (fw.built && fw.value.toLowerCase() !== fw.built.toLowerCase() ? '<br><span class="note">' + esc(fw.built.charAt(0).toUpperCase() + fw.built.slice(1)) + '</span>' : '');
     const wrongModule = fw.mismatch && !(r.onProbe && state.stale) ? '<p class="outcome bad inpane">' + esc(fw.mismatch) + '</p>' : '';
@@ -818,7 +818,7 @@ async function buildAndFlash() {
             ? 'Erases the flight log on <b>' + esc(nameOf(r)) + '</b> for good. Last pulled ' +
               esc(D.dayTime(new Date(pulls[0].when * 1000), new Date())) + ' (' + daysAgo(new Date(pulls[0].when * 1000), new Date()) +
               '); anything it logged since is lost. Nothing is saved first.'
-            : mark('bad', 'never pulled') + ' <b>' + esc(nameOf(r)) + '</b> has never been pulled on this computer. ' +
+            : mark('warn', 'never pulled') + ' <b>' + esc(nameOf(r)) + '</b> has never been pulled on this computer. ' +
               'Clearing erases its flight log for good, and nothing is saved first.') + '</span>' +
             '<button data-wipego="1" class="primary">Clear the flash</button><button data-wipecancel="1">Cancel</button></div>'
           : '') +
