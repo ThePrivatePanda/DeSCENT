@@ -145,3 +145,65 @@ test('the fake page draws a mark the way screens.js does', () => {
     assert.strictEqual(fake(cls, word), real(cls, word));
   }
 });
+
+// sw.js run in a vm with a fake network, cache and timer; no browser needed.
+function worker(net, cached) {
+  const vm = require('node:vm');
+  const handlers = {};
+  const timers = [];
+  const put = [];
+  const sandbox = {
+    URL, Promise, location: { origin: 'https://x.test' },
+    self: { addEventListener: (n, f) => { handlers[n] = f; } },
+    fetch: net,
+    setTimeout: (f, ms, v) => { timers.push({ f: () => f(v), ms }); },
+    caches: { open: async () => ({ put: async (req, res) => { put.push(res); } }), match: async () => cached },
+  };
+  vm.runInNewContext(sw, sandbox);
+  const ask = (method, url) => {
+    let out; const e = { request: { method, url }, respondWith: (p) => { out = p; } };
+    handlers.fetch(e);
+    return out;
+  };
+  return { ask, timers, put };
+}
+const later = () => new Promise((r) => setImmediate(r));
+
+test('sw.js: a network that answers is served and cached', async () => {
+  const res = { clone: () => 'copy', body: 'net' };
+  const w = worker(async () => res, 'old');
+  assert.strictEqual(await w.ask('GET', 'https://x.test/index.html'), res);
+  await later();
+  assert.deepStrictEqual(w.put, ['copy']);
+});
+
+test('sw.js: after 3 s the cached copy is served, and the late network is still cached', async () => {
+  let answer;
+  const res = { clone: () => 'copy' };
+  const w = worker(() => new Promise((r) => { answer = r; }), 'old');
+  const p = w.ask('GET', 'https://x.test/index.html');
+  assert.strictEqual(w.timers[0].ms, 3000);
+  w.timers[0].f();
+  assert.strictEqual(await p, 'old');
+  answer(res);
+  await later();
+  assert.deepStrictEqual(w.put, ['copy']);
+});
+
+test('sw.js: a failed fetch serves the cache; with no cache the network error stands', async () => {
+  assert.strictEqual(await worker(async () => { throw new Error('offline'); }, 'old').ask('GET', 'https://x.test/'), 'old');
+  await assert.rejects(worker(async () => { throw new Error('offline'); }, undefined).ask('GET', 'https://x.test/'), /offline/);
+});
+
+test('sw.js: a stalled network with nothing cached waits for the network; other requests are left alone', async () => {
+  let answer;
+  const res = { clone: () => 'copy' };
+  const w = worker(() => new Promise((r) => { answer = r; }), undefined);
+  const p = w.ask('GET', 'https://x.test/index.html');
+  w.timers[0].f();
+  await later();
+  answer(res);
+  assert.strictEqual(await p, res);
+  assert.strictEqual(w.ask('POST', 'https://x.test/api'), undefined);
+  assert.strictEqual(w.ask('GET', 'https://elsewhere.test/a.js'), undefined);
+});

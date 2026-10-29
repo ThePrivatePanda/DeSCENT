@@ -1,5 +1,6 @@
 // Offline copy of the hosted dashboard. Network first so updates arrive as
-// soon as there is a connection; the cache is used only when offline.
+// soon as there is a connection; the cache is used when offline or when the
+// network has not answered in 3 s.
 const CACHE = 'descent-ground-v15';
 const FILES = [
   './', 'index.html', 'css/style.css', 'css/live.css', 'css/chipsats.css', 'css/tbeams.css', 'css/data.css',
@@ -24,13 +25,16 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
+  // A stalled hotspot on the field tablet never fails, it just hangs, so the cache gets a turn after 3 s.
+  const late = fetch(e.request).then((res) => {
+    const copy = res.clone();
+    caches.open(CACHE).then((c) => c.put(e.request, copy));
+    return res;
+  });
+  const timer = new Promise((done) => setTimeout(done, 3000, null));
   e.respondWith(
-    fetch(e.request)
-      .then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy));
-        return res;
-      })
-      .catch(() => caches.match(e.request, { ignoreSearch: true })),
+    Promise.race([late, timer])
+      .catch(() => null)
+      .then((res) => res || caches.match(e.request, { ignoreSearch: true }).then((hit) => hit || late)),
   );
 });

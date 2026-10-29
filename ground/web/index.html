@@ -169,13 +169,18 @@
 
 <section id="screen-tbeams" class="screen" hidden>
   <div class="pane picklist">
-    <div class="pane-head">
-      <span class="kicker">T-Beams · receivers</span>
-      <span class="spacer"></span>
-      <button id="tb-ident" class="ghost" title="Find a board's port by unplugging it and plugging it back in">Which board is which?</button>
-      <button id="tb-ident-stop" hidden>Stop</button>
-    </div>
     <div id="tb-list" class="scroll"></div>
+    <div class="card tb-which">
+      <div id="tb-which">
+        <h3>Which board is which?</h3>
+        <p>Unplug one board and plug it back in. The app watches for it and opens its sheet so you can name it.</p>
+      </div>
+      <div class="tb-whichacts">
+        <button id="tb-ident" class="ghost" title="Find a board's port by unplugging it and plugging it back in">Start watching</button>
+        <button id="tb-ident-stop" hidden>Stop</button>
+      </div>
+    </div>
+    <p class="note tb-foot">Opening a port can reset the board on it. Boards the app was told to leave alone stay shut until replugged.</p>
   </div>
   <div id="tb-sheet" class="sheet"></div>
 </section>
