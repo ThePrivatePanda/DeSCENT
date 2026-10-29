@@ -178,6 +178,30 @@ pub fn keep_only_latest(data: &Path, keep: &Path) -> Vec<PathBuf> {
     gone
 }
 
+// Firmware read off a board, written so that only a whole one ever has the name. The
+// pieces go to <name>.part and are renamed at the end: an app killed half way through
+// leaves nothing under a name that says it is an image, and a short one is removed,
+// because somebody would write it back.
+pub fn save_whole(path: &Path, total: u64, fill: impl FnOnce(&mut std::fs::File) -> Result<(), String>) -> Result<(), String> {
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let done = (|| {
+        let mut out = std::fs::File::create(&part).map_err(|e| format!("cannot write {}: {}", part.display(), e))?;
+        fill(&mut out)?;
+        drop(out);
+        let written = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        if written < total {
+            return Err(format!("the saved firmware is short: {} of {} bytes. Nothing was erased.", written, total));
+        }
+        std::fs::rename(&part, path).map_err(|e| format!("could not move {} to {}: {}", part.display(), path.display(), e))
+    })();
+    if done.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    done
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +301,31 @@ mod tests {
         if let Ok(flight) = crate::flight::carried().choose(Some("le")) {
             assert!(!looks_like_dump(flight.bytes));
         }
+    }
+
+    #[test]
+    fn a_save_cut_short_leaves_no_image_behind() {
+        let dir = std::env::temp_dir().join(format!("dg-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("1101-board9-0027003A.bin");
+        use std::io::Write;
+        // While it is being read the name is not there yet, so a crash leaves no image.
+        let e = save_whole(&path, 8, |out| {
+            out.write_all(b"abcd").unwrap();
+            assert!(!path.exists(), "half an image under its real name");
+            Err(String::from("probe gone"))
+        })
+        .unwrap_err();
+        assert_eq!(e, "probe gone");
+        assert!(!path.exists());
+        let short = save_whole(&path, 8, |out| out.write_all(b"abcd").map_err(|e| e.to_string())).unwrap_err();
+        assert!(short.contains("short: 4 of 8"), "{}", short);
+        assert!(!path.exists());
+        save_whole(&path, 8, |out| out.write_all(b"abcdefgh").map_err(|e| e.to_string())).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcdefgh");
+        // and no .part is left beside it
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

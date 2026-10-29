@@ -20,7 +20,9 @@ were written over.
 Saves are filed by local day and kind under the data folder: `2026-10-18/pulls/1432-board9/`,
 `2026-10-18/images/`, `2026-10-18/logs/`, and `receiver-images/` for a T-Beam's firmware, which is
 never offered for a ChipSat. Saves from before that sit flat under `descent-…` names and are still
-listed.
+listed. Firmware read off a board only gets its `.bin` name once all of it has arrived. A save cut
+short by an error is deleted, and one cut short by the app quitting stays as a `.bin.part` that
+nothing lists or offers.
 
 ## Recording
 
@@ -52,6 +54,7 @@ for a boot that never got GPS time.
 
 The **Clear** box at the bottom left holds one tick per thing: all units, only the unit shown,
 receiver counts, hidden units, and starting a new log file. Tick what should go and press Clear.
+With only the unit shown ticked and no unit picked, no unit is cleared.
 Clearing receiver counts does not disconnect anything, and nothing already written to a log file is
 touched unless you ask for a new one.
 
@@ -114,7 +117,8 @@ RF warning never fires: an absence, not a fault.
 A ChipSat's counter starts again from 0 every time it reboots, so a reflash would otherwise mix old
 data into new. Each run is kept separately: the one transmitting now keeps the plain CSID, and
 earlier runs become `64a`, `64b` and so on, oldest first. The fleet list shows one row per board
-with a `+3` button to unfold them, so a board that restarted thirty times is still one row.
+with a `3 earlier` button to unfold them (`hide earlier` folds them again) and `join all` beside it,
+so a board that restarted thirty times is still one row.
 
 Runs are managed in the **Runs** tab of the history panel, beside Overview and IMU: every run of the
 selected board, what it holds, and a button to join it into the next one or throw it away. The fleet
@@ -173,7 +177,7 @@ This is the Live screen, and Replay is the same screen over a log.
 | `web/js/tbeams.js` | The T-Beams screen. |
 | `web/js/chipsats.js` | The ChipSats screen. |
 | `web/js/datascreen.js` | The Data screen. |
-| `web/js/bench.js`, `web/js/benchscreen.js` | Reading the sensor bench's console, and the Bench screen. |
+| `web/js/bench.js`, `web/js/benchpane.js` | Reading the sensor bench's console, and its pane on a ChipSat's sheet. |
 | `web/js/boardmodel.js`, `web/js/datamodel.js` | What those screens say, as plain functions with tests. |
 | `web/js/serial_native.js` | Talks to the app when the page came from it. |
 | `web/sw.js` | Offline copy for the hosted site. |

@@ -15,20 +15,21 @@
 //   19      spreading factor, 5..12
 //   20      target dBm, signed
 //   21      set by, 1 = the build, 2 = a tool
-//   22..138 one rate per flight phase, 29 bytes each, waiting, rising, falling, landed:
+//   22..138 one rate per slot, 29 bytes each, waiting, rising, falling, landed:
 //             +0  fixed gap after a packet, ms
 //             +4  1 = the gap follows the battery table below, 0 = the fixed gap always
 //             +5  four state-of-charge thresholds in percent, falling, each 1..99
 //             +9  five gaps in ms, one per band: at or above each threshold, then below them all
 //           A phase that follows the battery uses its fixed gap while the gauge cannot be read.
-//   138..154 the gap between flash log records in ms, one per phase in the same order
-//   154..158 the same while no altitude source is live (barometer and GPS both dead),
-//            whatever the phase. 0 is a record per IMU reading in the air and nothing at all on
-//            the ground; 1 to 19 ms the firmware refuses
+//   138..154 the gap between flash log records in ms, one per slot in the same order.
+//            0 is a record per IMU reading in the air and nothing at all on the ground;
+//            1 to 19 ms the firmware refuses
+//   154..158 the gap while no altitude source is live. Unused since 2026-10-22, but the
+//            firmware still turns a block down over it, so it is still checked here
 //   158..160 CRC16 over 0..158, low byte first, the same way dump.rs reads a slot's
+// Since 2026-10-22 the board only has ground and air, slots 0 and 1. The page writes ground
+// into waiting and landed and air into rising and falling, so older firmware still works.
 // Layout 2 (2026-10) was the same with 138..158 reserved and zero: read, shown as a block
-// Since 2026-10-22 the board only has ground and air. The page writes ground into waiting and
-// landed and air into rising and falling, so older firmware still works
 // with no log gaps, and rewritten as layout 3 when patched.
 // Layout 1 was 32 bytes: the same through byte 22, one gap in ms at 22, reserved to 30,
 // CRC at 30. Boards flashed before the phases still carry it, so it is read, and shown
@@ -57,6 +58,10 @@ const LOG_BLIND_AT: usize = 154;
 // The firmware refuses a log gap under this: the sensors make nothing faster.
 pub const LOG_MIN_MS: u32 = 20;
 pub const PHASE_NAMES: [&str; PHASES] = ["waiting", "rising", "falling", "landed"];
+// What messages call them. The firmware reads slot 0 on the ground and 1 in the air since
+// 2026-10-22, and the page fills 3 like 0 and 2 like 1 for older firmware; PHASE_NAMES is
+// only what radio.json still calls them
+pub const PHASE_WORDS: [&str; PHASES] = ["ground", "air", "air (falling slot)", "ground (landed slot)"];
 
 // Said to the operator as it is. The second half is the part that matters at a bench:
 // the board still transmits, with what its build gave it and not with what was asked.
@@ -198,17 +203,17 @@ fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
-fn decode_rate(b: &[u8], phase: usize) -> Result<Rate, String> {
+fn decode_rate(b: &[u8], layout: u8, phase: usize) -> Result<Rate, String> {
     let r = &b[RATES_AT + RATE_BYTES * phase..RATES_AT + RATE_BYTES * (phase + 1)];
     let follow = match r[4] {
         0 => false,
         1 => true,
-        v => return Err(odd(2, &format!("{} battery flag", PHASE_NAMES[phase]), v)),
+        v => return Err(odd(layout, &format!("{} battery flag", PHASE_WORDS[phase]), v)),
     };
     let mut percent = [0u8; BANDS - 1];
     percent.copy_from_slice(&r[5..9]);
     if let Some(t) = table_trouble(&percent) {
-        return Err(odd(2, &format!("for {}", PHASE_NAMES[phase]), t));
+        return Err(odd(layout, &format!("for {}", PHASE_WORDS[phase]), t));
     }
     let mut interval_ms = [0u32; BANDS];
     for (i, v) in interval_ms.iter_mut().enumerate() {
@@ -229,13 +234,13 @@ pub fn log_trouble(ms: u32) -> Option<String> {
 // Layouts 2 and 3: the same rates, and layout 3 has the log gaps where 2 kept zeros.
 fn decode_v2(b: &[u8], layout: u8) -> Result<Found, String> {
     let (csid, module, sf, dbm, set_by) = decode_head(b, layout)?;
-    let rates = [decode_rate(b, 0)?, decode_rate(b, 1)?, decode_rate(b, 2)?, decode_rate(b, 3)?];
+    let rates = [decode_rate(b, layout, 0)?, decode_rate(b, layout, 1)?, decode_rate(b, layout, 2)?, decode_rate(b, layout, 3)?];
     let (logs, log_blind_ms, reserved_clear) = if layout == 3 {
         let mut logs = [0u32; PHASES];
         for (p, v) in logs.iter_mut().enumerate() {
             *v = u32_at(b, LOGS_AT + 4 * p);
             if let Some(t) = log_trouble(*v) {
-                return Err(odd(3, &format!("for {}", PHASE_NAMES[p]), t));
+                return Err(odd(3, &format!("for {}", PHASE_WORDS[p]), t));
             }
         }
         let blind = u32_at(b, LOG_BLIND_AT);
@@ -318,10 +323,10 @@ pub fn patch(image: &[u8], at: usize, asked: &Asked) -> Result<Vec<u8>, String> 
     }
     for (p, rate) in asked.rates.iter().enumerate() {
         if let Some(t) = table_trouble(&rate.percent) {
-            return Err(format!("not written: for {}, {}", PHASE_NAMES[p], t));
+            return Err(format!("not written: for {}, {}", PHASE_WORDS[p], t));
         }
         if let Some(t) = log_trouble(asked.logs[p]) {
-            return Err(format!("not written: for {}, {}", PHASE_NAMES[p], t));
+            return Err(format!("not written: for {}, {}", PHASE_WORDS[p], t));
         }
     }
     if let Some(t) = log_trouble(asked.log_blind_ms) {
@@ -591,13 +596,27 @@ mod tests {
             let mut set = rates(1000);
             set[phase].percent = pct;
             let e = find(&image(&[(1001, block_with(2, 7, 2, 9, -4, 2, &set))])).unwrap_err();
-            assert!(e.contains(what) && e.contains(PHASE_NAMES[phase]), "{}: {}", what, e);
+            assert!(e.contains(what) && e.contains(PHASE_WORDS[phase]), "{}: {}", what, e);
         }
         // A flag byte that is neither 0 nor 1, in the rising phase.
         let mut b = block(2, 7, 2, 9, -4, 2, 0);
         b[RATES_AT + RATE_BYTES + 4] = 2;
         let e = find(&image(&[(1001, sealed(b))])).unwrap_err();
-        assert!(e.contains("rising battery flag"), "{}", e);
+        assert!(e.contains("air battery flag"), "{}", e);
+        // and the error names the layout the block is, not layout 2 every time
+        let mut b = block(3, 7, 2, 9, -4, 2, 0);
+        b[RATES_AT + RATE_BYTES + 4] = 2;
+        let e = find(&image(&[(1001, sealed(b))])).unwrap_err();
+        assert!(e.contains("air battery flag") && e.contains("layout 3"), "{}", e);
+        let mut set = rates(1000);
+        set[1].percent = [75, 75, 35, 20];
+        let e = find(&image(&[(1001, block_with(3, 7, 2, 9, -4, 2, &set))])).unwrap_err();
+        assert!(e.contains("layout 3"), "{}", e);
+        // named as the page shows it, air, not by the slot's old name
+        let mut b = block(3, 7, 2, 9, -4, 2, 0);
+        b[RATES_AT + RATE_BYTES + 4] = 2;
+        let e = find(&image(&[(1001, sealed(b))])).unwrap_err();
+        assert!(e.contains("air battery flag") && !e.contains("rising"), "{}", e);
         // Intervals are not judged: zero is back to back, as it is for the fixed gap.
         let mut set = rates(0);
         set[2].interval_ms = [0; BANDS];
@@ -677,7 +696,7 @@ mod tests {
         assert!(found.json().contains("\"logMs\":null,\"logBlindMs\":null,"));
         // A log gap the firmware would refuse is an error here too, naming the phase.
         let e = find(&image(&[(1001, block_logs(3, 7, 2, 9, -4, 2, &rates(1), &[1000, 10, 50, 1000], 200))])).unwrap_err();
-        assert!(e.contains("rising") && e.contains("at least 20"), "{}", e);
+        assert!(e.contains("for air a flash log gap") && e.contains("at least 20"), "{}", e);
         let e = find(&image(&[(1001, block_logs(3, 7, 2, 9, -4, 2, &rates(1), &LOGS, 5))])).unwrap_err();
         assert!(e.contains("no altitude source"), "{}", e);
     }
@@ -791,7 +810,7 @@ mod tests {
         let mut bad = asked();
         bad.logs[1] = 19;
         let e = patch(&before, at, &bad).unwrap_err();
-        assert!(e.contains("rising") && e.contains("at least 20"), "{}", e);
+        assert!(e.contains("for air,") && e.contains("at least 20"), "{}", e);
         let mut bad = asked();
         bad.log_blind_ms = 7;
         assert!(patch(&before, at, &bad).unwrap_err().contains("no altitude source"));

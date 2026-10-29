@@ -382,6 +382,19 @@ label.check input { margin: 0; accent-color: var(--accent); }
 .phase-row { display: grid; grid-template-columns: max-content 1fr; gap: 8px; align-items: baseline; font-size: var(--t-label); }
 .phase-row .l { color: var(--ink-2); }
 .phase .was-line { display: flex; gap: 8px; align-items: baseline; font-size: var(--t-label); border-top: 1px solid var(--rule); padding-top: 6px; }
+/* Radio and identity: the table left, the phases right. By the sheet's width, not the
+   window's, since the list beside the sheet takes 290 px of it. */
+.sheet { container-type: inline-size; }
+.two.side { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.two.side > .col { gap: 0; }
+.two.side h3 { display: flex; align-items: baseline; gap: 10px; padding: 11px 14px 10px; border-bottom: 1px solid var(--rule-strong); font-size: var(--t-head); }
+/* 1240: the table at its widest (about 670 px) plus two phase cards side by side */
+@container (min-width: 1240px) {
+  .two.side { grid-template-columns: minmax(0, auto) minmax(0, 1fr); }
+  .two.side > .col + .col { border-left: 1px solid var(--rule); }
+  .two.side .phases { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+  .two.side h3 { border-top: 1px solid var(--rule); }
+}
 .bands { display: grid; gap: 4px; width: 100%; margin-top: 4px; }
 .bands .band { display: flex; justify-content: space-between; gap: 12px; font-size: var(--t-label); color: var(--ink-2); }
 .bands .band input { margin: 0 4px; }
@@ -474,20 +487,40 @@ span.strip-part { display: inline-flex; align-items: center; gap: 6px; padding-l
   .screen-data { grid-template-rows: auto auto; }
   .screen-data .two { max-height: none; }
   .sheet { overflow: visible; }
+  /* on a phone the tabs, the settings table and a long folder name all ran off the right */
+  .views, .tabs { flex-wrap: wrap; }
+  .screen-data { grid-template-columns: minmax(0, 1fr); }
+  .kv { grid-template-columns: minmax(0, auto) minmax(0, auto) minmax(min-content, 1fr); }
+  .kv > div { min-width: 0; overflow-wrap: anywhere; }
+  .pane-head { flex-wrap: wrap; }
+  .pane-head .note { min-width: 0; overflow-wrap: anywhere; }
+  .benchlive .parts { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* Bench screen */
-.bench .parts { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 10px; }
-.bench .pane h3 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--rule); font-size: var(--t-head); }
-.bench .pane .line, .bench .pane .boot, .bench .pane .rows { padding: 6px 14px; }
-.bench .pane .line .l { color: var(--ink-2); font-size: var(--t-label); margin-right: 6px; }
-.bench .part.gone { border-color: var(--critical); }
-.bench .fv { font-family: var(--mono); font-size: 12px; white-space: nowrap; margin-right: 8px; }
-.bench .fv .k { color: var(--ink-2); }
-.bench .boot { border-bottom: 1px solid var(--rule); }
-.bench .boot .when { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
-.bench pre.raw { margin: 0; padding: 8px 14px; max-height: 420px; overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sunk); }
-.bench pre.raw .boot { display: block; background: var(--critical-soft, var(--warning-soft)); color: var(--critical); font-weight: 600; border: 0; padding: 0; }
-.bench pre.raw .bad { color: var(--critical); }
-.bench pre.raw .warn { color: var(--warning); }
-.bench .grid { margin: 0 14px 10px; }
+/* Sensor bench pane on a ChipSat sheet: the part cards, starts and raw console under its head */
+.benchlive { display: flex; flex-direction: column; gap: 10px; }
+.benchlive:empty { display: none; }
+.benchlive .parts { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 10px; }
+.benchlive .pane h3 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--rule); font-size: var(--t-head); }
+.benchlive .pane .line, .benchlive .pane .boot, .benchlive .pane .rows { padding: 6px 14px; }
+.benchlive .pane .line .l { color: var(--ink-2); font-size: var(--t-label); margin-right: 6px; }
+.benchlive .part.gone { border-color: var(--critical); }
+.benchlive .fv { font-family: var(--mono); font-size: 12px; white-space: nowrap; margin-right: 8px; }
+.benchlive .fv .k { color: var(--ink-2); }
+.benchlive .boot { border-bottom: 1px solid var(--rule); }
+.benchlive .boot .when { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.benchlive pre.raw { margin: 0; padding: 8px 14px; max-height: 420px; overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sunk); }
+.benchlive pre.raw .boot { display: block; background: var(--critical-soft, var(--warning-soft)); color: var(--critical); font-weight: 600; border: 0; padding: 0; }
+.benchlive pre.raw .bad { color: var(--critical); }
+.benchlive pre.raw .warn { color: var(--warning); }
+.benchlive .grid { margin: 0 14px 10px; }
+
+/* A pane a bench board has no use for until flight software is back: one line that opens it. */
+details.fold { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); }
+/* a list item, so the browser's own open/shut triangle stays */
+details.fold > summary { display: list-item; padding: 11px 14px 10px; cursor: pointer; font-size: var(--t-head); }
+details.fold > summary b { font-weight: 600; margin-right: 10px; }
+details.fold > summary .note { font-size: var(--t-note); }
+details.fold[open] > summary { border-bottom: 1px solid var(--rule-strong); }
+details.fold > .pane { border: 0; border-radius: 0; }
+details.fold > .pane > h3:first-child { display: none; }

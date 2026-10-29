@@ -1,4 +1,4 @@
-// Sensor bench console per port, for the Bench screen. Values stay as the text the board printed
+// Sensor bench console per port, for the Sensor bench pane on ChipSats. Values stay as the text the board printed
 (function (root, factory) {
   const L = typeof require === 'function' ? require('./lines.js') : root.DG.lines;
   const mod = factory(L);

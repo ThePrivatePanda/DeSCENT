@@ -14,7 +14,6 @@
   <span class="brand">DeSCENT <span>ChipSat</span></span>
   <nav class="views" role="tablist" aria-label="Screen">
     <button id="view-chipsats" role="tab" aria-selected="false" data-screen="chipsats" title="Read, flash and pull the flight log off a ChipSat" hidden>ChipSats</button>
-    <button id="view-bench" role="tab" aria-selected="false" data-screen="bench" title="Put the sensor bench on a ChipSat and watch every sensor and the radio" hidden>Bench</button>
     <button id="view-tbeams" role="tab" aria-selected="false" data-screen="tbeams" title="Serial boards and receivers" hidden>T-Beams</button>
     <button id="view-live" role="tab" aria-selected="true" data-screen="live">Live</button>
     <button id="view-data" role="tab" aria-selected="false" data-screen="data" title="Everything the app has written to disk" hidden>Data</button>
@@ -155,16 +154,6 @@
   <div id="cs-sheet" class="sheet"></div>
 </section>
 
-<section id="screen-bench" class="screen bench" hidden>
-  <div class="pane picklist">
-    <div class="pane-head">
-      <h2>Bench</h2>
-    </div>
-    <div id="bn-side" class="scroll"></div>
-  </div>
-  <div id="bn-sheet" class="sheet"></div>
-</section>
-
 <section id="screen-tbeams" class="screen" hidden>
   <div class="pane picklist">
     <div class="pane-head">
@@ -233,7 +222,7 @@
 <script src="js/screens.js"></script>
 <script src="js/tbeams.js"></script>
 <script src="js/chipsats.js"></script>
-<script src="js/benchscreen.js"></script>
+<script src="js/benchpane.js"></script>
 <script src="js/datascreen.js"></script>
 </body>
 </html>

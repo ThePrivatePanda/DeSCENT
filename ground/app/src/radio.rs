@@ -9,7 +9,7 @@
 // amplifier does not have, and the firmware turns such a block down at boot and flies
 // on what it was built with.
 use crate::json::{bool_field, int_field};
-use crate::settings::{Asked, Rate, BANDS, PHASES, PHASE_NAMES};
+use crate::settings::{Asked, Rate, BANDS, PHASES, PHASE_NAMES, PHASE_WORDS};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Radio {
@@ -230,16 +230,16 @@ impl Radio {
         };
         let mut logs = [0u32; PHASES];
         for (p, ms) in r.logs.iter().enumerate() {
-            logs[p] = log_fits(PHASE_NAMES[p], *ms)?;
+            logs[p] = log_fits(PHASE_WORDS[p], *ms)?;
         }
         let log_blind_ms = log_fits("no altitude source", r.log_blind_ms)?;
         // The same rules the firmware applies at boot: a table it turns down costs the
         // board every setting in the block, not just the table.
         let mut rates: Vec<Rate> = Vec::new();
         for (p, rr) in r.rates.iter().enumerate() {
-            let out = rate(PHASE_NAMES[p], rr)?;
+            let out = rate(PHASE_WORDS[p], rr)?;
             if let Some(t) = crate::settings::table_trouble(&out.percent) {
-                return Err(format!("for {}, {}", PHASE_NAMES[p], t));
+                return Err(format!("for {}, {}", PHASE_WORDS[p], t));
             }
             rates.push(out);
         }
@@ -373,8 +373,8 @@ mod tests {
         let a = t.check(&r, "le").unwrap();
         assert_eq!((a.logs, a.log_blind_ms), ([20, u32::MAX, 21, 3_600_000], 20));
         for (what, logs, blind) in [
-            ("rising", vec![1000, 19, 50, 1000], 200),
-            ("landed", vec![1000, 50, 50, -1], 200),
+            ("air", vec![1000, 19, 50, 1000], 200),
+            ("ground (landed slot)", vec![1000, 50, 50, -1], 200),
             ("no altitude source", vec![1000, 50, 50, 1000], 9),
             ("no altitude source", vec![1000, 50, 50, 1000], 4_294_967_296),
             ("4 phases", vec![1000, 50, 50], 200),
@@ -385,6 +385,20 @@ mod tests {
             let e = t.check(&r, "le").unwrap_err();
             assert!(e.contains(what), "{}: {}", what, e);
         }
+    }
+
+    #[test]
+    fn what_is_wrong_is_said_in_ground_and_air_as_the_page_shows_them() {
+        // waiting and rising are only the block's slot names since 2026-10-22
+        let t = table();
+        let mut r = asking(12, 9, 14, 1000);
+        r.rates[1] = RateRequest { percent: vec![75, 75, 35, 20], ..rr(1) };
+        let e = t.check(&r, "le").unwrap_err();
+        assert!(e.contains("for air,") && !e.contains("rising"), "{}", e);
+        let mut r = asking(12, 9, 14, 1000);
+        r.logs[0] = 5;
+        let e = t.check(&r, "le").unwrap_err();
+        assert!(e.contains("ground") && !e.contains("waiting"), "{}", e);
     }
 
     #[test]
@@ -408,7 +422,7 @@ mod tests {
             let mut r = asking(12, 9, 14, 1000);
             r.rates[phase] = bad;
             let e = t.check(&r, "le").unwrap_err();
-            assert!(e.contains(what) && e.contains(PHASE_NAMES[phase]), "{} in {}: {}", what, PHASE_NAMES[phase], e);
+            assert!(e.contains(what) && e.contains(PHASE_WORDS[phase]), "{} in {}: {}", what, PHASE_WORDS[phase], e);
         }
         let mut three = asking(12, 9, 14, 1000);
         three.rates.pop();
@@ -453,7 +467,7 @@ mod tests {
         let t = table();
         for no in [-1, 4_294_967_296] {
             let e = t.check(&asking(12, 9, 14, no), "le").unwrap_err();
-            assert!(e.contains("falling gap") && e.contains("4294967295"), "{}", e);
+            assert!(e.contains("air (falling slot) gap") && e.contains("4294967295"), "{}", e);
         }
     }
 }

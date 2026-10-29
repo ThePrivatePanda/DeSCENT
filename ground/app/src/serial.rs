@@ -303,8 +303,9 @@ impl Hub {
         *self.rx_names.lock().unwrap() = receivers::Names::load(dir);
     }
 
-    fn save(&self) {
-        let Some(f) = &self.store else { return };
+    // The change stands for this run either way; only keeping it can fail.
+    fn save(&self) -> Result<(), String> {
+        let Some(f) = &self.store else { return Ok(()) };
         let mut text = String::from("# what DeSCENT Ground may open, and what each board is called.\n");
         text.push_str("# one per line: receiver <board>, ignore <board>, name <board> <what you call it>\n");
         let mut rows: Vec<String> = self
@@ -319,7 +320,7 @@ impl Hub {
             text.push_str(&r);
             text.push('\n');
         }
-        let _ = std::fs::write(f, text);
+        crate::chips::write_whole(f, &text).map_err(|e| format!("done until the app stops, but it could not be remembered: {}", e))
     }
 
     fn key_of_port(&self, port: &str) -> Option<String> {
@@ -335,9 +336,9 @@ impl Hub {
         self.dismissed.remove(port);
         self.complained.remove(port);
         self.touch_board(port, Some("receiver"), None);
-        self.save();
+        let saved = self.save();
         let _ = self.tx.send(Event::Ports);
-        Ok(())
+        saved
     }
 
     // Not a receiver, and stop asking. Closes it if it happened to be open.
@@ -349,9 +350,9 @@ impl Hub {
             self.close(&k);
         }
         self.touch_board(port, Some("ignored"), None);
-        self.save();
+        let saved = self.save();
         let _ = self.tx.send(Event::Ports);
-        Ok(())
+        saved
     }
 
     // Drops what this computer keeps about a board: whether to read it, and what it is
@@ -381,9 +382,9 @@ impl Hub {
         self.dismissed.remove(port);
         self.complained.remove(port);
         self.touch_board(port, Some("waiting"), Some(""));
-        self.save();
+        let saved = self.save();
         let _ = self.tx.send(Event::Ports);
-        Ok(())
+        saved
     }
 
     // What the operator calls this board. Against the board, like the approvals, so a
@@ -401,9 +402,9 @@ impl Hub {
             self.names.insert(key, name.to_string());
         }
         self.touch_board(port, None, Some(name));
-        self.save();
+        let saved = self.save();
         let _ = self.tx.send(Event::Ports);
-        Ok(())
+        saved
     }
 
     // Start watching for a replug. A second call restarts it and forgets the last answer.
@@ -972,6 +973,22 @@ mod tests {
 
         assert!(hub.set_name("/dev/ttyACM1", "two\nlines").unwrap_err().contains("one line"));
         assert!(hub.set_name("/dev/ttyUSB9", "nope").unwrap_err().contains("not plugged in"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_choice_that_could_not_be_saved_says_so() {
+        let dir = scratch("unsaved");
+        // something in the way of the file, a full disk would do the same
+        std::fs::create_dir_all(dir.join("descent-ground-boards.txt").join("x")).unwrap();
+        let mut hub = reloaded(&dir);
+        hub.boards = vec![board_at("/dev/ttyACM1", "1a86:55d4:x", "waiting")];
+        let e = hub.approve("/dev/ttyACM1").unwrap_err();
+        assert!(e.contains("not be remembered") && e.contains("descent-ground-boards.txt"), "{}", e);
+        // still a receiver for this run
+        assert!(hub.approved.contains("1a86:55d4:x"));
+        assert!(hub.set_name("/dev/ttyACM1", "Left").unwrap_err().contains("not be remembered"));
+        assert!(hub.ignore("/dev/ttyACM1").unwrap_err().contains("not be remembered"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

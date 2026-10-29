@@ -58,13 +58,16 @@ Pulling a log takes minutes. It first checks that the console port is this board
 ticked it saves the flight software and puts it back afterwards, flashing the board twice;
 unticked, the default, the board is left on the dump firmware. **Stop** keeps what has arrived. Each pull gets a folder in the data folder under the day, like `2026-10-18/pulls/1432-board9`.
 
-## Bench
+## Sensor bench
 
-The Bench screen puts the sensor bench on a ChipSat and shows its console part by part: a card
-each for the IMU, barometer, GPS, gauge, I2C bus, flash and radio with what the board said and how
-long it has been quiet, every start of the board with its reset cause, and the raw console. The
-bench sends the flight packet as board 254 once it has run 30 s, and R on its console turns the
-radio on or off. It never writes the flash chip. Not run on a board yet.
+**Write the sensor bench** in a board's Firmware pane puts the sensor bench on it. A board that was
+last read with the bench on gets a Sensor bench pane at the top of its ChipSats sheet: a card each
+for the IMU, barometer, GPS, gauge, I2C bus, flash and radio with what the board said and how long
+it has been quiet, every start of the board with its reset cause, and the raw console. Its radio
+and flight log panes fold to one line until flight software goes back on, which **Write flight
+software** in the bench pane does. The bench sends the flight packet as board 254 once it has run
+30 s, and R on its console turns the radio on or off. It never writes the flash chip. Not run on a
+board yet.
 
 ## Building it yourself
 
@@ -79,6 +82,6 @@ into the app, so a change to one of those formats in the tree needs the app rebu
 
 * nothing in the ChipSats screen has been run against a probe in anger; the flash and pull paths
   have, the patch path has not
-* the Bench screen and the builds from this computer's tree have not been used on a board yet
+* the sensor bench pane and the builds from this computer's tree have not been used on a board yet
 * a read attaches over SWD, which leaves the debug domain powered until the board is power-cycled:
   do not measure sleep current on a board that has been under the clip

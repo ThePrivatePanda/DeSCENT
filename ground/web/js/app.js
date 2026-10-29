@@ -65,7 +65,7 @@
 
   // Every line from every connected receiver is recorded, whichever unit is on screen.
   // The native app or Web Serial, depending on where the page was loaded from.
-  // for screens that want every line, e.g. Bench
+  // for panes that want every line, e.g. the sensor bench
   const taps = [];
   const hub = DG.makeHub((rx, text) => {
     const t = Date.now();
@@ -128,8 +128,9 @@
   }
 
   // Which build this page is, for when someone asks whether the hosted copy is current.
-  // Written by the deploy; absent when the page came off a disk or out of the app.
-  fetch('version.json').then((r) => (r.ok ? r.json() : null)).then((v) => {
+  // Written by the deploy; absent when the page came off a disk or out of the app. Not
+  // asked for in the app, where it is a 404 in the console on every start.
+  if (!hub.native) fetch('version.json').then((r) => (r.ok ? r.json() : null)).then((v) => {
     if (v && v.commit) {
       document.querySelector('.brand').title = 'build ' + v.commit + ', deployed ' + v.built;
     }
@@ -285,6 +286,11 @@
     render(true);
   }
 
+  // A log is finite and already on disk. Capping its history would quietly drop the
+  // start of a long flight from every graph, which is the part worth looking at. So a
+  // replay keeps everything, whatever the live trimming is set to.
+  const replayCfg = () => Object.assign({}, settings, { maxPoints: Infinity, retainMin: 0 });
+
   // from is only given for a log the app serves: {log, raw, dir}, see servedLog.
   function startReplay(events, names, from) {
     stopPlay();
@@ -293,9 +299,7 @@
     // of dragging then stops depending on how long the log is.
     view.replay = {
       events, pos: 0, clock: events[0].t, playing: false, speed: +$('rp-speed').value,
-      // A log is finite and already on disk. Capping its history would quietly drop the
-      // start of a long flight from every graph, which is the part worth looking at.
-      fleet: new F.Fleet(Object.assign({}, settings, { maxPoints: Infinity, retainMin: 0 })), names,
+      fleet: new F.Fleet(replayCfg()), names,
       checks: [], every: Math.max(250, Math.ceil(events.length / 12)),
       from: from || null,
     };
@@ -317,7 +321,7 @@
     // to be standing.
     let from = null;
     for (const c of r.checks) if (c.pos <= pos && (!from || c.pos > from.pos)) from = c;
-    if (pos < r.pos && !from) { r.fleet = new F.Fleet(settings); r.pos = 0; }
+    if (pos < r.pos && !from) { r.fleet = new F.Fleet(replayCfg()); r.pos = 0; }
     if (from && from.pos > r.pos) { r.fleet.restore(from.state); r.pos = from.pos; }
     else if (pos < r.pos && from) { r.fleet.restore(from.state); r.pos = from.pos; }
     while (r.pos < pos) {
@@ -534,12 +538,14 @@
   function renderClear() {
     const w = clearWanted();
     const bits = [];
-    if (w.sel && view.sel) bits.push('CSID ' + view.sel);
+    // Only the unit shown means only that one: with none shown no unit goes, rather than
+    // every unit, which is what the other box is for.
+    if (w.sel) { if (view.sel) bits.push('CSID ' + view.sel); }
     else if (w.units) bits.push('all units');
     if (w.rx) bits.push('receiver counts');
     if (w.hidden) bits.push('hidden');
     if (w.log) bits.push('new log file');
-    $('clear-what').textContent = bits.length ? bits.join(', ') : 'nothing ticked';
+    $('clear-what').textContent = bits.length ? bits.join(', ') : w.sel ? 'no unit shown' : 'nothing ticked';
     $('btn-clear').disabled = !bits.length;
   }
   for (const id of Object.values(clearBoxes)) $(id).addEventListener('change', renderClear);
@@ -555,9 +561,9 @@
     const w = clearWanted();
     const f = fleet();
     const done = [];
-    if (w.sel && view.sel) {
+    if (w.sel) {
       const label = view.sel;
-      if (f.clearUnit(label)) { done.push('CSID ' + label); view.sel = null; }
+      if (label && f.clearUnit(label)) { done.push('CSID ' + label); view.sel = null; }
     } else if (w.units) {
       f.clearUnits(); view.sel = null; view.expanded.clear(); done.push('every unit');
     }
@@ -679,7 +685,7 @@
     settings = next;
     S.saveSettings(settings);
     live.setConfig(settings);
-    if (view.replay) view.replay.fleet.setConfig(settings);
+    if (view.replay) view.replay.fleet.setConfig(replayCfg());
     $('window').value = settings.graphWindowMin;
     armAutosave();
     render(true);
@@ -843,8 +849,9 @@
         (earlier.length <= AUTO_OPEN_RUNS && !view.expanded.has('shut' + u.csid));
       return '<tr data-label="' + u.label + '"' + (u.label === view.sel ? ' class="sel"' : '') + '>' +
         '<td class="csid">' + u.label +
-          (earlier.length ? ' <button class="act" data-gens="' + u.csid + '" title="Runs of this board that ended when it restarted">' +
-            (open ? 'hide' : earlier.length + ' earlier') + '</button>' : '') +
+          (earlier.length ? ' <button class="act" data-gens="' + u.csid + '" title="' +
+            (open ? 'Fold away the earlier runs of this board' : 'Show the runs of this board that ended when it restarted') + '">' +
+            (open ? 'hide earlier' : earlier.length + ' earlier') + '</button>' : '') +
           // While they are on screen each run has its own join, so this one would be a
           // second way to do the same thing. It is for the folded case.
           (earlier.length && !open ? ' <button class="act" data-mergeall="' + u.csid + '" title="Join every earlier run into this one">' +
