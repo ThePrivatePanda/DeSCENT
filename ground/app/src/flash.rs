@@ -1,5 +1,5 @@
-// Flashing a receiver. These are the only receivers the team has, so the board's
-// existing firmware is read off and saved before anything is erased.
+// Flashing a receiver. The old firmware is read off first only when asked: it takes
+// minutes and the app carries the receiver image anyway.
 use crate::json::{esc, int_field, str_field};
 use crate::receiver_image::check_image;
 use crate::server::Ctx;
@@ -154,36 +154,29 @@ pub fn backup(port: &str, dir: &Path, broadcast: &crate::ws::Broadcast) -> Resul
     // piece at a time and the pieces appended. Without this the operator watches one
     // unmoving line for several minutes and cannot tell it from a board that never
     // answered.
-    let mut out = std::fs::File::create(&path).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
     let part_path = dir.join("descent-ground-backup-part.tmp");
-    let mut done: u32 = 0;
-    while done < bytes {
-        let n = BACKUP_CHUNK.min(bytes - done);
-        flasher
-            .read_flash(done, n, 0x1000, 64, part_path.clone())
-            .map_err(|e| format!("could not read the board's firmware at {:#x}: {}", done, e))?;
-        let part = std::fs::read(&part_path).map_err(|e| format!("cannot read back the piece: {}", e))?;
-        use std::io::Write;
-        out.write_all(&part).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
-        done += n;
-        broadcast.send(&format!(
-            "{{\"type\":\"flash\",\"pct\":{},\"note\":\"saving the board's current firmware, {} of {} kB\"}}",
-            done as u64 * 100 / bytes as u64,
-            done / 1024,
-            bytes / 1024
-        ));
-    }
-    drop(out);
+    let saved = crate::layout::save_whole(&path, bytes as u64, |out| {
+        let mut done: u32 = 0;
+        while done < bytes {
+            let n = BACKUP_CHUNK.min(bytes - done);
+            flasher
+                .read_flash(done, n, 0x1000, 64, part_path.clone())
+                .map_err(|e| format!("could not read the board's firmware at {:#x}: {}", done, e))?;
+            let part = std::fs::read(&part_path).map_err(|e| format!("cannot read back the piece: {}", e))?;
+            use std::io::Write;
+            out.write_all(&part).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+            done += n;
+            broadcast.send(&format!(
+                "{{\"type\":\"flash\",\"pct\":{},\"note\":\"saving the board's current firmware, {} of {} kB\"}}",
+                done as u64 * 100 / bytes as u64,
+                done / 1024,
+                bytes / 1024
+            ));
+        }
+        Ok(())
+    });
     let _ = std::fs::remove_file(&part_path);
-
-    let written = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    if written < bytes as u64 {
-        return Err(format!(
-            "the backup is short: {} of {} bytes. Nothing was erased.",
-            written, bytes
-        ));
-    }
-    Ok(path)
+    saved.map(|()| path)
 }
 
 pub fn write_image(port: &str, image: &[u8], broadcast: &crate::ws::Broadcast) -> Result<(), String> {

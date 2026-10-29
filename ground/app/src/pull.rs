@@ -140,6 +140,9 @@ struct Listener {
     stop: Arc<AtomicBool>,
     last_ms: Arc<Mutex<u128>>,
     gap_ms: Arc<AtomicU64>,
+    // Why the port stopped being read, if it did. Not a failure by itself: the pull still
+    // waits out its limits, but a failure says this as well.
+    lost: Arc<Mutex<Option<String>>>,
     // The same port for writing, when there is one: a clear talks to the dump firmware.
     writer: Mutex<Option<Box<dyn Write + Send>>>,
 }
@@ -161,7 +164,8 @@ impl Listener {
         let stop = Arc::new(AtomicBool::new(false));
         let last_ms = Arc::new(Mutex::new(crate::logfile::now_ms()));
         let gap_ms = Arc::new(AtomicU64::new(0));
-        let (h2, s2, l2, g2) = (heard.clone(), stop.clone(), last_ms.clone(), gap_ms.clone());
+        let lost = Arc::new(Mutex::new(None));
+        let (h2, s2, l2, g2, lost2) = (heard.clone(), stop.clone(), last_ms.clone(), gap_ms.clone(), lost.clone());
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             let mut back: Option<Instant> = None;
@@ -182,11 +186,15 @@ impl Listener {
                         *l2.lock().unwrap() = crate::logfile::now_ms();
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-                    Err(_) => break,   // unplugged, or the probe reset it out from under us
+                    // unplugged, or the probe reset it out from under us
+                    Err(e) => {
+                        *lost2.lock().unwrap() = Some(e.to_string());
+                        break;
+                    }
                 }
             }
         });
-        Listener { heard, stop, last_ms, gap_ms, writer: Mutex::new(None) }
+        Listener { heard, stop, last_ms, gap_ms, lost, writer: Mutex::new(None) }
     }
 
     // To the board. A port with no writer (a test's) takes the bytes and drops them.
@@ -197,8 +205,6 @@ impl Listener {
         Ok(())
     }
 
-    // Where a whole line holding `text` ends, looking at or after `from`. Whole, as for
-    // the found line: what matters on it may be the part still arriving.
     // Where the first line at or after `from` that begins with `text` ends. The flash driver
     // logs "I FLASH 416 c0: erase what=chip" while a chip is erasing, which contains "erase "
     // but is not the firmware's verdict; that is the line that begins with it, and comes later
@@ -218,6 +224,8 @@ impl Listener {
         None
     }
 
+    // Where a whole line holding `text` ends, looking at or after `from`. Whole, as for
+    // the found line: what matters on it may be the part still arriving.
     fn line_with_after(&self, text: &str, from: usize) -> Option<usize> {
         let heard = self.heard.lock().unwrap();
         let mut at = from.min(heard.len());
@@ -277,6 +285,10 @@ impl Listener {
 
     fn take(&self) -> Vec<u8> {
         self.heard.lock().unwrap().clone()
+    }
+
+    fn lost(&self) -> Option<String> {
+        self.lost.lock().unwrap().clone()
     }
 
     fn done(&self) {
@@ -812,6 +824,14 @@ Pick the board's console port, or Pull anyway if the software on the board print
         }
     }
 
+    // Only on a failure. A stop is the operator's own doing, and a whole log means the
+    // port held out for as long as it mattered.
+    if !stopped && error.as_deref().is_some_and(|e| !e.starts_with(STOPPED)) {
+        if let Some(why) = listener.lost() {
+            also(&mut error, format!("{} stopped answering during the pull ({}), it may have been unplugged", port_name, why));
+        }
+    }
+
     // stop goes first, otherwise an early stop reads as an empty printing
     if stopped {
         error = Some(match error.take() {
@@ -1104,6 +1124,7 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
         Bytes(Vec<u8>),
         Silence(u64),
         Wait(std::sync::mpsc::Receiver<()>),
+        Gone(&'static str),   // the port fails the way a pulled cable does
     }
 
     impl Read for Script {
@@ -1121,6 +1142,7 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
                     let _ = go.recv();
                     Ok(0)
                 }
+                Some(Step::Gone(why)) => Err(std::io::Error::other(why)),
                 None => {
                     let _ = self.over.send(());
                     Err(std::io::ErrorKind::BrokenPipe.into())
@@ -1213,6 +1235,11 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
     // keep the flight software, and which write goes wrong. Quiet is cut to 400 ms so a
     // printing that stops does not hold the test for 8 s.
     fn pulled(what: &str, printed: &[u8], keep_fsw: bool, fail_write: Option<usize>) -> (Pull, Vec<String>, PathBuf) {
+        pulled_ending(what, printed, Vec::new(), keep_fsw, fail_write)
+    }
+
+    // The same, with what the port does once the printing is over.
+    fn pulled_ending(what: &str, printed: &[u8], then: Vec<Step>, keep_fsw: bool, fail_write: Option<usize>) -> (Pull, Vec<String>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("dg-pull-{}-{}", what, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1223,6 +1250,7 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
             Step::Silence(100),   // booting
         ];
         steps.extend(printed.chunks(1000).map(|c| Step::Bytes(c.to_vec())));
+        steps.extend(then);
         let (listener, _ended) = played(steps);
         let desk = Desk { did: Mutex::new(Vec::new()), named: Mutex::new(Vec::new()), go: Mutex::new(Some(go)), fail_write };
         let job = Job {
@@ -1635,6 +1663,20 @@ record 1 boot 0 ms 2567\r\n\
         // What it did say is still on disk.
         let raw = std::fs::read_to_string(folder.join("dump.txt")).unwrap();
         assert!(raw.ends_with("start test=flashdump\r\n"), "{}", raw);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_console_that_goes_away_mid_dump_is_named_in_the_failure() {
+        // cut off partway through the first record
+        let said = b"I BOOT 0 c0: start test=flashdump\r\nraw 0 0000";
+        let (p, did, dir) = pulled_ending("gone", said, vec![Step::Gone("No such device (os error 19)")], true, None);
+        assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"]);
+        assert!(p.restored);
+        let e = p.error.unwrap();
+        assert!(e.starts_with("nothing that reads as a log"), "{}", e);
+        assert!(e.contains("/dev/ttyACM1 stopped answering"), "{}", e);
+        assert!(e.contains("No such device (os error 19)"), "{}", e);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

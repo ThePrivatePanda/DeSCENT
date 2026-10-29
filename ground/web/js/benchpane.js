@@ -1,4 +1,5 @@
-// Bench screen: sensor bench console per part, raw console and restarts
+// Sensor bench pane on a ChipSat's sheet: the bench console per part, the receivers' tally,
+// the starts and the raw console. chipsats.js draws its head and says which board is up.
 (function () {
   'use strict';
   const A = window.DGApp;
@@ -17,46 +18,45 @@
   // event lines (bus clear, quarantine), shown as printed instead of parsed
   const VERBATIM = ['BUS'];
   const RAW_SHOWN = 400;
-  const FW_WORDS = { bench: 'sensor bench', flight: 'flight software', dump: 'dump firmware', unknown: 'not recognised' };
 
   const state = {
-    chips: [], sel: null,
+    row: null, port: '',   // the bench board on the sheet and its console, from chipsats.js
     sessions: new Map(),   // board key of the console port -> DG.bench.Session
     radio: new BN.Radio(),
     paused: null,          // raw lines frozen at Pause
     filter: '',            // tag, show only its raw lines
-    confirm: false,        // confirm strip is up
-    timer: null,
   };
 
-  const store = {
-    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
-    set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* not kept */ } },
-  };
   const boards = () => (hub.boards || []).filter((b) => b.usb !== '1209:5741');   // never the drone's flight controller
-  const chip = () => state.chips.find((c) => c.uid === state.sel) || null;
-  const nameOf = (c) => (c && (c.name || 'board …' + c.uid.slice(-6))) || '';
-  // Same console the ChipSats screen kept, else the last port printing the log format, else any free port
-  function consolePort(c) {
-    const ports = boards().map((b) => b.port);
-    const kept = c ? store.get('dg-console-' + c.uid) : null;
-    if (kept && ports.includes(kept)) return kept;
-    let talking = null;
-    for (const b of boards()) {
-      const s = state.sessions.get(b.key);
-      if (s && s.heard > s.other && (!talking || s.lastT > talking.s.lastT)) talking = { b, s };
-    }
-    if (talking) return talking.b.port;
-    const free = boards().find((b) => b.state !== 'receiver');
-    return free ? free.port : '';
-  }
   const boardOf = (port) => boards().find((b) => b.port === port) || null;
   function session(key) {
     if (!state.sessions.has(key)) state.sessions.set(key, new BN.Session());
     return state.sessions.get(key);
   }
+  // Lines come in under the open port's key (rx1...). The app's boards list has no key,
+  // so it is looked up in hub.ports by the port's path.
+  function keyOf(port) {
+    const open = (hub.ports || []).find((p) => p.port === port);
+    if (open) return open.key;
+    const b = boardOf(port);
+    return b ? b.key : undefined;
+  }
+  function sessionOn(port) {
+    const key = port ? keyOf(port) : undefined;
+    return key !== undefined ? state.sessions.get(key) || null : null;
+  }
+  // the port of these that last printed the log format
+  function talking(list) {
+    let best = null;
+    for (const b of list) {
+      const s = state.sessions.get(keyOf(b.port));
+      if (s && s.heard > s.other && (!best || s.lastT > best.s.lastT)) best = { b, s };
+    }
+    return best ? best.b.port : '';
+  }
 
-  // Receiver packets go to the radio count, log format lines to that port's session
+  // Every port, whichever board is up: receiver packets go to the radio count, log format
+  // lines to that port's session
   A.taps.push((rx, text, t) => {
     if (state.radio.add(t, rx, text)) return;
     if (state.sessions.has(rx) || BN.parse(text)) session(rx).add(t, text);
@@ -68,46 +68,13 @@
   // reset cause flags that were set
   const causeWords = (c) => (c ? Object.keys(c).filter((k) => k !== 'csr' && c[k] === '1').join(', ') || 'none set' : 'not printed');
 
-  function side() {
-    if (!state.chips.length) return '<p class="empty">No ChipSat known yet. Read one on the ChipSats screen first.</p>';
-    return state.chips.map((c) => '<button class="item' + (c.uid === state.sel ? ' on' : '') + '" data-pick="' + esc(c.uid) + '">' +
-      '<b>' + esc(nameOf(c)) + '</b>' +
-      (c.firmware === 'bench' ? '<small>' + mark('bad', 'sensor bench') + '</small>' : '') + '</button>').join('');
-  }
-
-  function head(c, port, s) {
-    const b = boardOf(port);
-    const reading = b && b.state === 'receiver';
-    const options = boards().map((x) => '<option value="' + esc(x.port) + '"' + (x.port === port ? ' selected' : '') + '>' +
-      esc(x.port + (x.name ? ' (' + x.name + ')' : '')) + '</option>').join('');
-    const fw = c.firmware ? FW_WORDS[c.firmware] || c.firmware : 'not known';
-    const job = A.shell.jobs.chip;
-    const running = job && job.running;
-    const put = state.confirm
-      ? '<div class="confirm"><span class="grow">Writes the sensor bench over whatever is on <b>' + esc(nameOf(c)) +
-        '</b>. Nothing is saved first. It is not flight software: write flight software from the ChipSats screen before it flies.</span>' +
-        '<button data-benchgo="1" class="primary">Write the sensor bench</button><button data-benchcancel="1">Cancel</button></div>'
-      : '<button data-bench="1"' + (running ? ' disabled' : '') + '>Put the sensor bench on it</button>';
-    return '<div class="pane"><div class="rows">' +
-      '<div><span class="l">Board</span><span class="val">' + esc(nameOf(c)) + '</span> ' +
-        (c.firmware === 'bench' ? mark('bad', 'sensor bench, not flight software') : '<span class="note">last written: ' + esc(fw) + '</span>') + '</div>' +
-      '<div><span class="l">Console</span><select data-console="' + esc(c.uid) + '" aria-label="Console port">' +
-        (options || '<option value="">no serial port plugged in</option>') + '</select> ' +
-        (port && !reading ? '<button data-listen="' + esc(port) + '">Read this port</button>' : '') +
-        (reading ? mark('good', 'being read') : '') + '</div>' +
-      '<div>' + put + ' <button data-radio="' + esc(port) + '"' + (reading ? '' : ' disabled') + '>Radio on/off</button>' +
-        ' <button data-clear="1">Clear this record</button></div>' +
-      (running ? '<div><span class="note">' + esc((job.note || 'writing') + (job.pct ? ', ' + job.pct + '%' : '')) + '</span></div>' : '') +
-      '</div></div>' + banners(s);
-  }
-
+  // test=bench or not is chipsats.js's to say, beside what the app last read
   function banners(s) {
     if (!s) return '';
     const now = Date.now();
     let out = '';
     const loop = s.looping(now);
     if (loop) out += '<p class="outcome bad inpane">Restarting over and over: ' + loop + ' starts in the last minute.</p>';
-    if (s.bench === false) out += '<p class="outcome bad inpane">The board did not say test=bench when it started: this is not the sensor bench.</p>';
     if (s.lastT !== null && now - s.lastT > BN.GAP_MS) out += '<p class="outcome bad inpane">Nothing on the console for ' + esc(secs(now - s.lastT)) + '.</p>';
     return out;
   }
@@ -148,6 +115,7 @@
       '</div>';
   }
 
+  // Every bench board sends as 254, so this is whichever is on the air, not only this one.
   function radioCard(now) {
     const rows = [...state.radio.by].map(([rx, r]) => {
       const last = (a) => (a.length ? a[a.length - 1] : null);
@@ -155,7 +123,7 @@
         '</td><td>' + r.badCrc + '</td><td>' + esc(String(last(r.rssi) ?? '')) + '</td><td>' + esc(String(last(r.snr) ?? '')) +
         '</td><td>' + esc(r.t ? secs(now - r.t) + ' ago' : '') + '</td></tr>';
     }).join('');
-    return '<div class="pane"><h3>Heard by the receivers, as board ' + BN.BENCH_CSID + '</h3>' +
+    return '<div class="pane"><h3>Heard by the receivers from any board on the sensor bench (' + BN.BENCH_CSID + ')</h3>' +
       (rows ? '<table class="grid"><thead><tr><th>Receiver</th><th>Heard</th><th>Missed</th><th>Counter restarts</th><th>Bad CRC</th><th>RSSI</th><th>SNR</th><th>Last</th></tr></thead><tbody>' + rows + '</tbody></table>'
         : '<p class="empty">No receiver has heard the bench yet. It keeps its radio off for the first 30 s after it starts.</p>') + '</div>';
   }
@@ -177,80 +145,55 @@
   }
 
   function render() {
-    paint($('bn-side'), side());
-    const c = chip();
-    if (!c) { paint($('bn-sheet'), '<p class="empty">Pick a ChipSat.</p>'); return; }
-    const port = consolePort(c);
-    const b = boardOf(port);
-    const s = b ? state.sessions.get(b.key) : null;
+    const el = $('cs-bench');
+    if (!el || !state.row) return;
+    const s = sessionOn(state.port);
     const now = Date.now();
     const parts = s ? [...s.parts.values()].sort((x, y) => {
       const i = (p) => (ORDER.indexOf(p.tag) === -1 ? 99 : ORDER.indexOf(p.tag));
       return i(x) - i(y) || x.tag.localeCompare(y.tag);
     }) : [];
-    paint($('bn-sheet'), head(c, port, s) +
+    paint(el, banners(s) +
       (parts.length ? '<div class="parts">' + parts.map((p) => card(p, now)).join('') + '</div>' : '') +
       radioCard(now) + starts(s) + raw(s));
   }
 
-  async function load() {
-    try { state.chips = await hub.chips(); } catch (e) { state.chips = []; }
-    if (!state.sel && state.chips.length) state.sel = state.chips[0].uid;
-    render();
-  }
-
-  async function writeBench() {
-    const c = chip();
-    if (!c) return;
-    state.confirm = false;
-    try {
-      await hub.chipFlash({ uid: c.uid, embedded: 'bench', module: c.module, backup: false });
-      toast('Writing the sensor bench on ' + nameOf(c));
-      A.shell.pollJobs();
-    } catch (e) {
-      toast('Did not write the sensor bench: ' + (e.message || e));
-    }
-    render();
-  }
-
-  $('screen-bench').addEventListener('click', async (e) => {
-    const t = e.target;
-    const at = (n) => t.getAttribute(n);
-    if (at('data-pick')) { state.sel = at('data-pick'); state.confirm = false; }
-    else if (at('data-bench')) state.confirm = true;
-    else if (at('data-benchcancel')) state.confirm = false;
-    else if (at('data-benchgo')) { await writeBench(); return; }
-    else if (at('data-listen')) {
+  const root = $('screen-chipsats');
+  root.addEventListener('click', async (e) => {
+    const at = (n) => e.target.getAttribute(n);
+    if (at('data-listen')) {
       try { await hub.setBoard(at('data-listen'), true); } catch (err) { toast('Could not read ' + at('data-listen') + ': ' + (err.message || err)); }
     } else if (at('data-radio')) {
       try { await hub.benchRadio(at('data-radio')); toast('Sent radio on/off to the bench'); } catch (err) { toast(err.message || String(err)); }
     } else if (at('data-clear')) {
-      const b = boardOf(consolePort(chip()));
-      if (b) state.sessions.delete(b.key);
+      const key = state.port ? keyOf(state.port) : undefined;
+      if (key !== undefined) state.sessions.delete(key);
       state.radio = new BN.Radio();
       state.paused = null;
     } else return;
     render();
   });
 
-  $('screen-bench').addEventListener('change', (e) => {
+  root.addEventListener('change', (e) => {
     const t = e.target;
-    if (t.getAttribute('data-console')) store.set('dg-console-' + t.getAttribute('data-console'), t.value);
-    else if (t.getAttribute('data-filter')) state.filter = t.value;
+    if (t.getAttribute('data-filter')) state.filter = t.value;
     else if (t.getAttribute('data-pause')) {
-      const b = boardOf(consolePort(chip()));
-      const s = b ? state.sessions.get(b.key) : null;
+      const s = sessionOn(state.port);
       state.paused = t.checked && s ? s.raw.slice() : null;
     } else return;
     render();
   });
 
-  A.shell.register('bench', {
-    show() {
-      load();
-      clearInterval(state.timer);
-      state.timer = setInterval(render, 500);
+  // chipsats.js says which board is up after each of its own redraws, which can put a new,
+  // empty #cs-bench on the page, so this draws at once as well as on the timer
+  A.benchPane = {
+    show(row, port) {
+      if (!row || (state.row && state.row.uid !== row.uid)) state.paused = null;
+      state.row = row;
+      state.port = port || '';
+      render();
     },
-    hide() { clearInterval(state.timer); state.timer = null; },
-  });
+    sessionOn, talking,
+  };
+  setInterval(() => { if (state.row && A.shell.current() === 'chipsats') render(); }, 500);
 })();

@@ -313,27 +313,19 @@ pub fn save_firmware(probe: Option<&str>, dir: &Path, file: &str, said: Said) ->
     let mut session = open(probe)?;
     let flash = main_flash(&session.target().memory_map)?;
     let path = dir.join(file);
-    match read_flash_into(&mut session, &flash, &path, said) {
-        Ok(()) => Ok(path),
-        Err(e) => {
-            // Part of an image under a name that says it is one is worse than no file:
-            // somebody would write it back.
-            let _ = std::fs::remove_file(&path);
-            Err(e)
-        }
-    }
+    let total = flash.end - flash.start;
+    crate::layout::save_whole(&path, total, |out| read_flash_into(&mut session, &flash, out, &path, said))?;
+    Ok(path)
 }
 
 fn read_flash_into(
     session: &mut Session,
     flash: &Range<u64>,
+    out: &mut std::fs::File,
     path: &Path,
     said: Said,
 ) -> Result<(), String> {
     let total = flash.end - flash.start;
-    let mut out = std::fs::File::create(path)
-        .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
-
     let mut core = session.core(0).map_err(|e| format!("could not reach the core: {}", e))?;
     // Halted while it is read: the flight software writes its own flash, and half of one
     // write with half of the next is not an image anyone can put back.
@@ -352,15 +344,6 @@ fn read_flash_into(
         said(Doing::Saving, done, total);
     }
     let _ = core.run();   // left as it was found; the caller resets when it means to
-    drop(out);
-
-    let written = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    if written < total {
-        return Err(format!(
-            "the saved firmware is short: {} of {} bytes. Nothing was erased.",
-            written, total
-        ));
-    }
     Ok(())
 }
 

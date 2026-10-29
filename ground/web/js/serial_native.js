@@ -10,9 +10,10 @@
   const RETRY_MS = 1000;
 
   // The whole transport rule. Not a fetch probe: from file:// a probe rejects instead of
-  // answering, and app.js builds its hub synchronously.
+  // answering, and app.js builds its hub synchronously. Plain http from any host is the app,
+  // so a second screen on the same network (--host 0.0.0.0) gets the live view too.
   function isNativeHost(loc) {
-    return loc.protocol === 'http:' && (loc.hostname === '127.0.0.1' || loc.hostname === 'localhost');
+    return loc.protocol === 'http:';
   }
 
   // One WebSocket frame. Boot noise or half a message must not take the socket down.

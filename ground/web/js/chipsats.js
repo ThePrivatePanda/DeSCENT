@@ -35,6 +35,7 @@
     pickFor: null,      // the board it was chosen on, when it was chosen on one
     build: null,        // settings to compile into a fresh image: {uid, csid, sf, dbm, interval}
     refused: '', canForce: false,
+    open: {},           // 'radio:<uid>' -> a folded pane on a bench board is open
     timer: null,
   };
 
@@ -383,15 +384,41 @@ async function buildAndFlash() {
     render();
   }
 
+  // The flight write with the draft's settings: why it cannot go yet, what it will write, and
+  // its confirm row. Asked from Radio and identity, or from the Sensor bench pane on a bench board.
+  function flightWrite(r) {
+    const d = buildDraft(r);
+    const job = jobs.chip && jobs.chip.what === 'flash' && chipOwner() === r.uid ? jobs.chip : null;
+    const how = B.flashWay(state.health, r.module);
+    const stop = !r.module ? 'Choose the radio module in Radio and identity first.'
+      : how.stop ? how.stop
+        : !r.onProbe ? 'Put the board on the ST-Link and press Read the board.'
+          : busy() ? 'Something else is running on this board.' : '';
+    const buildOff = stop ? ' disabled' : '';
+    const pick = state.pick && state.pick.kind === 'build' ? state.pick : null;
+    const summary = 'board ' + d.csid + ', ' + B.MODULE[r.module || 'le'] + ', SF' + d.sf + ', ' + d.dbm + ' dBm; ' +
+      B.PHASES.map((ph, n) => ph.key + ' ' + B.rateWords(draftRate(d, n)) + ', log ' + logSecs(d['p' + n + 'l'], ph.key)).join('; ');
+    // The module is said in words either way: the image for the other module transmits
+    // almost nothing and still reports success.
+    const module = '<b>' + B.MODULE[r.module || 'le'] + ' module</b>';
+    const will = how.way === 'build'
+      ? (state.fsw ? 'Writes the flight software for the ' + module + ' from this computer\'s tree with these settings to <b>' + esc(nameOf(r)) + '</b>. ' + esc(nextImage(r.module))
+        : 'Builds the flight software for the ' + module + ' with these settings and writes it to <b>' + esc(nameOf(r)) + '</b>. About 13 seconds.')
+      : 'Writes the flight image this app carries for the ' + module + ' to <b>' + esc(nameOf(r)) + '</b>, with these settings in it.';
+    const confirm = !pick || job && job.running ? '' : '<div class="confirm">' +
+      '<span class="grow">' + (stop ? esc(stop) : will + (pick.where === 'bench' ? ' <span class="val">' + esc(summary) + '</span>' : '')) + '</span>' +
+      '<button data-buildgo="1" class="primary"' + buildOff + '>' + how.verb + '</button>' +
+      '<button data-buildcancel="1">Cancel</button></div>';
+    return { d, job, how, stop, buildOff, summary, confirm, where: pick ? pick.where || 'radio' : '' };
+  }
+
   function radioPane(r) {
     const read = r.onProbe && !state.stale ? state.read : null;
     const settings = read ? read.settings || null : null;
     const t = B.settingsTable(settings, r.module, read ? read.settingsError : '', read && read.firmware ? read.firmware.kind : '');
-    const d = buildDraft(r);
     const seg = '<span class="seg" role="group" aria-label="Radio module">' + ['le', 'hp'].map((m) =>
       '<button data-module="' + m + '" aria-pressed="' + (r.module === m) + '"' + (r.module === m ? ' class="on"' : '') + '>' + B.MODULE[m] + '</button>').join('') + '</span>';
-    const job = jobs.chip && jobs.chip.what === 'flash' && chipOwner() === r.uid ? jobs.chip : null;
-    const how = B.flashWay(state.health, r.module);
+    const { d, job, how, stop, buildOff, summary, confirm, where } = flightWrite(r);
     const now = job && job.running ? jobBlock(job, (how.way === 'build' ? 'Building and flashing ' : 'Flashing ') + nameOf(r)) : '';
     const powers = powersFor(r.module || 'le');
     const box = (field, value, hint) => '<input type="text" inputmode="numeric" data-keep="build:' + field + '"' +
@@ -400,12 +427,6 @@ async function buildAndFlash() {
     const pick = (field, values, value, show) => '<select data-build="' + field + '">' +
       values.map((v) => '<option value="' + v + '"' + (Number(v) === Number(value) ? ' selected' : '') + '>' +
         show(v) + '</option>').join('') + '</select>';
-
-    const stop = !r.module ? 'Choose the radio module above first.'
-      : how.stop ? how.stop
-        : !r.onProbe ? 'Put the board on the ST-Link and press Read the board.'
-          : busy() ? 'Something else is running on this board.' : '';
-    const buildOff = stop ? ' disabled' : '';
 
     const head = '<div class="pane"><h3>Radio and identity' + (t.setBy ? '<span class="note">' + esc(t.setBy) + '</span>' : '') + '</h3>' + now +
       (t.disagree ? '<p class="outcome bad inpane">' + esc(t.disagree) + '</p>' : '');
@@ -421,20 +442,6 @@ async function buildAndFlash() {
     // it was read, gets the dashes and no reason for them.
     const noBlock = read && t.line ? '<p class="' + (t.damaged ? 'outcome bad' : 'plain') + ' inpane">' + esc(t.line) + '</p>' : '';
 
-    const pick_state = state.pick && state.pick.kind === 'build' ? state.pick : null;
-    const summary = 'board ' + d.csid + ', ' + B.MODULE[r.module || 'le'] + ', SF' + d.sf + ', ' + d.dbm + ' dBm; ' +
-      B.PHASES.map((ph, n) => ph.key + ' ' + B.rateWords(draftRate(d, n)) + ', log ' + logSecs(d['p' + n + 'l'], ph.key)).join('; ');
-    // The module is said in words either way: the image for the other module transmits
-    // almost nothing and still reports success.
-    const module = '<b>' + B.MODULE[r.module || 'le'] + ' module</b>';
-    const will = how.way === 'build'
-      ? (state.fsw ? 'Writes the flight software for the ' + module + ' from this computer\'s tree with these settings to <b>' + esc(nameOf(r)) + '</b>. ' + esc(nextImage(r.module))
-        : 'Builds the flight software for the ' + module + ' with these settings and writes it to <b>' + esc(nameOf(r)) + '</b>. About 13 seconds.')
-      : 'Writes the flight image this app carries for the ' + module + ' to <b>' + esc(nameOf(r)) + '</b>, with these settings in it.';
-    const confirm = !pick_state || job && job.running ? '' : '<div class="confirm">' +
-      '<span class="grow">' + (stop ? esc(stop) : will) + '</span>' +
-      '<button data-buildgo="1" class="primary"' + buildOff + '>' + how.verb + '</button>' +
-      '<button data-buildcancel="1">Cancel</button></div>';
     // Which of the two ways this screen is going to use, and why it is that one.
     const way = '<p class="plain inpane">' + esc(how.says) + '</p>';
 
@@ -485,8 +492,12 @@ async function buildAndFlash() {
       '<p class="plain inpane">The board picks the phase from altitude: air after a 15 m climb (30 m on GPS if the barometer is dead), ground again after 30 s at rest below half the climb, or after 3 min with the IMU still at any height. Release is not detected, so air covers the climb and the fall. After a reset it logs as air for up to 5 min while transmitting at the ground rate. Each phase has its own log gap, and its own transmit gap or battery table.</p>' +
       '<div class="phases">' + cards.join('') + '</div>' +
       '<p class="plain inpane">On the ground the readings mostly stay in the board\'s RAM, and only one per ground log gap reaches flash.</p>';
-    const go = '<div class="kv"><div class="l">' + how.verb + '</div><div><span class="val">' + esc(summary) + '</span></div><div><button data-buildembed="1"' + buildOff + '>' + how.verb + '</button></div></div>';
-    return head + noBlock + way + table + phases + go + confirm + last + buildError + '</div>';
+    const go = '<div class="kv"><div class="l">' + how.verb + '</div><div><span class="val">' + esc(summary) + '</span></div><div><button data-buildembed="1"' + buildOff + '>' + how.verb + '</button>' +
+      // said here too: with the button off, the confirm that carries it never opens
+      (stop ? ' <span class="note">' + esc(stop) + '</span>' : '') + '</div></div>';
+    // table left, phases right when the sheet is wide enough (style.css, .two.side)
+    return head + noBlock + way + '<div class="two side"><div class="col">' + table + '</div><div class="col">' + phases + '</div></div>' +
+      go + (where === 'radio' ? confirm : '') + last + buildError + '</div>';
   }
 
   // One phase's five bands as rows of boxes: "above [75] % → [10] s", then "to [50] % → [30] s"...,
@@ -535,6 +546,8 @@ async function buildAndFlash() {
           (fw.note ? '<br><span class="note">' + esc(fw.note) + '</span>' : '') +
           (fw.built && fw.value.toLowerCase() !== fw.built.toLowerCase() ? '<br><span class="note">' + esc(fw.built.charAt(0).toUpperCase() + fw.built.slice(1)) + '</span>' : '');
     const wrongModule = fw.mismatch && !(r.onProbe && state.stale) ? '<p class="outcome bad inpane">' + esc(fw.mismatch) + '</p>' : '';
+    // a bench board says so in its own pane
+    const said = isBench(r) ? '' : consoleDisagrees(r);
 
     // the app only keeps the newest one
     const newest = images[0];
@@ -542,6 +555,21 @@ async function buildAndFlash() {
       ? '<div><span class="l">Last saved flight software</span><span class="grow val">' + esc(D.dayTime(new Date(newest.when * 1000), new Date())) + ', ' + D.bytes(newest.bytes) + '</span>' +
           '<button data-putback="' + esc(newest.name) + '"' + dis + '>Put back last saved flight software</button></div>'
       : '<div><span class="l">Last saved flight software</span><span class="note">none saved off this board</span></div>';
+
+    // The sensor bench, its own row: it is not a flight write, and it takes the board's module.
+    const benchStop = !r.module ? 'Choose the radio module in Radio and identity first.'
+      : !r.onProbe ? 'Put the board on the ST-Link and press Read the board.'
+        : busy() ? 'Something else is running on this board.' : '';
+    const benchRow = '<div><span class="l">Sensor bench</span><button data-benchwrite="1"' + (benchStop ? ' disabled' : '') + '>Write the sensor bench</button>' +
+      '<span class="note">' + esc(benchStop || 'Tests every part and prints it on the console. Not flight software.') + '</span></div>';
+    const benchPick = state.pick && state.pick.kind === 'bench' && state.pickFor === r.uid ? state.pick : null;
+    const benchConfirm = !benchPick || job && job.running ? '' : '<div class="confirm"><span class="grow">' +
+      (benchStop ? esc(benchStop)
+        : 'Writes the <b>' + B.MODULE[r.module] + ' sensor bench</b> over whatever is on <b>' + esc(nameOf(r)) + '</b>, flight software included. ' +
+          'It sends as board 254 and has no settings block. ' + (state.backup ? 'The image on it now is saved first.' : 'Nothing is saved first.') +
+          ' Write flight software again before it flies.') + '</span>' +
+      '<button data-benchgo="1" class="primary"' + (benchStop ? ' disabled' : '') + '>Write the sensor bench</button>' +
+      '<button data-benchcancel="1">Cancel</button></div>';
 
     const pick = state.pick && (state.pick.kind === 'saved' || state.pick.kind === 'file') ? state.pick : null;
     const confirm = !pick || job && job.running ? '' : '<div class="confirm">' +
@@ -558,7 +586,7 @@ async function buildAndFlash() {
     // last one ended goes last, and gives way to whatever is being confirmed now.
     const now = job && job.running ? jobBlock(job, 'Flashing ' + nameOf(r)) : '';
     let last = '';
-    if (now || pick || state.refused) last = '';
+    if (now || pick || benchPick || state.refused) last = '';
     else if (job && job.error) last = '<p class="outcome bad inpane">Flash failed: ' + esc(job.error) + '</p>' +
       (job.saved ? '<p class="step inpane">What was on the board is saved as <span class="path">' + esc(job.saved) + '</span>.</p>' : '');
     else if (job && (job.steps || []).length) last = '<p class="outcome inpane">Flashed and checked.' +
@@ -569,8 +597,9 @@ async function buildAndFlash() {
       saved +
       '<div><span class="l">From a file</span><label class="button' + (can ? '' : ' disabled') + '">Flash a file…<input type="file" accept=".bin" data-file="1" hidden' + dis + '></label>' +
         '<span class="note">A file\'s radio settings are whatever it was built with.</span></div>' +
+      benchRow +
       '<div><label class="check"><input type="checkbox" data-backup="1"' + (state.backup ? ' checked' : '') + '> Save what is on the board first</label></div>' +
-      '</div>' + confirm + refused + last + '</div>';
+      '</div>' + said + confirm + benchConfirm + refused + last + '</div>';
   }
 
   // What a finished pull left behind: how much of the log came off the chip, where it is
@@ -634,13 +663,69 @@ async function buildAndFlash() {
   // three pulls were pointed at it on one day. It is never a console: not offered, not kept.
   const isFlightController = (b) => b.usb === '1209:5741';
 
+  // Else the port that last printed the log format (benchpane.js hears every port), else any free one.
   function consoleFor(r) {
     const usable = (hub.boards || []).filter((b) => !isFlightController(b));
     const ports = usable.map((b) => b.port);
     const kept = store.get('dg-console-' + (r.uid || ANY));
     if (kept && ports.includes(kept)) return kept;
+    const talking = A.benchPane ? A.benchPane.talking(usable) : '';
+    if (talking) return talking;
     const free = usable.find((b) => b.state !== 'receiver');
     return free ? free.port : '';
+  }
+
+  // One chooser per sheet: in Sensor bench on a bench board, in Flight log otherwise.
+  function consoleChooser(r, port) {
+    const boards = hub.boards || [];
+    if (!boards.length) return '<span class="note">No serial port. Plug in the board\'s console.</span>';
+    return '<select data-console="' + esc(r.uid || ANY) + '" aria-label="Serial port of this board\'s console">' +
+      boards.map((b) => '<option value="' + esc(b.port) + '"' + (b.port === port ? ' selected' : '') + (isFlightController(b) ? ' disabled' : '') + '>' +
+        esc((b.name || b.port) + (isFlightController(b) ? ', the drone\'s flight controller' : b.state === 'receiver' ? ', being read as a receiver' : '')) + '</option>').join('') + '</select>';
+  }
+
+  // What the app last found on the board decides the layout. The console only agrees or not.
+  const isBench = (r) => r.firmware === 'bench';
+  function consoleDisagrees(r) {
+    if (!A.benchPane || !r.uid) return '';
+    const s = A.benchPane.sessionOn(consoleFor(r));
+    if (!s || s.bench === null) return '';
+    const bench = isBench(r);
+    if (s.bench === bench) return '';
+    const fw = B.firmwareWords(r.fw, r.module).value || r.firmware || 'not known';
+    const probe = r.onProbe ? r.probe : state.probes[0];
+    return '<p class="outcome bad inpane">Last read: ' + esc(bench ? 'sensor bench' : fw.charAt(0).toLowerCase() + fw.slice(1)) + '. ' +
+      (bench ? 'The board did not say test=bench when it started on the console.' : 'The console says test=bench.') +
+      (probe ? ' <button data-read="' + esc(probe.serial) + '"' + (busy() ? ' disabled' : '') + '>Read the board</button>' : '') + '</p>';
+  }
+
+  // The head of the sensor bench. Its cards, starts and console are benchpane.js's, painted
+  // into #cs-bench on their own timer so the rest of the sheet is not redrawn twice a second.
+  function benchHead(r) {
+    const port = consoleFor(r);
+    const b = (hub.boards || []).find((x) => x.port === port);
+    const reading = !!b && b.state === 'receiver';
+    const s = A.benchPane ? A.benchPane.sessionOn(port) : null;
+    const source = r.onProbe && !state.stale ? 'running it, read off the board now'
+      : s && s.bench ? 'the console says test=bench' : 'on it when last read';
+    const { stop, buildOff, summary, confirm, where } = flightWrite(r);
+    return '<div class="pane"><h3>Sensor bench<span class="note">' + esc(source) + '</span></h3>' + consoleDisagrees(r) +
+      '<div class="rows kvrows">' +
+        '<div><span class="l">Console port</span>' + consoleChooser(r, port) +
+          (port && !reading ? '<button data-listen="' + esc(port) + '">Read this port</button>' : '') + (reading ? mark('good', 'being read') : '') + '</div>' +
+        '<div><span class="l">On the console</span><button data-radio="' + esc(port) + '"' + (reading ? '' : ' disabled') + '>Radio on/off</button>' +
+          '<button data-clear="1">Clear this record</button>' + (reading ? '' : '<span class="note">Radio on/off needs the port read.</span>') + '</div>' +
+        '<div><span class="l">Flight software</span><button data-buildembed="1" data-where="bench"' + buildOff + '>Write flight software</button>' +
+          '<span class="note">' + esc(stop || summary + '. Change it in Radio and identity below.') + '</span></div>' +
+      '</div>' + (where === 'bench' ? confirm : '') +
+      (state.buildError ? '<p class="outcome bad inpane">' + esc(state.buildError) + '</p>' : '') + '</div>' +
+      '<div id="cs-bench" class="benchlive"></div>';
+  }
+
+  // Panes a bench board has no use for until flight software goes back on. Open or shut is
+  // kept here, since a redraw would shut them.
+  function fold(key, r, summary, inner) {
+    return '<details class="fold" data-fold="' + key + '"' + (state.open[key + ':' + r.uid] ? ' open' : '') + '><summary>' + summary + '</summary>' + inner + '</details>';
   }
 
   function logPane(r) {
@@ -708,19 +793,18 @@ async function buildAndFlash() {
           '<button data-openlog="' + esc(l.name) + '">Open</button></div>').join('') + '</div>';
     }
 
-    const chooser = boards.length
-      ? '<select data-console="' + esc(r.uid || ANY) + '" aria-label="Serial port of this board\'s console">' +
-          boards.map((b) => '<option value="' + esc(b.port) + '"' + (b.port === port ? ' selected' : '') + (isFlightController(b) ? ' disabled' : '') + '>' +
-            esc((b.name || b.port) + (isFlightController(b) ? ', the drone\'s flight controller' : b.state === 'receiver' ? ', being read as a receiver' : '')) + '</option>').join('') + '</select>' +
-        '<span class="note">The board\'s serial console.</span>'
-      : '<span class="note">No serial port. Plug in the board\'s console.</span>';
+    const bench = isBench(r);
+    const chooser = bench ? '<span class="val">' + esc(port || 'none') + '</span><span class="note">chosen in Sensor bench</span>'
+      : consoleChooser(r, port) + (boards.length ? '<span class="note">The board\'s serial console.</span>' : '');
 
     return '<div class="pane"><h3>Flight log</h3>' + last +
       '<div class="rows kvrows">' +
         '<div><span class="l">Console port</span>' + chooser + '</div>' +
         '<div><label class="check"><input type="checkbox" data-keepfsw="1"' + (state.keepFsw ? ' checked' : '') +
           '> Save the flight software that is on it and put it back</label>' +
-          (state.keepFsw ? '' : mark('warn', 'the board will be left on the dump firmware')) + '</div>' +
+          (state.keepFsw ? '' : mark('warn', 'the board will be left on the dump firmware')) +
+          // the pull saves whatever is on it, here the sensor bench, not flight software
+          (bench && state.keepFsw ? '<span class="note">On this board that is the sensor bench.</span>' : '') + '</div>' +
         '<div><button data-pull="1" class="primary"' + (ready ? '' : ' disabled') + '>Pull the flight log</button>' +
           '<span class="note">' + (r.onProbe || r.id === ANY
             ? (state.keepFsw ? 'Flashes the board twice. Takes minutes.' : 'Flashes the dump firmware. Takes minutes.')
@@ -766,10 +850,21 @@ async function buildAndFlash() {
   function sheetHtml() {
     const r = rows().find((x) => x.id === state.sel);
     if (!r) {
-      return '<div class="pane"><p class="empty">Clip a ChipSat onto the ST-Link and plug the ST-Link in.</p></div>';
+      // An image chosen on the Data screen waits here for a board, and says so.
+      const chosen = state.pick && state.pick.kind === 'saved'
+        ? '<div class="confirm"><span class="grow">Chosen to write: ' + esc(state.pick.label) + '. Read the board first.</span>' +
+          '<button data-flashcancel="1">Cancel</button></div>'
+        : '';
+      return '<div class="pane"><p class="empty">Clip a ChipSat onto the ST-Link and plug the ST-Link in.</p>' + chosen + '</div>';
     }
     if (r.unread) return headPane(r);
     if (r.id === ANY) return headPane(r) + logPane(r);
+    if (isBench(r)) {
+      return headPane(r) + benchHead(r) + firmwarePane(r) +
+        fold('radio', r, '<b>Radio and identity, phases</b><span class="note">Not on the board: the sensor bench has no settings block. ' +
+          'These are what the next flight write uses.</span>', radioPane(r)) +
+        fold('log', r, '<b>Flight log</b><span class="note">Pull or clear the chip.</span>', logPane(r));
+    }
     return headPane(r) + radioPane(r) + '<div class="two">' + firmwarePane(r) + logPane(r) + '</div>';
   }
 
@@ -785,6 +880,8 @@ async function buildAndFlash() {
     $('cs-look').disabled = btn.disabled;
     paint($('cs-list'), listHtml());
     paint($('cs-sheet'), sheetHtml());
+    const r = all.find((x) => x.id === state.sel);
+    if (A.benchPane) A.benchPane.show(r && r.uid && !r.unread && isBench(r) ? r : null, r ? consoleFor(r) : '');
   }
 
   // ---------- doing things ----------
@@ -806,6 +903,23 @@ async function buildAndFlash() {
       state.refused = e.missing ? CANNOT : (e.message || String(e));
       state.canForce = !force && !e.missing && B.isOtherBoardRefusal(state.refused);
       if (!state.canForce) state.pick = null;
+    }
+    await A.shell.pollJobs();
+    render();
+  }
+
+  // The sensor bench goes by the board's module. A refusal stays in the Firmware pane.
+  async function writeBench() {
+    const r = rows().find((x) => x.id === state.sel);
+    state.pick = null;
+    if (!r || !r.uid || !r.module || !r.onProbe || busy()) { render(); return; }
+    state.refused = ''; state.canForce = false;
+    if (state.peek) await state.peek;
+    try {
+      await hub.chipFlash({ uid: r.uid, embedded: 'bench', module: r.module, backup: state.backup });
+      toast('Writing the sensor bench on ' + nameOf(r));
+    } catch (e) {
+      state.refused = e.missing ? CANNOT : (e.message || String(e));
     }
     await A.shell.pollJobs();
     render();
@@ -929,11 +1043,19 @@ async function pull(anyConsole) {
       state.pick = null;
     } else if (at('data-buildembed')) {
       state.pickFor = r.uid;
-      state.pick = { kind: 'build', label: 'the flight software' };
+      state.pick = { kind: 'build', label: 'the flight software', where: at('data-where') || 'radio' };
     } else if (at('data-buildgo')) {
       buildAndFlash();
       return;
     } else if (at('data-buildcancel')) {
+      state.pick = null;
+    } else if (at('data-benchwrite') && r && r.uid) {
+      state.pickFor = r.uid;
+      state.pick = { kind: 'bench', label: 'the sensor bench' };
+    } else if (at('data-benchgo')) {
+      writeBench();
+      return;
+    } else if (at('data-benchcancel')) {
       state.pick = null;
     } else if (at('data-putback')) {
       const l = state.logs.find((x) => x.name === at('data-putback'));
@@ -974,6 +1096,15 @@ async function pull(anyConsole) {
     state.refused = ''; state.canForce = false;
     render();
   });
+
+  // toggle does not bubble, so it is caught on the way down
+  root.addEventListener('toggle', (e) => {
+    const key = e.target.getAttribute && e.target.getAttribute('data-fold');
+    const r = rows().find((x) => x.id === state.sel);
+    if (!key || !r || !!state.open[key + ':' + r.uid] === e.target.open) return;
+    state.open[key + ':' + r.uid] = e.target.open;
+    render();
+  }, true);
 
   root.addEventListener('input', (e) => {
     const built = e.target.getAttribute && e.target.getAttribute('data-build');

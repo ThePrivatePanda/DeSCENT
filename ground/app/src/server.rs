@@ -530,7 +530,7 @@ fn settings_asked(q: &[(String, String)]) -> Result<Option<crate::radio::Request
         ("sf".into(), "spreading factor".into()),
         ("dbm".into(), "transmit power".into()),
     ];
-    for (p, name) in crate::settings::PHASE_NAMES.iter().enumerate() {
+    for (p, name) in crate::settings::PHASE_WORDS.iter().enumerate() {
         keys.push((format!("fixed{}", p), format!("{} gap", name)));
         keys.push((format!("follow{}", p), format!("{} battery flag", name)));
         keys.push((format!("soc{}", p), format!("{} battery thresholds", name)));
@@ -569,7 +569,7 @@ fn settings_asked(q: &[(String, String)]) -> Result<Option<crate::radio::Request
     };
     let (csid, sf, dbm) = (number("csid", "board id")?, number("sf", "spreading factor")?, number("dbm", "transmit power")?);
     let mut rates = Vec::new();
-    for (p, name) in crate::settings::PHASE_NAMES.iter().enumerate() {
+    for (p, name) in crate::settings::PHASE_WORDS.iter().enumerate() {
         rates.push(crate::radio::RateRequest {
             fixed_ms: number(&format!("fixed{}", p), &format!("{} gap", name))?,
             follow: flag(&format!("follow{}", p), &format!("{} battery flag", name))?,
@@ -578,15 +578,15 @@ fn settings_asked(q: &[(String, String)]) -> Result<Option<crate::radio::Request
         });
     }
     let mut logs = Vec::new();
-    for (p, name) in crate::settings::PHASE_NAMES.iter().enumerate() {
+    for (p, name) in crate::settings::PHASE_WORDS.iter().enumerate() {
         logs.push(number(&format!("log{}", p), &format!("{} log gap", name))?);
     }
     let log_blind_ms = number("logblind", "log gap with no altitude source")?;
     Ok(Some(crate::radio::Request { csid, sf, dbm, rates, logs, log_blind_ms }))
 }
 
-// "set for board 9, SF12 at 15 dBm; waiting every 60 s, rising every 10 s, falling back to
-// back, landed by battery: ...; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s".
+// "set for board 9, SF12 at 15 dBm; ground every 60 s, air every 10 s, air (falling slot)
+// back to back, ground (landed slot) by battery: ...; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s".
 // If the slots pair up as the page writes them (waiting = landed, rising = falling) it's
 // "ground every 60 s, air every 1 s; log ground every 10 s, air every 0.05 s, blind 0.2 s"
 fn settings_words(asked: &crate::settings::Asked) -> String {
@@ -605,7 +605,7 @@ fn settings_words(asked: &crate::settings::Asked) -> String {
             secs(asked.log_blind_ms)
         );
     }
-    let phases: Vec<String> = crate::settings::PHASE_NAMES
+    let phases: Vec<String> = crate::settings::PHASE_WORDS
         .iter()
         .zip(asked.rates.iter())
         .map(|(name, r)| format!("{} {}", name, r.words()))
@@ -1161,6 +1161,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
     }
 
     if path == "/api/log/rotate" {
+        let Some(request) = post_only(request) else { return };
         let text = match logfile::rotate(&ctx.log, &ctx.data) {
             Ok(p) => {
                 println!("logging every line to {}", p.display());
@@ -1174,11 +1175,8 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
         return;
     }
 
-    // Pulling a flight log off a chip. The app runs what it was told to run and shows what
-    // that says; it does not know an ST-Link from a cross compiler and is not going to.
-    // Pull a flight log off a ChipSat. Everything happens in this program: the debug
-    // probe is driven directly and the dump firmware is carried inside the binary, so
-    // there is nothing to install and nothing to configure.
+    // Pull a flight log off a ChipSat, or clear its chip with wipe=1. The probe is driven from
+    // here, and the dump firmware is the tree's when there is one, else the carried copy.
     if path == "/api/pull" {
         let mut body = String::new();
         let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
@@ -1257,7 +1255,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
                                 }
                                 hub.lock().unwrap().take_back(&board2);
                             });
-                            println!("pulling from {}{}", board, if keep_fsw { ", keeping the flight software" } else { ", NOT keeping the flight software" });
+                            println!("{} {}{}", if wipe { "clearing" } else { "pulling from" }, board, if keep_fsw { ", keeping the flight software" } else { ", NOT keeping the flight software" });
                             String::from("{\"ok\":true}")
                         }
                         Err(e) => {
@@ -1584,7 +1582,7 @@ mod tests {
         let e = settings_asked(&pairs(&all[..all.len() - 1])).unwrap_err();
         assert!(e.contains("no log gap with no altitude source"), "{}", e);
         let e = settings_asked(&pairs(&all[..all.len() - 3])).unwrap_err();
-        assert!(e.contains("no falling log gap"), "{}", e);
+        assert!(e.contains("no air (falling slot) log gap"), "{}", e);
         assert_eq!(got.rates[2], crate::radio::RateRequest { fixed_ms: 0, follow: true, percent: vec![90, 60, 30, 5], interval_ms: vec![1, 2, 3, 4, 5] });
         assert_eq!(got.rates[0].fixed_ms, 60000);
         let e = settings_asked(&pairs(&all[..3])).unwrap_err();
@@ -1593,14 +1591,19 @@ mod tests {
         let mut half: Vec<(&str, &str)> = all[..7].to_vec();
         half.extend_from_slice(&[("log0", "1000"), ("log1", "50"), ("log2", "50"), ("log3", "1000"), ("logblind", "200")]);
         let e = settings_asked(&pairs(&half)).unwrap_err();
-        assert!(e.contains("no rising gap"), "{}", e);
+        assert!(e.contains("no air gap"), "{}", e);
         let mut bad = all.clone();
         bad[0] = ("csid", "");
         let e = settings_asked(&pairs(&bad)).unwrap_err();
         assert!(e.contains("board id") && e.contains("whole number"), "{}", e);
         let mut bad = all.clone();
         bad[12] = ("follow2", "yes");
-        assert!(settings_asked(&pairs(&bad)).unwrap_err().contains("falling battery flag is 0 or 1"));
+        assert!(settings_asked(&pairs(&bad)).unwrap_err().contains("air (falling slot) battery flag is 0 or 1"));
+        // the page's own words, not the slots' old ones
+        let mut bad = all.clone();
+        bad[4] = ("follow0", "2");
+        let e = settings_asked(&pairs(&bad)).unwrap_err();
+        assert!(e.contains("ground battery flag") && !e.contains("waiting"), "{}", e);
         let mut bad = all.clone();
         bad[13] = ("soc2", "90,6x,30,5");
         assert!(settings_asked(&pairs(&bad)).unwrap_err().contains("whole numbers"));
@@ -1630,7 +1633,7 @@ mod tests {
             on.rates[3].follow = true;
             assert_eq!(
                 set_for(image.bytes, image.module, &radio, &on).unwrap().1,
-                format!("set for board 9, SF12 at {} dBm; waiting every 60 s, rising every 0.5 s, falling every 0.5 s, landed by battery: 10 s above 75 %, 30 s to 50 %, 60 s to 35 %, 120 s to 20 %, then 180 s (60 s when the gauge cannot be read); log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power)
+                format!("set for board 9, SF12 at {} dBm; ground every 60 s, air every 0.5 s, air (falling slot) every 0.5 s, ground (landed slot) by battery: 10 s above 75 %, 30 s to 50 %, 60 s to 35 %, 120 s to 20 %, then 180 s (60 s when the gauge cannot be read); log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power)
             );
             // A read of the board still says which image it is and which module it is for.
             let seen = crate::chipflash::recognise(&bytes, &known);
@@ -1644,7 +1647,7 @@ mod tests {
             let mut btb = wanted.clone();
             btb.rates[2].fixed_ms = 0;
             assert_eq!(set_for(image.bytes, image.module, &radio, &btb).unwrap().1,
-                format!("set for board 9, SF12 at {} dBm; waiting every 60 s, rising every 0.5 s, falling back to back, landed every 60 s; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power));
+                format!("set for board 9, SF12 at {} dBm; ground every 60 s, air every 0.5 s, air (falling slot) back to back, ground (landed slot) every 60 s; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power));
         }
     }
 
@@ -1655,7 +1658,7 @@ mod tests {
         assert_eq!(settings_words(&asked), "set for board 9, SF7 at 14 dBm; ground every 60 s, air every 1 s; log ground every 10 s, air every 0.05 s, blind 0.2 s");
         // landed log gap differs from waiting, so slot by slot
         let apart = crate::settings::Asked { logs: [10_000, 50, 50, 1000], ..asked.clone() };
-        assert_eq!(settings_words(&apart), "set for board 9, SF7 at 14 dBm; waiting every 60 s, rising every 1 s, falling every 1 s, landed every 60 s; log every 10 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s");
+        assert_eq!(settings_words(&apart), "set for board 9, SF7 at 14 dBm; ground every 60 s, air every 1 s, air (falling slot) every 1 s, ground (landed slot) every 60 s; log every 10 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s");
     }
 
     #[test]
@@ -2040,5 +2043,46 @@ mod tests {
         assert_eq!(content_type("descent-pull-x/dump.txt"), "text/plain; charset=utf-8");
         assert_eq!(content_type("descent-pull-x/report.json"), "application/json");
         assert_eq!(content_type("descent-pull-x/descent-ground-fsw-ttyACM1.bin"), "application/octet-stream");
+    }
+
+    // Nothing here opens a port or a probe: no board is listed and there is no fsw tree.
+    fn quiet_ctx(data: &Path) -> Arc<Ctx> {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        Arc::new(Ctx {
+            hub: Arc::new(Mutex::new(Hub::new(tx))),
+            broadcast: Broadcast::new(),
+            log: Arc::new(Mutex::new(None)),
+            dir: data.to_path_buf(),
+            data: data.to_path_buf(),
+            port: 0,
+            pull: crate::pull::shared(),
+            chips: Arc::new(Mutex::new(crate::chips::Registry::load(data))),
+            chip: crate::chipflash::shared(),
+            gate: crate::stm32::Gate::new(),
+            exe: None,
+            started: std::time::SystemTime::now(),
+            local: Arc::new(crate::localfw::Local::new(
+                None,
+                data,
+                Box::new(crate::localfw::RealBuilder),
+                crate::localfw::Carried::this_build(),
+            )),
+        })
+    }
+
+    #[test]
+    fn a_get_does_not_start_a_new_session_log() {
+        use tiny_http::{Method, TestRequest};
+        let data = scratch("rotate");
+        let ctx = quiet_ctx(&data);
+        let get = TestRequest::new().with_method(Method::Get).with_path("/api/log/rotate");
+        handle(get.into(), ctx.clone());
+        assert!(ctx.log.lock().unwrap().is_none());
+        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
+
+        let post = TestRequest::new().with_method(Method::Post).with_path("/api/log/rotate");
+        handle(post.into(), ctx.clone());
+        assert!(ctx.log.lock().unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

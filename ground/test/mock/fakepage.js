@@ -24,7 +24,7 @@ function page(scripts, hub, o) {
   const jobs = { pull: null, chip: null, tbeam: null, heard };
   const sandbox = {
     console,
-    setInterval: (fn) => { timers.push(fn); return timers.length; },
+    setInterval: (fn, ms) => { fn.ms = ms; timers.push(fn); return timers.length; },
     clearInterval() {},
     localStorage: { getItem: () => null, setItem() {} },
     DG: {},
@@ -51,7 +51,7 @@ function page(scripts, hub, o) {
     { getAttribute: (n) => (n in attrs ? attrs[n] : null), closest: () => null, blur() {}, tagName: 'BUTTON' }, more || {});
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    parts, jobs, toasts, settle, target, taps: sandbox.DGApp.taps,
+    parts, jobs, toasts, settle, target, taps: sandbox.DGApp.taps, shell: sandbox.DGApp.shell,
     html: (id) => el(id).html,
     async fire(id, type, attrs, more) {
       for (const fn of handlers[id + ':' + type] || []) await fn({ target: target(attrs || {}, more) });
@@ -60,6 +60,10 @@ function page(scripts, hub, o) {
     // The screen's timer, run by hand as many times as asked.
     async ticks(n) {
       for (let i = 0; i < n; i++) { for (const fn of timers.slice(-1)) await fn(); await settle(); }
+    },
+    // Every timer set to this many ms, when a page has more than one.
+    async every(ms, n) {
+      for (let i = 0; i < (n || 1); i++) { for (const fn of timers.filter((f) => f.ms === ms)) await fn(); await settle(); }
     },
     async jobEnded(kind) { for (const fn of heard) fn([kind]); await settle(); },
   };

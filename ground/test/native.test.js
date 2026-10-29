@@ -2,12 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert');
 const N = require('../web/js/serial_native.js');
 
-test('native transport only when the page came from the local app', () => {
+test('native transport whenever the page came over plain http, from this computer or another screen', () => {
   assert.equal(N.isNativeHost({ protocol: 'http:', hostname: '127.0.0.1' }), true);
   assert.equal(N.isNativeHost({ protocol: 'http:', hostname: 'localhost' }), true);
   assert.equal(N.isNativeHost({ protocol: 'file:', hostname: '' }), false);
   assert.equal(N.isNativeHost({ protocol: 'https:', hostname: 'ground.privatepanda.co' }), false);
-  assert.equal(N.isNativeHost({ protocol: 'http:', hostname: '192.168.1.5' }), false);
+  assert.equal(N.isNativeHost({ protocol: 'http:', hostname: '192.168.1.5' }), true);
 });
 
 test('a line frame reaches the page as receiver key and text', () => {

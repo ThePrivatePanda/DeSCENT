@@ -1,4 +1,4 @@
-//! Builds the flight software for one board, with that board's settings compiled into it.
+//! Builds the flight software, the dump and bench sketches and radio.json from the fsw tree.
 //!
 //! Which radio module is on the board is a compile-time choice in the flight software: the power
 //! amplifier rows differ. Everything else a board is given lives in the settings block, which the

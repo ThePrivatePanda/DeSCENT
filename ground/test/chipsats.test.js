@@ -506,3 +506,17 @@ test('a pull says which dump firmware read it and which flight software was on t
   p.jobs.heard.forEach((fn) => fn([]));
   assert.match(p.sheet(), /Read with the dump firmware built here 14:01 from abc1234 \+ FlashLog.cpp changed. On the board was the flight LE built here 14:02 from abc1234 \+ config.h changed./);
 });
+
+test('an image chosen on Data with no board listed says it is waiting, and can be dropped', async () => {
+  const p = await chipsats({ chips: [], probes: [] });
+  p.shell.writeImage({ name: '2026-10-17/pulls/1432-board9/1432-board9-20393256.bin', when: 1790000000, uid: '20393256' });
+  await p.settle();
+  assert.match(p.sheet(), /Chosen to write: the image saved on .*Read the board first\./);
+  await p.fire('screen-chipsats', 'click', { 'data-flashcancel': '1' });
+  assert.doesNotMatch(p.sheet(), /Chosen to write/);
+});
+
+test('a Patch and flash that cannot go says why beside the button', async () => {
+  const p = await chipsats({ probes: [] });
+  assert.match(p.sheet(), /data-buildembed="1" disabled>[^<]*<\/button> <span class="note">Put the board on the ST-Link and press Read the board\./);
+});
