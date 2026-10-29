@@ -32,6 +32,7 @@ python3 tools/test_imu_power_analyze.py
 - test_health - the sensor recovery ladders with fake drivers: retry, reset, set aside with a backoff that stops at 5 s in the air, one step a pass, the bus before any sensor, GPS first on the ground, a partly working IMU left alone in the air. passes
 - test_env_recovery - a BME280 missing at boot comes back once it answers, paced like the flight loop. it never did before. passes
 - test_imu_wake - the HP wake after a transmission against a simulated BNO085 that takes writes and never answers, it gives up within its 1.5 s budget instead of about 9.7 s. passes
+- test_flight_loop - FlightController with fake drivers and a chip in RAM, once per module: a phase change inside the TX wait still sends the next packet at once (it waited a whole gap before 2026-10-28), every record from 28 s before take-off reaches the chip with nothing dropped through the TX waits, and a stuck erase says `stopped` once. passes
 
 ## Board
 

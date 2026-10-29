@@ -86,12 +86,6 @@ constexpr uint32_t kUtcAnchorIntervalMs = 10000;
 // into a RAM ring first; on the ground only one per ground gap reaches the chip, so a take-off still
 // writes the 30 s before it. The gaps are in the settings block, these are what a fresh image carries.
 // Only slots 0 (ground) and 1 (air) are read, the rest stay so old blocks still parse
-//
-// Flight phases (app/Phase.h): the ground, and the air from a climb until it is at rest
-// again. Falling is not detected: on the 2026-10-13 drops the IMU's linear acceleration read 0.3
-// to 28 m/s2 on the drone and the same during the release (motor vibration, and a flat sat is at
-// terminal speed in half a second), and the drone itself descended 53 m before letting go, so
-// neither a rate nor a drop from the peak tells a release from the drone
 // ms. A ground gap of 0 writes nothing on the ground (before 2026-10-22 it meant every IMU reading),
 // an air gap of 0 still means every IMU reading
 constexpr uint32_t kLogIntervalMsDefault[4] = {10000, 50, 50, 10000};   // ground, air, then two unused
@@ -103,6 +97,12 @@ constexpr uint32_t kLogRingRecords = 600;
 constexpr uint8_t  kLogDrainPerCall = 4;    // per call, so sampling and the radio keep going
 constexpr uint32_t kLogRingSlackRecords = 20;   // 1 s of margin on the ground for an erase
 
+// Flight phases (app/Phase.h): the ground, and the air from a climb until it is at rest
+// again. Falling is not detected: on the 2026-10-13 drops the IMU's linear acceleration read 0.3
+// to 28 m/s2 on the drone and the same during the release (motor vibration, and a flat sat is at
+// terminal speed in half a second), and the drone itself descended 53 m before letting go, so
+// neither a rate nor a drop from the peak tells a release from the drone
+//
 // What decides the phase
 constexpr uint32_t kPhaseRateWindowMs = 800;    // the vertical rate is over at least this long
 constexpr float    kPhaseBaselineRateMps = 0.3f; // the ground baseline only follows a sat this still
@@ -162,7 +162,6 @@ constexpr uint16_t kImuBootSettleMs = 1000;      // after a reset. Ours stops ea
 constexpr uint32_t kImuRetryMs = 10000;   // how often a lost IMU gets another try, own driver only
 constexpr uint8_t  kImuInitAttempts = 1;   // at boot, after that the background retry takes over
 constexpr uint16_t kImuWakeSettleMs = 150;       // after wake, before the reports are turned on again
-constexpr uint16_t kImuFreshWaitCycleMs = 500;   // longest a cycle waits for new IMU data
 constexpr uint16_t kImuFreshWaitWakeMs = 3000;   // the same after a wake
 constexpr uint32_t kImuFreshPollMs = 2;          // between checks while waiting
 

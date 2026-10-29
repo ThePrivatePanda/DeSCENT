@@ -395,7 +395,7 @@ static void recorded()
 // between records, as the board read it every 200 ms; with one reading per 5 s record the baseline
 // lags and the drift before drop 2 reads as the climb 20 s early. After Landed the board logged
 // every 10 s, so the ground can only show on the next record
-// Timelines in docs/internals/09-drops-2026-10-17.md: boot 24 air +177 s, release +292.9 s,
+// Timelines from the 2026-10-17 field notes: boot 24 air +177 s, release +292.9 s,
 // touchdown +309.8 s; boot 32 air +84 s, release +382.5 s, touchdown +393.7 s. Wanted: the air
 // from the climb through the fall, and the ground within 40 s of touchdown
 static void recordedBoard9()

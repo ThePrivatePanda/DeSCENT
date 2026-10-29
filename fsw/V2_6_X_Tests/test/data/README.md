@@ -16,5 +16,6 @@ magnitudes of the linear acceleration in m/s2 and of the rotation rate in rad/s,
 reports were valid, whether the barometer was, and its altitude in m. A record every 5 s on the
 ground, about 18 a second in the air, one per 10 s after the board's own Landed. GPS never fixed
 on that board, so there is no GPS column. Made from
-`~/DeSCENT/2026-10-18/pulls/1432-board9/dump.txt` (the raw slots, CRC checked). The timelines are
-in `docs/internals/09-drops-2026-10-17.md`.
+`~/DeSCENT/2026-10-18/pulls/1432-board9/dump.txt` (the raw slots, CRC checked). Release at about
+293 s in boot 24 and 382 s in boot 32. The second one is the most complete fall we have: about 19
+records a second, no gap over 162 ms in the fall, IMU and barometer valid from the climb to rest.

@@ -137,7 +137,7 @@ void FlightController::beginSensors()
     LOG_I(Flash, "log") {
       line.field("records", flashLog_.records());
       line.field("boot", flashLog_.bootCount());
-      line.field("full", flashLog_.full());
+      line.field("stopped", flashLog_.stopped());
     }
   }
 
@@ -302,7 +302,7 @@ void FlightController::followPhase()
       line.field("above", phase_.aboveGroundM(), 1);
     }
     txIntervalMs_ = phaseTxIntervalMs(gauge_.data().valid);
-    previousReadMs_ = now - txIntervalMs_;   // due now
+    phaseDue_ = true;   // not the clock, runCycle resets that after a TX this may be inside
   }
   // boot-air can end without a phase change
   if (phase_.logChanged()) {
@@ -353,12 +353,12 @@ void FlightController::buildPacket(ChipSatTelemetry::TelemetryPacket &into, bool
 // The writer runs every call so the ring keeps emptying between records
 void FlightController::logIfDue()
 {
-  // A full chip is the end of the mission's logging, not a fault. Stop building records for it and
-  // leave the cycle to the radio, which is what matters once there's nowhere left to write
-  if (flashLog_.full()) {
-    if (!logFull_) {
-      logFull_ = true;
-      LOG_W(Flash, "full") {
+  // A stuck erase or failed writes end the log for this boot, a full chip never does (it's a ring).
+  // No point building records nobody writes
+  if (flashLog_.stopped()) {
+    if (!logStopped_) {
+      logStopped_ = true;
+      LOG_W(Flash, "stopped") {
         line.field("records", flashLog_.records());
         line.field("dropped", flashLog_.dropped());
       }
@@ -425,13 +425,14 @@ void FlightController::anchorUtc(uint32_t nowMs)
 
 bool FlightController::transmitDue() const
 {
-  return system_.nowMs() - previousReadMs_ >= txIntervalMs_;
+  return phaseDue_ || system_.nowMs() - previousReadMs_ >= txIntervalMs_;
 }
 
 void FlightController::runCycle()
 {
   ++cycle_;
   ChipSatLog::setCycle(cycle_);
+  phaseDue_ = false;
 
   const uint32_t now = system_.nowMs();
   CycleReads reads;
@@ -471,17 +472,14 @@ void FlightController::runCycle()
     line.field("drop", flashLog_.dropped());
   }
 
-  // HP module only, the IMU sleeps for the transmission. The packet goes out either way
-  // Whether the IMU sleeps through a transmission follows the module, and the module is now a
-  // runtime setting - so this cannot stay a compile-time constant or a board configured as HP from
-  // an LE build would keep its IMU awake through TX, which is the current draw the sleep exists to
-  // avoid. Costs half the IMU samples on HP, which is visible in a pull as validity alternating
+  // HP module only, the IMU sleeps for the transmission. Goes by the block's module byte, not the
+  // build. Costs half the IMU samples on HP, seen in a pull as validity alternating
   const bool moduleSleepsImu = ChipSatSettings::active().module == ChipSatSettings::kModuleHp;
   const bool imuSleeps = moduleSleepsImu && imu_.ready();
   if (imuSleeps) {
     imu_.sleep();
   }
-  // same rule for the flash: on the HP module nothing is logged during a transmission anyway
+  // same for the flash. Records made meanwhile wait in the ring
   const bool flashSleeps = moduleSleepsImu && flash_.ready() && !flashLog_.busy();
   if (flashSleeps) {
     flash_.pause();

@@ -31,3 +31,7 @@ docs/internals/BATON.md
 docs/internals/notes/
 docs/internals/HANDOFF.md
 docs/internals/PROGRESS.md
+
+# private, never public
+docs/internals/
+.claude/council-cache/

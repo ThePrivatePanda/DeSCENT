@@ -48,7 +48,7 @@ constexpr size_t kOffModule      = 18;
 constexpr size_t kOffSf          = 19;
 constexpr size_t kOffDbm         = 20;
 constexpr size_t kOffSetBy       = 21;
-// One rate per phase, 29 bytes each, waiting first: a fixed gap in ms (uint32), then whether the
+// One rate per phase, 29 bytes each, ground first: a fixed gap in ms (uint32), then whether the
 // gap follows the battery instead (0/1), four thresholds in percent (falling, each 1 to 99) and five
 // gaps in ms (uint32), one per band. The fixed gap is what a phase uses when it does not follow the
 // battery, and what it uses while the gauge cannot be read when it does
@@ -90,7 +90,7 @@ struct Settings
   uint8_t  setBy;
   Rate     rate[kPhases];   // ground, air, then two unused
   uint32_t logMs[kPhases];  // the flash log gap in each, same order
-  uint32_t logBlindMs;      // and with no altitude source live
+  uint32_t logBlindMs;      // the old blind gap, unused but still checked
 };
 
 enum class Source : uint8_t
@@ -107,7 +107,7 @@ enum class Parse : uint8_t
   kGood,
 };
 
-// Reads 32 bytes as a block. Separate from begin() because the one block that matters lives in flash
+// Reads 160 bytes as a block. Separate from begin() because the one block that matters lives in flash
 // and cannot be moved, and a rule nobody can feed bad bytes to is a rule nobody has tested
 Parse parse(const uint8_t block[kBlockBytes], Settings* out, const char** whyNot);
 

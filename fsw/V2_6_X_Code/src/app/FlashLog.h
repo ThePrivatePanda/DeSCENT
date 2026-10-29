@@ -130,7 +130,6 @@ public:
 
   bool ready() const { return ready_; }
   bool stopped() const { return began_ && !ready_; }   // stuck chip or failed writes
-  bool full() const { return stopped(); }   // old name, a ring is never full. Until FlightController uses stopped()
   bool air() const { return air_; }
   bool holding() const;                                // records in the ring still to be written
   uint32_t waiting() const { return ringPending_; }    // records from the cursor on, kept or not
