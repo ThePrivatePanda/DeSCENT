@@ -1,1 +1,76 @@
 /* T-Beams. Only selectors under #screen-tbeams; a class another screen needs goes in style.css */
+
+/* ---------- the list ---------- */
+/* The head's buttons are moved under the list by tbeams.js; what is left of it is empty */
+#screen-tbeams .picklist { padding: 14px 12px 4px; }
+#screen-tbeams .picklist > .pane-head { display: none; }
+#screen-tbeams #tb-list { flex: 0 1 auto; padding: 0 0 8px; display: flex; flex-direction: column; gap: 4px; }
+#screen-tbeams .tb-listhead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 0 10px 8px; }
+#screen-tbeams .tb-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px; flex: none;
+  width: 100%; height: auto; min-height: 0; padding: 12px 16px; border: 0; background: transparent;
+  text-align: left; white-space: normal; font-weight: 400; line-height: 1.4;
+}
+#screen-tbeams .tb-card:hover, #screen-tbeams .tb-card.sel { background: var(--color-neutral-100); }
+#screen-tbeams .tb-top { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+#screen-tbeams .tb-name { font: var(--font-heading-weight) 18px/1.3 var(--font-heading); overflow-wrap: anywhere; }
+#screen-tbeams .tb-sf { font: 700 12.5px/1.3 var(--font-body); }
+#screen-tbeams .tb-sub { font-size: 12.5px; color: var(--color-text-70); overflow-wrap: anywhere; }
+
+#screen-tbeams .tb-which { margin: 8px 0 0; padding: 16px 18px; flex: none; }
+#screen-tbeams .tb-which h3 { font: var(--font-heading-weight) 16px/1.3 var(--font-heading); margin: 0 0 6px; }
+#screen-tbeams .tb-which p { margin: 0; font-size: 13.5px; color: var(--color-text-70); }
+#screen-tbeams .tb-which p b { color: var(--color-text); }
+#screen-tbeams .tb-whichacts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+#screen-tbeams .tb-foot { margin: auto 0 0; padding: 14px 10px 12px; }
+
+/* ---------- the head ---------- */
+#screen-tbeams .tb-head { padding: 16px 24px 18px; }
+#screen-tbeams .tb-headrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+#screen-tbeams .tb-line { flex: 1 1 260px; min-width: 0; font-size: 13.5px; overflow-wrap: anywhere; }
+#screen-tbeams .tb-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
+#screen-tbeams .tb-notes { margin: 6px 0 0; }
+#screen-tbeams .tb-head .confirm { margin-top: 10px; }
+#screen-tbeams .tb-head pre.raw { margin-top: 12px; max-height: 140px; }
+
+/* ---------- the three cards ---------- */
+#screen-tbeams .tb-cards { flex: 1 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 16px; }
+@container (min-width: 900px) {
+  #screen-tbeams .tb-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); align-content: stretch; }
+}
+#screen-tbeams .tb-card2 { padding: 4px 22px 22px; min-width: 0; }
+#screen-tbeams .tb-card2 > h3 { display: block; padding: 16px 0 8px; font: var(--font-heading-weight) 18px/1.3 var(--font-heading); }
+#screen-tbeams .tb-card2 > h3 .note { margin-left: 6px; font-family: var(--font-body); font-weight: 400; }
+
+#screen-tbeams .tb-row { display: grid; grid-template-columns: 118px minmax(0, 1fr); gap: 4px 12px; align-items: baseline; padding: 9px 0; }
+#screen-tbeams .tb-row .l { color: var(--color-text-70); font-size: 13.5px; }
+#screen-tbeams .tb-val { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; overflow-wrap: anywhere; }
+#screen-tbeams .tb-sfrow .tb-val { flex-direction: column; align-items: flex-start; gap: 6px; }
+#screen-tbeams .tb-fw .tb-row + .tb-row { border-top: 1px solid var(--color-neutral-200); }
+#screen-tbeams .tb-shared { margin: 12px 0 0; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--color-surface); font-size: 13.5px; }
+
+#screen-tbeams .tb-body { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding-top: 6px; }
+#screen-tbeams .tb-body > p { margin: 0; }
+#screen-tbeams .tb-body > .block, #screen-tbeams .tb-body > .confirm, #screen-tbeams .tb-body > .job,
+#screen-tbeams .tb-body > .raw { align-self: stretch; }
+#screen-tbeams .tb-body > .block { margin-top: 4px; }
+#screen-tbeams .tb-body select { min-height: 30px; font-size: 13px; padding-left: 10px; vertical-align: middle; }
+#screen-tbeams .tb-save { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; }
+#screen-tbeams .tb-body .job { padding: 0; border: 0; }
+
+#screen-tbeams .tb-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-self: stretch; }
+#screen-tbeams .stat { min-width: 0; padding: 12px 14px 10px; }
+#screen-tbeams .stat span { display: block; font: 600 11px/1.3 var(--font-body); text-transform: uppercase; letter-spacing: .08em; color: var(--color-text-70); }
+#screen-tbeams .stat b { margin-top: 4px; overflow-wrap: anywhere; }
+#screen-tbeams .tb-body pre.raw { max-height: 140px; }
+
+#screen-tbeams .tb-last { margin: auto 0 0; padding: 14px 0 0; box-shadow: none; font-size: 12.5px; color: var(--color-text-70); }
+#screen-tbeams .tb-last.bad { padding: 4px 0 4px 10px; margin-top: 12px; color: var(--color-text); box-shadow: inset 3px 0 0 var(--color-accent); }
+
+/* index.html gives Start watching the link look; in its card it is a pill like the others */
+#screen-tbeams .tb-whichacts button.ghost { border-color: var(--color-divider); color: var(--color-text); padding: 0 16px; }
+#screen-tbeams .tb-whichacts button.ghost:hover { background-color: color-mix(in srgb, var(--color-text) 7%, transparent); text-decoration: none; color: var(--color-text); }
+
+/* The confirm sentence gets the whole row of a narrow card; its buttons go under it */
+#screen-tbeams .tb-card2 .confirm .grow { flex: 1 1 100%; }
+#screen-tbeams .tb-head input.nameit { margin-left: -12px; }
