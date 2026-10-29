@@ -33,7 +33,7 @@ void mount(const char *when)
     line.field("status", statusName(status));
     line.field("records", flashLog.records());
     line.field("boot", static_cast<unsigned int>(flashLog.bootCount()));
-    line.field("full", flashLog.full());
+    line.field("stopped", flashLog.stopped());
     line.field("ms", chipSystem.nowMs() - startMs);
   }
 }
@@ -58,7 +58,7 @@ void setup()
   uint32_t slowestAppendMs = 0;
   bool erasing = false;
   uint32_t eraseStartMs = 0;
-  for (uint16_t i = 0; i < kRecords && !flashLog.full(); ++i) {
+  for (uint16_t i = 0; i < kRecords && !flashLog.stopped(); ++i) {
     ChipSatSensors::SensorData nothing;
     ChipSatTelemetry::TelemetryPacket packet;
     ChipSatTelemetry::encodePacket(nothing, i, ChipSatConfig::kChipSatId, false, packet);

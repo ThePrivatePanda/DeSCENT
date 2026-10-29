@@ -30,7 +30,7 @@ Arduino IDE still works: Generic WLE5JCIx, upload method SWD. It's needed for th
 - two phases, ground and air (app/Phase.h). Air is a 15 m climb on the barometer, 30 m on GPS when the barometer is dead, or the IMU alone with neither. Ground again after 30 s at rest below half the climb, or 3 min with the IMU quiet at any height. A release is not detected
 - a packet every 60 s on the ground and every 1 s in the air, as shipped
 - after any reset it logs as in the air but transmits at the ground rate until it really climbs, for 5 min at most, so a reboot mid-fall keeps the fall
-- the flash log is a ring over the whole chip, a full chip overwrites its oldest sector. The last 30 s sit in RAM, so a take-off writes the 30 s before it. On the ground one record per 10 s reaches the chip
+- the flash log is a ring over the whole chip, a full chip overwrites its oldest sector. The last 30 s sit in RAM, so a take-off writes the 30 s before it. On the ground one record per 10 s reaches the chip. It only stops, for the rest of a boot, after an erase that times out or 3 failed writes in a row, and says `W FLASH stopped` once
 - every boot writes its reset cause to the log, and how many records it dropped when that grows
 - a missing or dead sensor never stops setup or the packets, its data just goes out marked invalid
 - IMU data older than 500 ms goes out marked invalid

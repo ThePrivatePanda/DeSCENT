@@ -99,10 +99,11 @@ private:
   uint32_t logImuMs_ = 0;      // the IMU reading the last record carried, for a gap of 0
   uint32_t utcAnchorMs_ = 0;
   bool utcAnchored_ = false;
-  bool logFull_ = false;
+  bool logStopped_ = false;
   uint16_t packetCounter_ = 0;
-  uint16_t sentCounter_ = 0;   // the counter on the last packet that actually went out
+  uint16_t sentCounter_ = 0;   // the counter on the last packet handed to the radio, sent or not
   uint32_t previousReadMs_ = 0;
+  bool phaseDue_ = false;   // a phase change wants the next packet now
   uint32_t txIntervalMs_;
   uint32_t resetCsr_ = 0;
   uint32_t cycle_ = 0;   // for logging
