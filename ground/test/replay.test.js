@@ -29,6 +29,13 @@ test('Open in Replay asks the app to open its own file by name, and listens on t
   assert.deepStrictEqual(net.urls, ['ws://127.0.0.1:8765/api/replay/r7/stream'], 'never the live /api/stream');
 });
 
+test('the open reply is the replay\'s state, names included', async () => {
+  const { o } = app((url) => (url.startsWith('/api/replay/open')
+    ? { ok: true, status: 200, json: async () => ({ id: 'r7', position: 0, lines: 3376, packets: 0, from: 1792260183263, names: ['1402-ground.log'] }) } : null));
+  const r = await Replay.open(o, { path: '2026-10-17/logs/1402-ground.log' });
+  assert.deepStrictEqual([r.state.lines, r.state.from, r.state.names], [3376, 1792260183263, ['1402-ground.log']]);
+});
+
 test('files picked on this computer go up in one body with their names and sizes', async () => {
   const { calls, o } = app();
   await Replay.open(o, { files: [{ name: 'a.log', size: 3, body: 'abc' }, { name: 'lab b.txt', size: 2, body: 'de' }] });

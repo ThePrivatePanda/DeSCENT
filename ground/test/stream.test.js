@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const S = require('../web/js/stream.js');
-const { fakeNet, numbered, loadJsonl, fixtures } = require('./mock/fakestream.js');
+const { fakeNet, numbered, loadJsonl, fixtures, HEAD } = require('./mock/fakestream.js');
 
 const VALID = { accel: true, gyro: true, mag: true, quat: true, gps: true, soc: true, env: true, fresh: true };
 const values = (more) => Object.assign({ lat: 0, lon: 0, gpsAlt: 1, envAlt: 233.79, ax: 0, ay: 0, az: 9.8, gx: 0, gy: 0, gz: 0,
@@ -301,6 +301,47 @@ test('a reset on the live socket clears what is shown at once, and the snapshot 
   assert.strictEqual(net.sockets.length, 1);
 });
 
+test('the history answer as the app sends it: the flat series with rxHistory beside it', async () => {
+  const h = fetcher({ 9: { t: [1, 2], counter: [1, 2], rssi: [-70, -71], snr: [9, 9], battery: [3.9, 3.8],
+    rxHistory: { rx1: { t: [1, 2], rssi: [-80, -81], snr: [8, 8] } } } });
+  const { net, f, c } = client(h);
+  net.last().open().send(numbered([unit(9), { kind: 'snapshot-end' }]));
+  assert.strictEqual(await c.wantHistory('9'), true);
+  const u = f.unit('9');
+  assert.deepStrictEqual(u.history.battery, [3.9, 3.8]);
+  assert.ok(!('rxHistory' in u.history), 'rxHistory is not a graph series');
+  assert.deepStrictEqual(u.rxHistory.rx1.rssi, [-80, -81]);
+});
+
+test('the head of the app\'s stream for 1402-ground.log: what the page holds at each step', () => {
+  const msgs = loadJsonl(HEAD);
+  const end = msgs.findIndex((m) => m.kind === 'snapshot-end');
+  const { net, f, c, seen } = client({ keepHistory: false });
+  const ws = net.last().open();
+  ws.send(msgs.slice(0, end + 1));
+  // the snapshot as the app keeps it at the end of the log
+  const rows = new Set(msgs.slice(0, end).filter((m) => m.kind === 'unit').map((m) => m.label));
+  assert.deepStrictEqual(new Set(f.allUnits().keys()), rows);
+  assert.strictEqual(f.receivers.size, new Set(msgs.slice(0, end).filter((m) => m.kind === 'receiver').map((m) => m.id)).size);
+  const rx2 = f.receivers.get('rx2');
+  assert.deepStrictEqual([rx2.packets, rx2.unique, rx2.badCrc, rx2.radioErrors, rx2.id], [174, 173, 0, 112, '73C434']);
+  assert.strictEqual(f.rxSource.get('rx2'), 'raw', 'the receiver row says its format');
+  for (const l of f.lines.values()) assert.ok(l.length <= S.LINES_KEPT);
+  assert.ok(f.lines.get('rx2').length > 0, 'the snapshot\'s lines fill the raw boxes');
+  assert.strictEqual(seen.lines.length, 0, 'and are not news to the taps');
+  assert.strictEqual(f.cfg.model.lostAfterMs, 600000);
+  // the replay seeks back to the start: everything goes, and the log plays again
+  ws.send(msgs.slice(end + 1));
+  assert.strictEqual(c.gaps, 0);
+  const played = msgs.slice(end + 1).filter((m) => m.kind === 'packet');
+  assert.ok(played.length > 0);
+  const points = [...f.allUnits().values()].reduce((a, u) => a + u.history.t.length, 0);
+  assert.strictEqual(points, played.filter((m) => m.crcOk && !m.dup).length, 'one graph point per new packet with a good CRC');
+  const heard = [...f.allUnits().values()].reduce((a, u) => a + Object.values(u.rxHistory).reduce((b, h) => b + h.t.length, 0), 0);
+  assert.strictEqual(heard, played.filter((m) => m.crcOk).length, 'one reception per packet message');
+  assert.ok(f.allUnits().size < rows.size, 'only the units heard so far after the seek');
+});
+
 test('a history ask the app cannot answer leaves the graph as the stream drew it', async () => {
   const h = fetcher({});
   const { net, f, c } = client(h);
@@ -313,7 +354,8 @@ test('a history ask the app cannot answer leaves the graph as the stream drew it
   assert.strictEqual(h.asked.length, 1);
 });
 
-test('the master\'s recorded stream fixtures load and end their snapshot', { skip: fixtures().length ? false : 'no fixture at docs/internals/frontend/fixtures yet' }, () => {
+test('the app\'s recorded streams load and end their snapshot', () => {
+  assert.ok(fixtures().includes(HEAD), 'the head of 1402-ground is in test/data');
   for (const file of fixtures()) {
     const msgs = loadJsonl(file);
     const { net, f, c } = client({ keepHistory: false });
