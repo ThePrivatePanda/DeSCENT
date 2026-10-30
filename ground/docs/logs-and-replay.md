@@ -1,6 +1,6 @@
 # Logs, runs and replay
 
-Reference for the log the app writes, how a run is worked out from it, and how a flash
+Reference for the log the app writes, how the app works a run out from it, and how a flash
 dump is replayed. Moved out of the README, which is for getting started.
 
 ## Data
@@ -35,20 +35,16 @@ top bar names that file. **Save a copy** downloads it and **New file** starts an
 | **Save log** | With a log open: downloads it. A log the app wrote is the file itself; any other is written back out in the log format. |
 | **Save CSV** | With a log open: downloads the decoded packets as a table. |
 | **Save raw** | With a pull open: downloads its `dump.txt`. |
-| Autosave | Everything is also kept in the browser every 5 s. After a crash, the next visit offers to open, download or discard it. |
-
-The page without the app has nothing writing to disk for it, so there it keeps its recording
-controls: **Start** asks where to save and writes every line from every connected receiver to that
-file, **Pause / Resume** and **Stop** do what they say, and **Save session** downloads everything
-since the page opened. In browsers without the save-file picker, the recording is kept in memory
-and downloaded on **Stop**.
 
 The CSV has one row per packet that passes its CRC: `time_ms`, `time_utc`, the receiver or boot it
 came from, `uptime_ms` where the log gives it, every packet field, then RSSI, SNR and frequency
 error. A field whose validity bit is clear is an empty cell, not a number, and `time_utc` is empty
 for a boot that never got GPS time.
 
-**Settings** (graph time span, when old graph data is dropped, status thresholds, saving) are remembered per browser.
+**Settings** has two kinds. Graph time span, when old graph data is dropped and the file name prefix are
+remembered per browser. The status rules (lost, stale, low battery, weak RF, accel saturation and the
+window for the same packet across receivers) live in the app and are the same on every screen that
+has it open.
 
 ## Clearing
 
@@ -68,10 +64,6 @@ http://127.0.0.1:8765/?log=http://127.0.0.1:44333/log.log
 
 Repeat the parameter to merge several files, as opening several at once does. Percent-encode the
 inner URL if it contains an `&`. A file that will not load leaves a working page and says why.
-
-Note that the hosted site at ground.privatepanda.co **cannot** do this for a log served from your
-own machine: a page loaded over https is not allowed to fetch `http://127.0.0.1`, and the browser
-blocks it before any request is made. Use the app's own address for that, as above.
 
 ## Replaying a flash dump
 
@@ -142,13 +134,13 @@ This is the Live screen, and Replay is the same screen over a log.
 
 | Item | Rule |
 |---|---|
-| CRC | Checked in the browser. A bad-CRC packet is counted and never updates a unit. |
+| CRC | Checked in the app. A bad-CRC packet is counted and never updates a unit. |
 | CSV receiver | Old `V2_5_X_T_BEAM_DECODE_CSV` T-Beams work too. The packet is rebuilt from the printed values to check the CRC. |
 | Missed | Counter gaps, modulo 65536. |
 | Reset | Counter drops, or 0 twice in a row. |
 | Stale | No packet for 3× the unit's own measured interval (min 5 s). |
 | Lost | No packet for 10 min. A unit that was being heard and goes lost beeps three times; the beep can be turned off in Settings. |
-| Thresholds | All rules below are defaults; change them in Settings. |
+| Thresholds | All rules below are defaults; change them in Settings (kept in the app). |
 | Several receivers | Identical bytes within 1.5 s = one packet. RSSI/SNR kept per receiver; the fleet list shows the best. |
 | Saturation | ▲sat when valid acceleration reaches ±75 m/s² (BNO085 limit is ±8 g). |
 | Low battery | Cell under 3.5 V (set in Settings). |
@@ -164,13 +156,9 @@ This is the Live screen, and Replay is the same screen over a log.
 |---|---|
 | `Open DeSCENT Ground.html` | Double-click launcher; opens `web/index.html`. |
 | `web/index.html` | The page. |
-| `web/js/packet.js` | Packet layout, CRC, decode. Mirrors `Telemetry.h` in the flight code. |
-| `web/js/lines.js` | Turns one serial line (raw, CSV, hex dump) into an event. |
-| `web/js/fleet.js` | Per-unit state: missed, resets, interval, stale/lost, history, dedupe. |
-| `web/js/serial.js` | Web Serial ports. |
-| `web/js/recorder.js` | Recording, log files, replay parsing. |
-| `web/js/exportcsv.js` | An open log as CSV, one row per good packet. |
-| `web/js/store.js` | Settings and crash autosave (browser storage). |
+| `web/js/stream.js` | The app's stream (`/api/stream`): unit rows, receivers, last lines, graph history. |
+| `web/js/replay.js` | Drives a log open in the app (`/api/replay`) and reads its own stream. |
+| `web/js/store.js` | Settings: display ones in browser storage, status rules through the app. |
 | `web/js/charts.js` | History charts (uPlot). |
 | `web/js/app.js` | Wires it together and draws Live and Replay. |
 | `web/js/screens.js` | The tabs, and the strip in the top bar. |
@@ -179,8 +167,8 @@ This is the Live screen, and Replay is the same screen over a log.
 | `web/js/datascreen.js` | The Data screen. |
 | `web/js/bench.js`, `web/js/benchpane.js` | Reading the sensor bench's console, and its pane on a ChipSat's sheet. |
 | `web/js/boardmodel.js`, `web/js/datamodel.js` | What those screens say, as plain functions with tests. |
-| `web/js/serial_native.js` | Talks to the app when the page came from it. |
-| `web/sw.js` | Offline copy for the hosted site. |
+| `web/js/serial_native.js` | Talks to the app: ports, flashing, pulls. |
+| `web/sw.js` | List of files for an offline copy of the page. Nothing registers it. |
 | `test/` | `node --test test/*.test.js`. Runs from a fresh clone on the small logs in `test/data`. The checks against the lab's full captures run when `DESCENT_LAB_LOGS` is the folder holding `V2_5_X` and `V2_6_X`, and are skipped with a line saying so when it is not. |
 | `docs/design-guide.md` | Colours, type, layout rules. |
 

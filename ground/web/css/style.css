@@ -76,7 +76,7 @@
   --color-fill-2: #56633f;
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235f5c5a' stroke-width='2.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
-  /* Old names, plain hex: charts.js and mapview.js read them through getComputedStyle,
+  /* Old names, plain hex: charts.js reads them through getComputedStyle,
      which hands back a color-mix() unresolved. */
   --bg: #faf8f5;
   --panel: #ffffff;

@@ -2,11 +2,12 @@
 
 The ground software for the DeSCENT ChipSat: it receives telemetry from the LoRa receivers,
 configures and flashes ChipSats over an ST-Link, and pulls a board's flash log. Run it on the
-laptop at the bench or in the field. The same page is published to GitHub Pages for watching
-telemetry, but flashing and pulling need the app, because they need a probe and a serial port.
+laptop at the bench or in the field. The app reads the receivers, decodes the packets and keeps
+the fleet and the replays; the page is a view over it, so there is no copy of the page that runs
+without the app.
 
-* app - the Rust server. `cargo run --release` serves the page on 127.0.0.1:8765 and opens a browser
-* web - the page itself: plain HTML, CSS and JavaScript, no framework and no build step
+* app - the Rust server. `cargo run --release` serves the page on 127.0.0.1:8765 and opens a browser; it reads the ports and decodes the packets
+* web - the page itself, drawn from the app's stream: plain HTML, CSS and JavaScript, no framework and no build step
 * receiver - the sketch that runs on a T-Beam, and its built images
 * test - `node --test test/*.test.js` for the page, `cargo test` in app/ for the server
 * docs - the log format, replay, the design guide and the field card
