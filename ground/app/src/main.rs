@@ -4,6 +4,7 @@
 mod assets;
 mod chipflash;
 mod chips;
+mod csv;
 mod decode;
 mod dump;
 mod flash;
@@ -17,12 +18,14 @@ mod lines;
 mod localfw;
 mod logfile;
 mod opts;
+mod replay;
 mod pull;
 mod radio;
 mod receiver_image;
 mod receivers;
 mod serial;
 mod settings;
+mod stream;
 mod stm32;
 mod tiles;
 mod server;
@@ -99,6 +102,10 @@ fn main() {
     let hub = Arc::new(Mutex::new(serial::Hub::new(tx)));
     hub.lock().unwrap().remember_in(&dir);
     let broadcast = ws::Broadcast::new();
+    let live = Arc::new(stream::Stream::with_out(
+        stream::Model::new(stream::ModelSettings::load(&dir), stream::LIVE_MAX_POINTS),
+        broadcast.clone(),
+    ));
 
     // fsw tree beside the program, if any (localfw.rs)
     let local = Arc::new(localfw::Local::new(
@@ -122,6 +129,18 @@ fn main() {
         exe: std::env::current_exe().ok(),
         started: std::time::SystemTime::now(),
         local: local.clone(),
+        live: live.clone(),
+        replays: replay::Replays::start(),
+    });
+
+    // Stale and lost come from silence, so the rows are looked at again each second, as
+    // often as the 1.3 page redrew its ages
+    std::thread::spawn({
+        let live = live.clone();
+        move || loop {
+            std::thread::sleep(Duration::from_secs(1));
+            live.tick(logfile::now_ms() as f64);
+        }
     });
 
     std::thread::spawn({
@@ -190,9 +209,13 @@ fn main() {
                         l.write_line(t_ms, &key, &text);
                     }
                 }
-                broadcast.send(&ws::line_frame(&key, t_ms, &text));
+                live.line(&key, t_ms as f64, &text, true);
             }
-            serial::Event::Ports => broadcast.send(&ws::ports_frame()),
+            serial::Event::Ports => {
+                broadcast.send(&ws::ports_frame());
+                let ports = hub.lock().unwrap().ports();
+                live.set_ports(&ports, logfile::now_ms() as f64);
+            }
         }
         if since_flush.elapsed() > Duration::from_secs(5) {
             if let Ok(mut l) = log.lock() {

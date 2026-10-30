@@ -444,6 +444,8 @@ pub struct Ctx {
     pub exe: Option<PathBuf>,             // the file this process was started from
     pub started: std::time::SystemTime,
     pub local: crate::localfw::Shared,    // fsw tree on this laptop, if any
+    pub live: Arc<crate::stream::Stream>,  // the receivers' fleet, what /api/stream sends
+    pub replays: crate::replay::Shared,    // logs open for replay, each with its own fleet
 }
 
 // The one way out, whoever asked. The log is flushed before the url file goes, because
@@ -779,6 +781,172 @@ fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
     Ok(())
 }
 
+fn not_found(request: Request, what: &str) {
+    let _ = request.respond(
+        Response::from_string(failed(what)).with_status_code(404).with_header(header("Content-Type", "application/json")),
+    );
+}
+
+fn refused(request: Request, why: &str) {
+    let _ = request.respond(
+        Response::from_string(failed(why)).with_status_code(400).with_header(header("Content-Type", "application/json")),
+    );
+}
+
+fn history_answer(request: Request, label: &str, found: Option<String>) {
+    match found {
+        Some(h) => answer(request, h),
+        None => not_found(request, &format!("no unit {}", label)),
+    }
+}
+
+fn csv_answer(request: Request, name: &str, csv: String) {
+    let file = save_name(name);
+    let file = file.rsplit_once('.').map_or(file.as_str(), |(stem, _)| stem).to_string() + ".csv";
+    let _ = request.respond(
+        Response::from_string(csv)
+            .with_header(header("Content-Type", "text/csv; charset=utf-8"))
+            .with_header(header("Content-Disposition", &format!("attachment; filename=\"{}\"", file))),
+    );
+}
+
+// GET gives the set; POST changes the keys it names, keeps it beside the program, and
+// every viewer of the live stream and of every replay hears the new set
+fn model_settings(mut request: Request, ctx: &Ctx) {
+    let now = ctx.live.with(|m| m.settings.clone());
+    if request.method().as_str() != "POST" {
+        answer(request, now.json());
+        return;
+    }
+    let mut body = String::new();
+    let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
+    let s = match now.merged(&body) {
+        Ok(s) => s,
+        Err(e) => return refused(request, &e),
+    };
+    let saved = s.save(&ctx.dir);
+    ctx.live.set_settings(s.clone(), logfile::now_ms() as f64);
+    for r in ctx.replays.all() {
+        r.set_settings(s.clone());
+    }
+    match saved {
+        Ok(()) => answer(request, s.json()),
+        // In force until the app stops, which is worth saying
+        Err(e) => answer(request, format!("{},\"saved\":false,\"error\":\"{}\"}}", &s.json()[..s.json().len() - 1], esc(&e))),
+    }
+}
+
+// ?path=<name in the data folder>, or ?name=a&size=n&name=b&size=m with the files one
+// after the other in the body
+fn replay_open(mut request: Request, url: &str, ctx: &Ctx) {
+    let Some(q) = query(url) else { return refused(request, "that query does not decode") };
+    let mut files = Vec::new();
+    if let Some(asked) = asked(&q, "path") {
+        let Some(name) = log_name(asked) else { return refused(request, &format!("{} is not a log in the data folder", asked)) };
+        match std::fs::read(ctx.data.join(&name)) {
+            Ok(b) => files.push((name, b)),
+            Err(e) => return not_found(request, &format!("{}: {}", name, e)),
+        }
+    } else {
+        let names: Vec<&str> = q.iter().filter(|(k, _)| k == "name").map(|(_, v)| v.as_str()).collect();
+        let sizes: Vec<Option<usize>> = q.iter().filter(|(k, _)| k == "size").map(|(_, v)| v.parse().ok()).collect();
+        if names.is_empty() || names.len() != sizes.len() || sizes.iter().any(|s| s.is_none()) {
+            return refused(request, "give path=, or a name= and size= for each file in the body");
+        }
+        let mut body = Vec::new();
+        let _ = std::io::Read::read_to_end(
+            &mut std::io::Read::take(request.as_reader(), crate::replay::MAX_BYTES as u64 + 1),
+            &mut body,
+        );
+        let total: usize = sizes.iter().map(|s| s.unwrap()).sum();
+        if body.len() > crate::replay::MAX_BYTES {
+            return refused(request, &format!("over {} MB in one go", crate::replay::MAX_BYTES >> 20));
+        }
+        if body.len() != total {
+            return refused(request, &format!("the sizes add up to {} bytes but {} came", total, body.len()));
+        }
+        let mut at = 0;
+        for (n, s) in names.iter().zip(&sizes) {
+            let s = s.unwrap();
+            files.push((n.to_string(), body[at..at + s].to_vec()));
+            at += s;
+        }
+    }
+    let settings = ctx.live.with(|m| m.settings.clone());
+    match ctx.replays.open(files, settings, crate::replay::local_midnight_ms()) {
+        Ok(r) => answer(request, r.state_json()),
+        Err(e) => refused(request, &e),
+    }
+}
+
+fn replay_call(request: Request, url: &str, rest: &str, ctx: &Ctx) {
+    let (id, what) = rest.split_once('/').unwrap_or((rest, ""));
+    let Some(r) = ctx.replays.get(id) else { return not_found(request, &format!("no replay {}", id)) };
+    r.touch();
+    if what == "stream" {
+        let Some(key) = is_websocket(&request) else {
+            let _ = request.respond(Response::from_string("not a websocket request").with_status_code(400));
+            return;
+        };
+        let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+        let response = Response::empty(101)
+            .with_header(header("Upgrade", "websocket"))
+            .with_header(header("Connection", "Upgrade"))
+            .with_header(header("Sec-WebSocket-Accept", &accept));
+        let stream = request.upgrade("websocket", response);
+        r.connect(tungstenite::WebSocket::from_raw_socket(stream, Role::Server, None));
+        return;
+    }
+    match what {
+        "" => answer(request, r.state_json()),
+        "history" => {
+            let label = query(url).and_then(|q| asked(&q, "label").map(String::from)).unwrap_or_default();
+            let found = r.stream.with(|m| m.history(&label));
+            history_answer(request, &label, found);
+        }
+        "csv" => {
+            let name = r.names.first().cloned().unwrap_or_else(|| "replay".into());
+            csv_answer(request, &name, r.csv());
+        }
+        "log" => {
+            let name = if r.names.len() == 1 { save_name(&r.names[0]) } else { format!("replay-{}.log", r.id) };
+            let _ = request.respond(
+                Response::from_data(r.log())
+                    .with_header(header("Content-Type", "text/plain; charset=utf-8"))
+                    .with_header(header("Content-Disposition", &format!("attachment; filename=\"{}\"", name))),
+            );
+        }
+        "play" | "pause" | "speed" | "seek" | "close" => {
+            let Some(mut request) = post_only(request) else { return };
+            let mut body = String::new();
+            let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
+            match what {
+                "play" => r.set_playing(true),
+                "pause" => r.set_playing(false),
+                "speed" => {
+                    let speed = crate::json::num_field(&body, "speed").unwrap_or(f64::NAN);
+                    if let Err(e) = r.set_speed(speed) {
+                        return refused(request, &e);
+                    }
+                }
+                "seek" => {
+                    let at = crate::json::num_field(&body, "position").unwrap_or(f64::NAN);
+                    if !(at.is_finite() && at >= 0.0) {
+                        return refused(request, "position has to be a line number, 0 or more");
+                    }
+                    r.seek(at.round() as usize);
+                }
+                _ => {
+                    ctx.replays.close(id);
+                    return answer(request, "{\"ok\":true}".into());
+                }
+            }
+            answer(request, r.state_json());
+        }
+        _ => not_found(request, &format!("no {} for a replay", what)),
+    }
+}
+
 fn handle(mut request: Request, ctx: Arc<Ctx>) {
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("").to_string();
@@ -792,10 +960,51 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
                 .with_header(header("Sec-WebSocket-Accept", &accept));
             let stream = request.upgrade("websocket", response);
             let socket: Socket = tungstenite::WebSocket::from_raw_socket(stream, Role::Server, None);
-            ctx.broadcast.add(socket);
+            ctx.live.connect(socket, logfile::now_ms() as f64);
             return;
         }
         let _ = request.respond(Response::from_string("not a websocket request").with_status_code(400));
+        return;
+    }
+
+    if path == "/api/model-settings" {
+        model_settings(request, &ctx);
+        return;
+    }
+
+    if path == "/api/history" {
+        let label = query(&url).and_then(|q| asked(&q, "label").map(String::from)).unwrap_or_default();
+        let found = ctx.live.with(|m| m.history(&label));
+        history_answer(request, &label, found);
+        return;
+    }
+
+    if let Some(asked) = path.strip_prefix("/api/csv/") {
+        let Some(name) = log_name(asked) else {
+            let _ = request.respond(Response::from_string("no").with_status_code(400));
+            return;
+        };
+        match std::fs::read(ctx.data.join(&name)) {
+            Ok(body) => {
+                let lines = crate::replay::read_lines(&[(name.clone(), body)], crate::replay::local_midnight_ms());
+                let csv = crate::csv::to_csv(lines.iter().map(|l| (l.t, l.rx.as_str(), l.text.as_str())));
+                csv_answer(request, &name, csv);
+            }
+            Err(e) => {
+                let _ = request.respond(Response::from_string(failed(&format!("{}: {}", name, e))).with_status_code(404));
+            }
+        }
+        return;
+    }
+
+    if path == "/api/replay/open" {
+        let Some(request) = post_only(request) else { return };
+        replay_open(request, &url, &ctx);
+        return;
+    }
+
+    if let Some(rest) = path.strip_prefix("/api/replay/") {
+        replay_call(request, &url, rest, &ctx);
         return;
     }
 
@@ -1487,7 +1696,7 @@ mod tests {
         let (body, ct) = assets::get("/").unwrap();
         assert!(String::from_utf8_lossy(body).contains("DeSCENT"));
         assert_eq!(ct, "text/html; charset=utf-8");
-        assert_eq!(assets::get("/js/packet.js").unwrap().1, "text/javascript");
+        assert_eq!(assets::get("/js/app.js").unwrap().1, "text/javascript");
         assert_eq!(assets::get("/css/style.css").unwrap().1, "text/css");
         assert_eq!(
             assets::get("/vendor/fonts/ibm-plex-mono-latin-400-normal.woff2").unwrap().1,
@@ -2048,9 +2257,10 @@ mod tests {
     // Nothing here opens a port or a probe: no board is listed and there is no fsw tree.
     fn quiet_ctx(data: &Path) -> Arc<Ctx> {
         let (tx, _rx) = std::sync::mpsc::channel();
+        let broadcast = Broadcast::new();
         Arc::new(Ctx {
             hub: Arc::new(Mutex::new(Hub::new(tx))),
-            broadcast: Broadcast::new(),
+            broadcast: broadcast.clone(),
             log: Arc::new(Mutex::new(None)),
             dir: data.to_path_buf(),
             data: data.to_path_buf(),
@@ -2067,6 +2277,11 @@ mod tests {
                 Box::new(crate::localfw::RealBuilder),
                 crate::localfw::Carried::this_build(),
             )),
+            live: Arc::new(crate::stream::Stream::with_out(
+                crate::stream::Model::new(crate::stream::ModelSettings::default(), crate::stream::LIVE_MAX_POINTS),
+                broadcast,
+            )),
+            replays: crate::replay::Replays::idle_only(),
         })
     }
 
@@ -2083,6 +2298,270 @@ mod tests {
         let post = TestRequest::new().with_method(Method::Post).with_path("/api/log/rotate");
         handle(post.into(), ctx.clone());
         assert!(ctx.log.lock().unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    // ---------- the stream, model settings, history, replay and CSV, over a real socket ----------
+    use crate::stream::test_packet;
+    use tungstenite::WebSocket;
+
+    fn serving(ctx: Arc<Ctx>) -> u16 {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        std::thread::spawn(move || serve(server, ctx));
+        port
+    }
+
+    // (status, body)
+    fn call(port: u16, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        write!(s, "{} {} HTTP/1.0\r\nContent-Length: {}\r\n\r\n", method, path, body.len()).unwrap();
+        s.write_all(body).unwrap();
+        let mut got = Vec::new();
+        s.read_to_end(&mut got).unwrap();
+        let at = got.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let status = String::from_utf8_lossy(&got[9..12]).parse().unwrap();
+        (status, got[at + 4..].to_vec())
+    }
+
+    fn call_text(port: u16, method: &str, path: &str, body: &str) -> (u16, String) {
+        let (s, b) = call(port, method, path, body.as_bytes());
+        (s, String::from_utf8(b).unwrap())
+    }
+
+    fn socket(port: u16, path: &str) -> WebSocket<std::net::TcpStream> {
+        let tcp = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        tungstenite::client(format!("ws://127.0.0.1:{}{}", port, path), tcp).unwrap().0
+    }
+
+    fn next(ws: &mut WebSocket<std::net::TcpStream>) -> Option<String> {
+        loop {
+            match ws.read() {
+                Ok(tungstenite::Message::Text(t)) => return Some(t.to_string()),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+    }
+
+    // Every message up to and with the first of that kind
+    fn until(ws: &mut WebSocket<std::net::TcpStream>, kind: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Some(m) = next(ws) {
+            let done = crate::json::str_field(&m, "kind").as_deref() == Some(kind);
+            out.push(m);
+            if done {
+                return out;
+            }
+        }
+        panic!("no {} after {:?}", kind, out);
+    }
+
+    fn kind(m: &str) -> String {
+        crate::json::str_field(m, "kind").unwrap_or_default()
+    }
+
+    fn seqs(msgs: &[String]) -> Vec<i64> {
+        msgs.iter().map(|m| int_field(m, "seq").unwrap()).collect()
+    }
+
+    // A session log as logfile.rs writes one
+    fn session_log(lines: &[(u64, &str, String)]) -> String {
+        let mut s = String::from("# descent-ground log v1 started 2026-10-17T14:02:00.000Z\n");
+        for (t, rx, text) in lines {
+            s.push_str(&format!("{}\t{}\t{}\n", t, rx, text));
+        }
+        s
+    }
+
+    #[test]
+    fn a_new_socket_gets_the_snapshot_then_the_end_then_live_messages_in_seq() {
+        let data = scratch("stream");
+        let ctx = quiet_ctx(&data);
+        // the snapshot is taken at the wall clock, as live times are
+        let t0 = logfile::now_ms() as f64;
+        ctx.live.line("rx1", t0, "HB,1000,0,0", true);
+        ctx.live.line("rx1", t0 + 10.0, &test_packet(9, 1, false), true);
+        ctx.live.line("rx2", t0 + 20.0, &test_packet(13, 4, false), true);
+        let port = serving(ctx.clone());
+        let mut ws = socket(port, "/api/stream");
+        let snap = until(&mut ws, "snapshot-end");
+        let kinds: Vec<String> = snap.iter().map(|m| kind(m)).collect();
+        assert_eq!(kinds, ["settings", "unit", "unit", "receiver", "receiver", "line", "line", "line", "snapshot-end"]);
+        assert_eq!(seqs(&snap), (0..9).collect::<Vec<i64>>());
+        assert!(snap.iter().all(|m| m.contains("\"t\":")), "{:?}", snap);
+
+        ctx.live.line("rx1", t0 + 1000.0, &test_packet(9, 2, false), true);
+        let more = until(&mut ws, "receiver");
+        assert_eq!(more.iter().map(|m| kind(m)).collect::<Vec<_>>(), ["line", "packet", "unit", "receiver"]);
+        assert_eq!(seqs(&more), (9..13).collect::<Vec<i64>>());
+        // the 1.3 page reads type, the 1.4 page kind, off the same live line
+        assert!(more[0].contains("\"type\":\"line\",\"kind\":\"line\",\"rx\":\"rx1\""), "{}", more[0]);
+        assert!(more[1].contains("\"csid\":9,\"label\":\"9\""), "{}", more[1]);
+
+        // ports and flash frames go out as they did, with no seq
+        ctx.broadcast.send(&crate::ws::ports_frame());
+        assert_eq!(next(&mut ws).unwrap(), "{\"type\":\"ports\"}");
+
+        // nothing new: no row; silence past 30 s: the row again as STALE
+        ctx.live.tick(t0 + 2000.0);
+        ctx.live.tick(t0 + 40000.0);
+        let stale = next(&mut ws).unwrap();
+        assert_eq!(int_field(&stale, "seq"), Some(13));
+        assert!(stale.contains("\"state\":\"STALE\""), "{}", stale);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn model_settings_change_by_key_are_kept_and_every_viewer_hears() {
+        let data = scratch("model");
+        let ctx = quiet_ctx(&data);
+        ctx.live.line("rx1", 1000.0, &test_packet(9, 1, false), true);
+        let port = serving(ctx.clone());
+        let (s, body) = call_text(port, "GET", "/api/model-settings", "");
+        assert_eq!(s, 200);
+        assert_eq!(body, crate::stream::ModelSettings::default().json());
+        let mut ws = socket(port, "/api/stream");
+        until(&mut ws, "snapshot-end");
+
+        let (s, body) = call_text(port, "POST", "/api/model-settings", "{\"lostAfterMs\":120000,\"weakRssiDbm\":-100}");
+        assert_eq!(s, 200);
+        assert_eq!(
+            body,
+            "{\"lostAfterMs\":120000,\"staleIntervals\":3,\"staleMinMs\":5000,\"lowBatteryV\":3.5,\"weakRssiDbm\":-100,\"accelSatMs2\":75,\"dedupeWindowMs\":1500}"
+        );
+        let heard = next(&mut ws).unwrap();
+        assert!(heard.contains("\"kind\":\"settings\"") && heard.contains("\"lostAfterMs\":120000"), "{}", heard);
+        // every row again, since state and issues follow the settings
+        let row = next(&mut ws).unwrap();
+        assert_eq!(kind(&row), "unit");
+        assert_eq!(call_text(port, "GET", "/api/model-settings", "").1, body);
+        let file = std::fs::read_to_string(data.join(crate::stream::SETTINGS_FILE)).unwrap();
+        assert_eq!(crate::stream::ModelSettings::load(&data).json(), body, "{}", file);
+
+        let (s, body) = call_text(port, "POST", "/api/model-settings", "{\"staleMinMs\":\"soon\"}");
+        assert_eq!(s, 400);
+        assert!(body.contains("\"ok\":false"), "{}", body);
+        assert!(call_text(port, "GET", "/api/model-settings", "").1.contains("\"staleMinMs\":5000"));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn history_is_there_for_a_unit_heard_and_404_for_one_not() {
+        let data = scratch("history");
+        let ctx = quiet_ctx(&data);
+        ctx.live.line("rx1", 1000.0, &test_packet(9, 1, false), true);
+        let port = serving(ctx);
+        let (s, body) = call_text(port, "GET", "/api/history?label=9", "");
+        assert_eq!(s, 200);
+        assert!(body.starts_with("{\"t\":[1],\"counter\":[1],") && body.contains("\"rxHistory\":{\"rx1\":"), "{}", body);
+        let (s, body) = call_text(port, "GET", "/api/history?label=12", "");
+        assert_eq!(s, 404);
+        assert!(body.contains("no unit 12"), "{}", body);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_replay_has_its_own_fleet_and_stream_and_leaves_live_alone() {
+        let data = scratch("replay");
+        let ctx = quiet_ctx(&data);
+        let t0 = 1790000000000.0;
+        ctx.live.line("rx1", t0, &test_packet(9, 1, false), true);
+        let live_rows = |t: f64| ctx.live.with(|m| m.fleet.rows(t).iter().map(|r| r.to_json()).collect::<Vec<_>>());
+        let before = live_rows(t0 + 5.0);
+
+        let mut lines = Vec::new();
+        for k in 0..20u64 {
+            lines.push((1790000100000 + k * 1000, "rxA", test_packet(9, 100 + k as u16, false)));
+            lines.push((1790000100000 + k * 1000 + 5, "rxB", test_packet(13, 7 + k as u16, false)));
+        }
+        lines.push((1790000130000, "rxA", test_packet(13, 1, true)));
+        std::fs::write(data.join("1402-ground.log"), session_log(&lines)).unwrap();
+
+        let port = serving(ctx.clone());
+        let mut live = socket(port, "/api/stream");
+        until(&mut live, "snapshot-end");
+
+        let (s, opened) = call_text(port, "POST", "/api/replay/open?path=1402-ground.log", "");
+        assert_eq!(s, 200, "{}", opened);
+        let id = crate::json::str_field(&opened, "id").unwrap();
+        // read to the end on open, as Open log did
+        assert!(opened.contains("\"position\":41,\"lines\":41,\"packets\":40,\"from\":1790000100000,\"t\":1790000130000,\"playing\":false"), "{}", opened);
+
+        let mut rs = socket(port, &format!("/api/replay/{}/stream", id));
+        let snap = until(&mut rs, "snapshot-end");
+        assert_eq!(snap.iter().filter(|m| kind(m) == "unit").count(), 2);
+        assert_eq!(seqs(&snap), (0..snap.len() as i64).collect::<Vec<_>>());
+
+        let (s, _) = call_text(port, "POST", &format!("/api/replay/{}/seek", id), "{\"position\":0}");
+        assert_eq!(s, 200);
+        let again = until(&mut rs, "snapshot-end");
+        assert_eq!(kind(&again[0]), "reset");
+        assert_eq!(again.iter().map(|m| kind(m)).collect::<Vec<_>>(), ["reset", "settings", "snapshot-end"]);
+        let n = snap.len() as i64;
+        assert_eq!(seqs(&again), (n..n + 3).collect::<Vec<_>>());
+
+        assert_eq!(call_text(port, "POST", &format!("/api/replay/{}/speed", id), "{\"speed\":1000000}").0, 200);
+        assert_eq!(call_text(port, "POST", &format!("/api/replay/{}/speed", id), "{\"speed\":0}").0, 400);
+        assert_eq!(call_text(port, "POST", &format!("/api/replay/{}/play", id), "").0, 200);
+        ctx.replays.tick();
+        let mut packets = 0;
+        let mut last = n + 2;
+        while packets < 41 {
+            let m = next(&mut rs).unwrap();
+            let seq = int_field(&m, "seq").unwrap();
+            assert_eq!(seq, last + 1);
+            last = seq;
+            if kind(&m) == "packet" {
+                packets += 1;
+            }
+        }
+        let state = call_text(port, "GET", &format!("/api/replay/{}", id), "").1;
+        assert!(state.contains("\"position\":41,") && state.contains("\"t\":1790000130000,\"playing\":false"), "{}", state);
+        let (s, h) = call_text(port, "GET", &format!("/api/replay/{}/history?label=13", id), "");
+        assert_eq!(s, 200);
+        assert!(h.contains("\"rxHistory\":{\"rxB\":"), "{}", h);
+        assert_eq!(call_text(port, "GET", &format!("/api/replay/{}/history?label=12", id), "").0, 404);
+
+        // live: the same rows, nothing sent, no 13
+        assert_eq!(live_rows(t0 + 5.0), before);
+        assert_eq!(call_text(port, "GET", "/api/history?label=13", "").0, 404);
+        live.get_mut().set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        assert_eq!(next(&mut live), None);
+
+        // the CSV and the log as the replay has them
+        let (s, csv) = call_text(port, "GET", &format!("/api/replay/{}/csv", id), "");
+        assert_eq!(s, 200);
+        assert_eq!(csv.lines().count(), 41);
+        assert_eq!(call_text(port, "GET", "/api/csv/1402-ground.log", "").1, csv);
+        assert_eq!(call(port, "GET", &format!("/api/replay/{}/log", id), b"").1, std::fs::read(data.join("1402-ground.log")).unwrap());
+
+        assert_eq!(call_text(port, "POST", &format!("/api/replay/{}/close", id), "").0, 200);
+        assert_eq!(call_text(port, "GET", &format!("/api/replay/{}", id), "").0, 404);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn several_files_go_up_in_one_body_and_are_merged_by_time() {
+        let data = scratch("upload");
+        let port = serving(quiet_ctx(&data));
+        let a = session_log(&[(2000, "rxA", test_packet(9, 2, false)), (4000, "rxA", test_packet(9, 4, false))]);
+        let b = session_log(&[(3000, "rxB", test_packet(13, 3, false))]);
+        let path = format!("/api/replay/open?name=a.log&size={}&name=b.log&size={}", a.len(), b.len());
+        let (s, opened) = call_text(port, "POST", &path, &(a.clone() + &b));
+        assert_eq!(s, 200, "{}", opened);
+        assert!(opened.contains("\"lines\":3,\"packets\":3,\"from\":2000,\"t\":4000"), "{}", opened);
+        let id = crate::json::str_field(&opened, "id").unwrap();
+        let log = call_text(port, "GET", &format!("/api/replay/{}/log", id), "").1;
+        let order: Vec<&str> = log.lines().skip(1).map(|l| l.split('\t').nth(1).unwrap()).collect();
+        assert_eq!(order, ["rxA", "rxB", "rxA"]);
+        let (s, said) = call_text(port, "POST", &format!("/api/replay/open?name=a.log&size={}", a.len() + 5), &a);
+        assert_eq!(s, 400);
+        assert!(said.contains("\"ok\":false"), "{}", said);
+        assert_eq!(call_text(port, "POST", "/api/replay/open?path=../x.log", "").0, 400);
         let _ = std::fs::remove_dir_all(&data);
     }
 }

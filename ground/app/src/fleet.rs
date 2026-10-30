@@ -818,6 +818,18 @@ impl Fleet {
     // {"history":{t, counter, rssi, ...}, "rxHistory":{rx:{t, rssi, snr}}} for a label,
     // live ("64") or retired ("64a")
     pub fn history(&self, label: &str) -> Option<String> {
+        let (series, rx) = self.history_parts(label)?;
+        Some(format!("{{\"history\":{{{}}},\"rxHistory\":{{{}}}}}", series, rx))
+    }
+
+    // What /api/history serves: the series flat, as the page's setHistory reads them,
+    // with the per-receiver ones beside them under rxHistory
+    pub fn history_flat(&self, label: &str) -> Option<String> {
+        let (series, rx) = self.history_parts(label)?;
+        Some(format!("{{{},\"rxHistory\":{{{}}}}}", series, rx))
+    }
+
+    fn history_parts(&self, label: &str) -> Option<(String, String)> {
         let u = self.unit(label)?;
         let series: Vec<String> =
             series_names().zip(&u.history.series).map(|(k, s)| format!("\"{}\":{}", k, nums(s))).collect();
@@ -826,12 +838,7 @@ impl Fleet {
             .iter()
             .map(|(k, h)| format!("\"{}\":{{\"t\":{},\"rssi\":{},\"snr\":{}}}", esc(k), nums(&h.t), nums(&h.rssi), nums(&h.snr)))
             .collect();
-        Some(format!(
-            "{{\"history\":{{\"t\":{},{}}},\"rxHistory\":{{{}}}}}",
-            nums(&u.history.t),
-            series.join(","),
-            rx.join(",")
-        ))
+        Some((format!("\"t\":{},{}", nums(&u.history.t), series.join(",")), rx.join(",")))
     }
 }
 

@@ -85,6 +85,16 @@ pub fn text_field(body: &str, name: &str) -> Option<String> {
     }
 }
 
+// A number, for the model settings. Some(NaN) when the key is there with something that
+// is not a number, so a typo is refused rather than ignored.
+pub fn num_field(body: &str, name: &str) -> Option<f64> {
+    let pat = format!("\"{}\"", name);
+    let at = body.find(&pat)? + pat.len();
+    let rest = body[at..].trim_start().strip_prefix(':')?.trim_start();
+    let text: String = rest.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E')).collect();
+    Some(text.parse().unwrap_or(f64::NAN))
+}
+
 // true or false, which is all flight.json has that is neither a number nor a string.
 pub fn bool_field(body: &str, name: &str) -> Option<bool> {
     let pat = format!("\"{}\"", name);
@@ -102,6 +112,16 @@ pub fn bool_field(body: &str, name: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_number_field_reads_what_json_writes() {
+        let body = "{\"lostAfterMs\": 600000, \"lowBatteryV\":3.45,\"weakRssiDbm\":-1.2e2,\"x\":\"no\"}";
+        assert_eq!(num_field(body, "lostAfterMs"), Some(600000.0));
+        assert_eq!(num_field(body, "lowBatteryV"), Some(3.45));
+        assert_eq!(num_field(body, "weakRssiDbm"), Some(-120.0));
+        assert!(num_field(body, "x").unwrap().is_nan());
+        assert_eq!(num_field(body, "missing"), None);
+    }
 
     #[test]
     fn reads_what_somebody_typed_escapes_and_all() {
