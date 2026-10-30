@@ -288,6 +288,7 @@ test('with no tree and no carried image for the module, the button is off and sa
 
 test('the firmware pane names the dump image and offers a file or a saved image, not a carried one', async () => {
   const p = await chipsats({ logs: [{ kind: 'image', uid: UID9, name: 'descent-image-002C002E-CS9-x.bin', when: 1791000000, bytes: 262144 }] });
+  await p.fire('screen-chipsats', 'click', { 'data-images': '1' });
   const h = p.sheet();
   assert.match(h, /Dump firmware 25118bdf/);
   assert.match(h, /This board transmits nothing until flight software is on it\./);
@@ -440,6 +441,8 @@ test('a board shows its last saved flight software to put back and every log pul
     { name: '2026-10-17/pulls/1509-board12/ground.log', bytes: 1000, when: 1792100000, kind: 'pull', uid: UID12 },
   ];
   const p = await chipsats({ read: FLIGHT, logs, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  await p.fire('screen-chipsats', 'click', { 'data-images': '1' });
+  await p.fire('screen-chipsats', 'click', { 'data-allpulls': '1' });
   const h = p.sheet();
   assert.match(h, /Last saved flight software/);
   assert.match(h, /data-putback="2026-10-17\/images\/1454-board9-002C002E.bin"[^>]*>Put back last saved flight software</);
@@ -525,4 +528,136 @@ test('a Patch and flash that cannot go says why beside the button', async () => 
   assert.match(p.sheet(), /data-buildembed="1"[^>]*disabled/);
   // said right under the button, the first thing after its label
   assert.match(p.words(), /and flash(?: CS9)? Put the board on the ST-Link and press Read the board\./);
+});
+
+// ---------- the sheet in three steps ----------
+const FLIGHT_CS9 = Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' });
+const CONSOLE_PORT = [{ port: '/dev/ttyUSB0', usb: '1a86:7523', state: 'waiting' }];
+const pickRow = (uid) => ({ closest: (sel) => (sel === '[data-pick]' ? { getAttribute: () => uid } : null) });
+
+test('the sheet reads as three numbered steps, then the flight logs and the other images', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9] });
+  const w = p.words();
+  const at = (re) => w.search(re);
+  const order = [/Identity and radio/, /\bPhases\b/, /\bWrite\b/, /Flight logs/, /Other images/].map(at);
+  assert.ok(order.every((i) => i >= 0), String(order));
+  assert.deepStrictEqual(order.slice().sort((a, b) => a - b), order);
+  assert.deepStrictEqual((p.sheet().match(/class="stepno">\d/g) || []).map((s) => s.slice(-1)), ['1', '2', '3']);
+});
+
+test('settings changed from the board are rows in Write, the board\'s value struck beside the new one', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9] });
+  assert.match(p.words(), /No changes from the board/);
+  await p.fire('screen-chipsats', 'change', { 'data-build': 'sf' }, { tagName: 'SELECT', value: '9' });
+  assert.match(p.words(), /1 change from the board Spreading factor SF7 → SF9/);
+  assert.match(p.words(), /On the board: SF7 changed/);
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'p1l' }, { tagName: 'INPUT', value: '0.1' });
+  assert.match(p.words(), /2 changes from the board Spreading factor SF7 → SF9 Air every 10 s, log every 0\.05 s → every 10 s, log every 0\.1 s/);
+  // what it writes in full, by the way it writes
+  assert.match(p.words(), /Build with board 255, LE, SF9, 14 dBm; ground every 60 s, log every 1 s; air every 10 s, log every 0\.1 s/);
+});
+
+test('the write button names the board, and a running flash takes its place', async () => {
+  let p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9] });
+  assert.match(p.sheet(), /data-buildembed="1"(?![^>]*disabled)[^>]*>Build and flash CS9</);
+  assert.match(p.words(), /A flight software tree is here, so this builds the exact image\./);
+  assert.match(p.sheet(), /data-backup="1"/);
+  p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], health: { fswTree: false, flightImages: [{ id: 'c4fb204d8f79e725', module: 'le', bytes: 66600 }] } });
+  assert.match(p.sheet(), /data-buildembed="1"[^>]*>Patch and flash CS9</);
+  p.jobs.chip = { running: true, what: 'flash', uid: UID9, steps: ['patching the image'], pct: 40, seconds: 3 };
+  p.jobs.heard.forEach((fn) => fn([]));
+  assert.doesNotMatch(p.sheet(), /data-buildembed="1"[^>]*>Patch and flash CS9</);
+  assert.match(p.words(), /Save what is on the board first Flashing CS9/, 'where the button was');
+});
+
+test('the flight logs row counts the pulls, opens the latest, and lists them all only when asked', async () => {
+  const now = Date.now() / 1000;
+  const logs = [0, 1, 2].map((i) => ({ name: '2026-10-2' + (8 - i) + '/pulls/1400-board9/ground.log', bytes: 1000, when: now - 86400 * i - 60, kind: 'pull', uid: UID9 }));
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], logs, boards: CONSOLE_PORT });
+  let h = p.sheet();
+  assert.match(p.words(), /Flight logs 3 pulls · latest /);
+  assert.match(h, /data-openlog="2026-10-28\/pulls\/1400-board9\/ground.log"[^>]*>Open latest</);
+  assert.match(h, /data-allpulls="1"[^>]*>All 3</);
+  assert.match(h, /data-pull="1"[^>]*>Pull the flight log</);
+  assert.doesNotMatch(h, /2026-10-26\/pulls/, 'folded by default');
+  await p.fire('screen-chipsats', 'click', { 'data-allpulls': '1' });
+  h = p.sheet();
+  assert.match(h, /data-allpulls="1" aria-expanded="true"/);
+  for (const l of logs) {
+    assert.ok(h.includes('data-openlog="' + l.name + '"'), l.name);
+    assert.ok(h.includes('data-csv="' + l.name + '"'), l.name);
+  }
+  await p.fire('screen-chipsats', 'click', { 'data-allpulls': '1' });
+  assert.doesNotMatch(p.sheet(), /2026-10-26\/pulls/);
+});
+
+test('Clear flash stays in the flight logs row, with its confirm naming the last pull and the keep box unticked', async () => {
+  const now = new Date();
+  const logs = [{ name: '2026-10-19/pulls/1149-board9/ground.log', bytes: 2000, when: now.getTime() / 1000 - 3 * 86400, kind: 'pull', uid: UID9 }];
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], logs, boards: CONSOLE_PORT });
+  assert.match(p.sheet(), /data-keepfsw="1"(?![^>]*checked)[^>]*>/);
+  await p.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
+  const w = p.words();
+  const at = (re) => w.search(re);
+  assert.ok(at(/Flight logs/) < at(/Clear flash/) && at(/Clear flash/) < at(/Erases the flight log on CS9 for good\. Last pulled/));
+  assert.ok(at(/Erases the flight log on CS9/) < at(/Other images/), 'the confirm is in the row, not elsewhere');
+  assert.match(p.sheet(), /data-wipego="1"[^>]*>Clear the flash</);
+});
+
+test('other images are folded behind Show, and open for a write waiting to be confirmed', async () => {
+  const logs = [{ kind: 'image', uid: UID9, name: 'img-CS9.bin', when: 1791000000, bytes: 262144 }];
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], logs });
+  let h = p.sheet();
+  assert.match(h, /data-images="1"[^>]*aria-expanded="false"[^>]*>Show</);
+  assert.doesNotMatch(h, /data-putback|data-benchwrite|data-file/);
+  await p.fire('screen-chipsats', 'click', { 'data-images': '1' });
+  h = p.sheet();
+  assert.match(h, /data-images="1"[^>]*aria-expanded="true"[^>]*>Hide</);
+  assert.match(h, /data-putback="img-CS9.bin"[^>]*>Put back last saved flight software</);
+  assert.match(h, /data-file="1"/);
+  assert.match(h, /data-benchwrite="1"[^>]*>Write the sensor bench</);
+  await p.fire('screen-chipsats', 'click', { 'data-images': '1' });
+  assert.doesNotMatch(p.sheet(), /data-putback/);
+  await p.fire('screen-chipsats', 'click', { 'data-benchwrite': '1' });
+  assert.match(p.words(), /Writes the LE sensor bench over whatever is on CS9/);
+  assert.match(p.sheet(), /data-benchgo="1"/);
+});
+
+test('a probe whose board does not answer: a remembered board still gets its steps, the write off with why, pull and clear on the sheet', async () => {
+  const p = await chipsats({ chips: [FLIGHT_CS9], readFails: true, under: null });
+  assert.match(p.words(), /Could not read it: no board answered/);
+  await p.fire('screen-chipsats', 'click', {}, pickRow(UID9));
+  const h = p.sheet();
+  const w = p.words();
+  assert.match(w, /Identity and radio.*\bPhases\b.*\bWrite\b.*Flight logs/);
+  assert.match(h, /data-buildembed="1"[^>]*disabled[^>]*>Build and flash CS9</);
+  assert.match(w, /Build and flash CS9 Put the board on the ST-Link and press Read the board\./);
+  assert.match(h, /data-pull="1"[^>]*>Pull the flight log</);
+  assert.match(h, /data-wipe="1"[^>]*>Clear flash</);
+  await p.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
+  assert.match(p.words(), /never pulled CS9 has never been pulled on this computer/);
+  assert.match(p.sheet(), /data-wipego="1"/);
+});
+
+test('the list has the board on the ST-Link in its own card and the rest under Remembered', async () => {
+  const p = await chipsats({ chips: [CS9, Object.assign({}, CS12, { csid: 12 })] });
+  const w = tidy(p.text('cs-list'));
+  assert.match(w, /^On the ST-Link STLink V3 002A00 CS9 LE dump firmware · read \d\d:\d\d Remembered · 1 board CS12 LE Board 12 · last on the probe /);
+  assert.match(w, /Reading can reset the board\./);
+  const none = await chipsats({ chips: [CS9], probes: [] });
+  assert.match(tidy(none.text('cs-list')), /^On the ST-Link Nothing on the probe\. Remembered · 1 board CS9/);
+});
+
+test('a probe nobody has read yet has Read the board in its card', async () => {
+  const p = await chipsats({ chips: [], readFails: true, under: null });
+  assert.match(p.list(), /data-read="002A00"[^>]*>Read the board</);
+  assert.match(tidy(p.text('cs-list')), /The board on the ST-Link not read · STLink V3 002A00/);
+});
+
+test('a pull the app calls complete says so', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9] });
+  p.jobs.pull = { running: false, board: '/dev/ttyUSB0', steps: ['done'], keepFsw: true, restored: true, error: null, uid: UID9,
+    log: '2026-10-22/pulls/1402-CS9/ground.log', report: { read: 12480, found: 12480, complete: true, boots: [{ timeSource: 'anchor' }] } };
+  p.jobs.heard.forEach((fn) => fn([]));
+  assert.match(p.words(), /Last pull: 12,480 of 12,480 records, 1 boot, 1 with GPS time\. complete/);
 });

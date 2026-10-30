@@ -1,4 +1,4 @@
-// Sensor bench pane on a ChipSat's sheet: the bench console per part, the receivers' tally,
+// Sensor bench card on a ChipSat's sheet: the bench console per part, the receivers' tally,
 // the starts and the raw console. chipsats.js draws its head and says which board is up.
 (function () {
   'use strict';
@@ -90,7 +90,7 @@
       ...s.gaps.map((g) => ({ t: g.to, html: '<div class="boot"><span class="when">' + esc(clock(g.to)) + '</span> ' +
         mark('off', 'the port went quiet for ' + secs(g.to - g.from)) + ' <span class="note">not a restart</span></div>' })),
     ].sort((a, b) => b.t - a.t);
-    return '<div class="pane"><h3>Starts (' + s.boots.length + ')</h3>' + rows.slice(0, 30).map((r) => r.html).join('') + '</div>';
+    return '<div class="card"><h3>Starts (' + s.boots.length + ')</h3>' + rows.slice(0, 30).map((r) => r.html).join('') + '</div>';
   }
 
   function card(p, now) {
@@ -98,7 +98,7 @@
     const q = p.quiet(now);
     const said = p.lastOk === null ? '' : p.lastOk ? mark('good', 'ok=1') : mark('bad', 'ok=0');
     const rate = m ? p.rate(m.name) : null;
-    return '<div class="pane part' + (q.gone ? ' gone' : '') + '">' +
+    return '<div class="card part' + (q.gone ? ' gone' : '') + '">' +
       '<h3>' + esc(NAMES[p.tag] || p.tag) + ' ' + said + (q.gone ? ' ' + mark('bad', 'no line for ' + secs(q.ms)) : '') + '</h3>' +
       (p.init ? '<div class="line"><span class="l">init</span> ' + (p.init.ok === '1' ? mark('good', 'ok=1') : p.init.ok === '0' ? mark('bad', 'ok=0') : '') + ' ' + fieldsOf(p.init) + '</div>' : '') +
       '<div class="line"><span class="l">lines</span> ' + p.ok + ' ok=1, ' + p.failed + ' ok=0' +
@@ -123,7 +123,7 @@
         '</td><td>' + r.badCrc + '</td><td>' + esc(String(last(r.rssi) ?? '')) + '</td><td>' + esc(String(last(r.snr) ?? '')) +
         '</td><td>' + esc(r.t ? secs(now - r.t) + ' ago' : '') + '</td></tr>';
     }).join('');
-    return '<div class="pane"><h3>Heard by the receivers from any board on the sensor bench (' + BN.BENCH_CSID + ')</h3>' +
+    return '<div class="card"><h3>Heard by the receivers from any board on the sensor bench (' + BN.BENCH_CSID + ')</h3>' +
       (rows ? '<table class="grid"><thead><tr><th>Receiver</th><th>Heard</th><th>Missed</th><th>Counter restarts</th><th>Bad CRC</th><th>RSSI</th><th>SNR</th><th>Last</th></tr></thead><tbody>' + rows + '</tbody></table>'
         : '<p class="empty">No receiver has heard the bench yet. It keeps its radio off for the first 30 s after it starts.</p>') + '</div>';
   }
@@ -138,7 +138,7 @@
       const cls = r.line && r.line.tag === 'BOOT' && r.line.event === 'start' ? 'boot' : r.line && r.line.level === 'E' ? 'bad' : r.line && r.line.level === 'W' ? 'warn' : '';
       return '<span class="' + cls + '">' + esc(clock(r.t) + '  ' + r.text) + '</span>';
     }).join('\n');
-    return '<div class="pane"><h3>Console, as it arrived</h3><div class="line">' + pick +
+    return '<div class="card"><h3>Console, as it arrived</h3><div class="line">' + pick +
       ' <label class="check"><input type="checkbox" data-pause="1"' + (state.paused ? ' checked' : '') + '> Pause</label>' +
       ' <span class="note">' + (s ? s.heard + ' lines, ' + s.other + ' not in the log format' : '') + '</span></div>' +
       '<pre class="raw">' + (text || '<span class="muted">nothing yet</span>') + '</pre></div>';
