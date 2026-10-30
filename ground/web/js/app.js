@@ -290,7 +290,8 @@
     $('view-live').setAttribute('aria-selected', String(mode === 'live'));
     $('view-replay').setAttribute('aria-selected', String(mode === 'replay'));
     $('view-replay').disabled = !view.replay;
-    $('view-replay').textContent = view.replay ? 'Replay · ' + view.replay.names.join(', ') : 'Replay';
+    // The name hides on a narrow bar; the replay bar under it says it in full
+    $('view-replay').innerHTML = view.replay ? 'Replay<span class="pill-file"> · ' + esc(view.replay.names.join(', ')) + '</span>' : 'Replay';
     $('view-replay').title = view.replay ? view.replay.names.join(', ') : 'Open a log, or pull one off a ChipSat';
     $('replay').hidden = mode !== 'replay';
     renderReplayFile();

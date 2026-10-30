@@ -166,9 +166,9 @@
 
     const name = D.baseName(hub.log);
     $('strip-log').hidden = false;
-    $('strip-log-name').innerHTML = name ? '<span class="dot on"></span>Logging to <b>' + esc(name) + '</b>'
+    $('strip-log-name').innerHTML = name ? '<span class="dot on"></span><span class="lead">Logging to </span><b>' + esc(name) + '</b>'
       : '<span class="dot"></span>' + mark('warn', 'not logging to a file');
-    $('strip-log-name').title = hub.log || '';
+    $('strip-log-name').title = hub.log ? 'Logging to ' + hub.log : '';
     $('strip-log-save').hidden = !name;
     if (name) { $('strip-log-save').href = logUrl(name); $('strip-log-save').download = name; }
 
