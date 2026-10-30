@@ -4,7 +4,7 @@ One page to print. The app needs no internet.
 
 ## Before leaving
 
-- set the spreading factor you are flying and flash both receivers to it (**T-Beams** → **Flash the receiver firmware**)
+- set the spreading factor you are flying and flash both receivers to it (**T-Beams** → the **Receiver firmware** card → **Flash**)
 - check every ChipSat on the **ChipSats** screen: module set, and none still running the dump
   firmware or the sensor bench
 - set each board's **Phases**: for the ground and the air, the gap between flash log records and
@@ -27,7 +27,7 @@ One page to print. The app needs no internet.
 2. open the app, go to **T-Beams**
 3. pick the board and press **Read this one**; a board cannot be flashed before that
 4. check its spreading factor on its sheet; change it there, or flash it if it needs the firmware
-5. go to **Live** and wait for packets in the fleet table
+5. go to **Live** and wait for a unit card to appear in the Units list
 
 ## During the flight
 
