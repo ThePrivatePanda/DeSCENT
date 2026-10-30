@@ -312,6 +312,16 @@ test('the selected row is marked, and a press picks it', async () => {
   assert.match(p.html('data-table'), new RegExp('<tr data-row="' + SECOND.replace(/[/.]/g, '\\$&') + '" class="sel"'));
 });
 
+test('a row takes the keyboard: Tab reaches it, Enter or Space picks it', async () => {
+  const p = await screen();
+  assert.equal((p.html('data-table').match(/<tr data-row="[^"]*"[^>]* tabindex="0"/g) || []).length, 6);
+  const key = (name, k) => p.fire('screen-data', 'keydown', {}, { matches: (s) => s === 'tr[data-row]', dataset: { row: name } }, { key: k });
+  await key(SECOND, 'Enter');
+  assert.match(p.html('data-table'), new RegExp('<tr data-row="' + SECOND.replace(/[/.]/g, '\\$&') + '" class="sel"'));
+  await key(FIRST, ' ');
+  assert.match(p.html('data-table'), new RegExp('<tr data-row="' + FIRST.replace(/[/.]/g, '\\$&') + '" class="sel"'));
+});
+
 test('the note on a pull is read off its report, asked for once, retried only when it failed', async () => {
   const p = await screen();
   assert.deepStrictEqual(p.o.reported.slice().sort(),

@@ -57,8 +57,9 @@ function page(scripts, hub, o) {
     text: (id) => el(id).html.replace(/<[^>]*>/g, ' ')
       .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
       .replace(/\s+/g, ' ').trim(),
-    async fire(id, type, attrs, more) {
-      for (const fn of handlers[id + ':' + type] || []) await fn({ target: target(attrs || {}, more) });
+    // ev: what else the event carries, like the key of a keydown
+    async fire(id, type, attrs, more, ev) {
+      for (const fn of handlers[id + ':' + type] || []) await fn(Object.assign({ target: target(attrs || {}, more), preventDefault() {} }, ev));
       await settle();
     },
     // The screen's timer, run by hand as many times as asked.

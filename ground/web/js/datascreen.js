@@ -187,7 +187,8 @@
     return '<thead><tr><th>What</th><th>From</th><th>Written</th><th class="r">Size</th><th></th></tr></thead><tbody>' +
       shown.map((r) => {
         const sel = r.name === state.sel;
-        return '<tr data-row="' + esc(r.name) + '"' + (sel ? ' class="sel"' : '') + ' title="' + esc(r.name) + '">' +
+        // data-keep: the shell's repaint puts keyboard focus back on the same row
+        return '<tr data-row="' + esc(r.name) + '"' + (sel ? ' class="sel"' : '') + ' title="' + esc(r.name) + '" tabindex="0" data-keep="row:' + esc(r.name) + '">' +
           '<td><b>' + WHAT[r.kind] + '</b> ' + noteHtml(r) +
             // the file's name is a tooltip on the rest, and said in words for the one picked
             (sel ? ' <span class="note path">' + esc(r.name) + '</span>' : '') + '</td>' +
@@ -344,6 +345,12 @@
     if (e.target.closest('a')) return;
     const tr = e.target.closest('tr[data-row]');
     if (tr) pick(tr.dataset.row);
+  });
+
+  $('screen-data').addEventListener('keydown', (e) => {
+    if ((e.key !== 'Enter' && e.key !== ' ') || !e.target.matches('tr[data-row]')) return;
+    e.preventDefault();
+    pick(e.target.dataset.row);
   });
 
   A.shell.register('data', { show: load });

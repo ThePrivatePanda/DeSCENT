@@ -237,6 +237,13 @@
   });
 
   // ---------- replay ----------
+  // The input itself is hidden, so its two labels take the focus and the keys
+  for (const l of document.querySelectorAll('label[tabindex]')) {
+    if (l.control !== $('file-open')) continue;
+    l.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('file-open').click(); }
+    });
+  }
   $('file-open').addEventListener('change', async (e) => {
     const files = [...e.target.files];
     e.target.value = '';
@@ -716,9 +723,19 @@
     toast(f.label + ': ' + shown);
   });
   $('settings-reset').addEventListener('click', () => { applySettings(S.defaults()); buildSettingsForm(); toast('Settings reset to defaults'); });
-  $('btn-settings').addEventListener('click', () => { buildSettingsForm(); $('settings').hidden = !$('settings').hidden; });
-  $('settings-close').addEventListener('click', () => { $('settings').hidden = true; });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('settings').hidden = true; });
+  // Focus goes into the drawer and back, or a keyboard user tabs through the whole page to reach it
+  function closeSettings() {
+    const inside = $('settings').contains(document.activeElement);
+    $('settings').hidden = true;
+    if (inside) $('btn-settings').focus();
+  }
+  $('btn-settings').addEventListener('click', () => {
+    buildSettingsForm();
+    $('settings').hidden = !$('settings').hidden;
+    if (!$('settings').hidden) $('settings-close').focus();
+  });
+  $('settings-close').addEventListener('click', closeSettings);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settings').hidden) closeSettings(); });
 
   for (const [v, label] of [0, 1, 5, 15, 30, 60].map(MIN)) $('window').add(new Option(label, v));
   $('window').value = settings.graphWindowMin;
