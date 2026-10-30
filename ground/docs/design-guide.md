@@ -20,7 +20,7 @@ Names are the design handoff's. Dark swaps the values below, and the plain-hex a
 | `--color-text-70` | text at 70 % | same | Labels, units, notes, stale values |
 | `--color-divider` | text at 16 % | same | The border of a control |
 | `--color-accent` | `#c67139` | same | Terracotta: the focus ring, the picked ring, the chart line, a bar that has run out. Never a fill under white text and never text |
-| `--color-accent-100` / `-200` | `#fff2eb` / `#ffe1d0` | `#4d170e` / `#5c2a1a` | A soft alarm: banner, `warn` mark, a Data row's action |
+| `--color-accent-100` / `-200` | `#fff2eb` / `#ffe1d0` | `#4d170e` / `#5c2a1a` | A soft alarm: `warn` mark, a Data row's action |
 | `--color-accent-700` / `-800` | `#8c491a` / `#643312` | `#f2a477` / `#ffc4b8` | Alarm text, a ghost button / text on accent-100 or -200 |
 | `--color-fill`, `--color-fill-hover` | `#8c491a`, `#643312` | same | A solid under white text: primary button, `bad` mark, step number |
 | `--color-accent-2` | `#7a8a5e` | same | Sage: the bar of a unit that is OK |
@@ -37,7 +37,7 @@ Names are the design handoff's. Dark swaps the values below, and the plain-hex a
 
 ### Aliases JavaScript reads
 
-`charts.js` and `mapview.js` read colours through `getComputedStyle`, which hands back a `color-mix()` unresolved. These names are therefore plain hex, never `color-mix()`, in the light block and in both dark blocks (the media query and `[data-theme="dark"]`):
+`charts.js` reads colours through `getComputedStyle`, which hands back a `color-mix()` unresolved. These names are therefore plain hex, never `color-mix()`, in the light block and in both dark blocks (the media query and `[data-theme="dark"]`):
 
 - `--accent`, `--critical`, `--ink`, `--ink-2`, `--panel`, `--rule`, `--sunk`, `--sans`, `--series-1` to `--series-8`
 - kept beside them for old call sites: `--bg`, `--rule-strong`, `--ink-3`, `--mono`
@@ -104,9 +104,9 @@ The floors: nothing is under 12.5 px except the 11 px group (kickers and table h
 
 The chrome, on every screen:
 
-- The bar is 68 px. Left: the brand, then the screens as pill tabs: Live, Replay, ChipSats (small kicker "units"), T-Beams (small kicker "receivers"), Data. The picked one is sage-200 on sage-800. Replay is disabled until a log is open. ChipSats, T-Beams and Data need the app, so a page from anywhere else has only Live and Replay.
-- Right of the bar: the strip (the receivers button, the file being logged to in bold with Save a copy and New file, a chip for a running job that goes to its screen, the build and release notices), then Save session and the recording controls on Live only (`.live-only`), Open a file, Settings and the sun and moon button. Under 1640 px the bar drops two things it says elsewhere, so it keeps one row at 1440: the replayed file's name in the Replay tab (the replay bar names it) and "Logging to" before the log's name (its title says it). Under 1420 px it also drops Save a copy (the Data screen's row for the log being written saves it), so Replay keeps one row on a Surface. Two or three receivers stack inside their button. A job, build or release chip takes a second row.
-- Under the bar, a banner (accent-100) for a recovered log or an unsupported browser, and on Replay a white pill bar with Play, speed, the scrubber, the time and Save log, Save CSV, Save raw, Close log. The toast is a dark pill at the bottom centre.
+- The bar is 68 px. Left: the brand, then the screens as pill tabs: Live, Replay, ChipSats (small kicker "units"), T-Beams (small kicker "receivers"), Data. The picked one is sage-200 on sage-800. Replay is disabled until a log is open. The app serves the page, so all five screens are always there.
+- Right of the bar: the strip (the receivers button, the file being logged to in bold with Save a copy and New file, a chip for a running job that goes to its screen, the build and release notices), then Open a file, Settings and the sun and moon button. Under 1640 px the bar drops two things it says elsewhere, so it keeps one row at 1440: the replayed file's name in the Replay tab (the replay bar names it) and "Logging to" before the log's name (its title says it). Under 1420 px it also drops Save a copy (the Data screen's row for the log being written saves it), so Replay keeps one row on a Surface. Two or three receivers stack inside their button. A job, build or release chip takes a second row.
+- Under the bar, on Replay, a white pill bar with Play, speed, the scrubber, the time and Save log, Save CSV, Save raw, Close log. The toast is a dark pill at the bottom centre.
 - Frame padding is 20 px and the gap between panels 16 px. Panels are `--radius-lg` (28 px), cards `--radius-md` (16 px). There are no rules between panels; a hairline is allowed inside a card between rows.
 
 Live and Replay (`live.css`), a 352 px rail and the main column:
@@ -129,7 +129,7 @@ Data (`data.css`):
 - The table, newest first, each row a rounded bar: what it is, where it came from, when, size, then its actions as small accent-100 pills at the end. The picked row is surface-coloured. Below 700 px each row is a small card with its actions under it.
 - A pull's report opens under the table in a surface panel: the boot table on the left and where it is on disk with its actions on the right. With no report the panel is one line.
 
-The settings drawer: 560 px from the right edge with `--shadow-lg`, over whichever screen is up. A white card per section with its title; a field is its label with the hint under it on the left and its control in one 150 px column on the right. The foot says where the settings are kept and holds Reset to defaults.
+The settings drawer: 560 px from the right edge with `--shadow-lg`, over whichever screen is up. A white card per section with its title; a field is its label with the hint under it on the left and its control in one 150 px column on the right. The Status section says its settings are kept in the app, the same on every screen. The foot says where the display settings are kept and holds Reset to defaults.
 
 Scrolling: above 1100 px the page itself does not scroll, each pane does. Below 1100 px the layouts become one column and the page scrolls down. The page never scrolls sideways at any width; below 700 px the screen tabs scroll inside the bar and a table row becomes a card.
 

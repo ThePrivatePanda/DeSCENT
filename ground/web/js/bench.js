@@ -1,10 +1,10 @@
-// Sensor bench console per port, for the Sensor bench pane on ChipSats. Values stay as the text the board printed
+// Sensor bench console per port, for the Sensor bench pane on ChipSats. Values stay as the text the board printed.
+// Lines and packets come from the app's stream: {kind: "line"} for the console, {kind: "packet"} for the radio
 (function (root, factory) {
-  const L = typeof require === 'function' ? require('./lines.js') : root.DG.lines;
-  const mod = factory(L);
+  const mod = factory();
   if (typeof module === 'object' && module.exports) module.exports = mod;
   else (root.DG = root.DG || {}).bench = mod;
-})(typeof self !== 'undefined' ? self : this, function (L) {
+})(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
   const LINE = /^([EWIDV]) ([A-Z]+) (\d+) c(\d+): (\S+)(.*)$/;
@@ -181,17 +181,17 @@
       this.by = new Map();    // receiver -> {heard, badCrc, missed, restarts, last, rssi, snr, t}
     }
 
-    add(t, rx, text) {
-      if (!text.startsWith('PKT,')) return false;
-      const ev = L.parseLine(text);
-      if (!ev || ev.kind !== 'packet' || !ev.decoded || !ev.decoded.ok) return false;
-      if (ev.decoded.values.csid !== BENCH_CSID) return false;
+    // m: a packet message off the stream, {csid, rx, t, crcOk, values, rssi, snr}
+    add(m) {
+      if (!m || m.kind !== 'packet' || !m.values) return false;
+      if (Number(m.csid) !== BENCH_CSID) return false;
+      const rx = String(m.rx);
       if (!this.by.has(rx)) this.by.set(rx, { heard: 0, badCrc: 0, missed: 0, restarts: 0, last: null, rssi: [], snr: [], t: null });
       const r = this.by.get(rx);
       r.heard++;
-      r.t = t;
-      if (!ev.decoded.crcOk) { r.badCrc++; return true; }
-      const c = ev.decoded.values.counter;
+      r.t = m.t;
+      if (m.crcOk === false) { r.badCrc++; return true; }
+      const c = m.values.counter;
       if (r.last !== null) {
         // lower is a restart, unless the counter wrapped
         const wrapped = c < r.last && r.last > 65000 && c < 1000;
@@ -199,7 +199,7 @@
         else r.missed += ((c - r.last + 65536) % 65536) - 1;
       }
       r.last = c;
-      for (const [k, v] of [['rssi', ev.rssi], ['snr', ev.snr]]) {
+      for (const [k, v] of [['rssi', m.rssi], ['snr', m.snr]]) {
         if (!Number.isFinite(v)) continue;
         r[k].push(v);
         if (r[k].length > 200) r[k].shift();
