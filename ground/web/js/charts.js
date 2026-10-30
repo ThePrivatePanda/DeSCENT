@@ -172,7 +172,7 @@
         }
         // The plain-hex aliases: getComputedStyle hands a color-mix() back unresolved.
         // --ink is --color-text, --rule is --color-neutral-200, --accent is --color-accent.
-        // A faint horizontal grid only; the handoff has none, it stays to read values off.
+        // A faint horizontal grid only; the design has none, it stays to read values off.
         const axis = { stroke: alpha(css('--ink'), 0.7), ticks: { show: false }, font: '600 11px ' + css('--sans') };
         const grid = { stroke: css('--rule'), width: 1 };
         const few = pd.data[0].length < 40;

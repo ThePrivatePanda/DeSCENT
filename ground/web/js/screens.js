@@ -37,7 +37,7 @@
     if (!box) return;
     // Cards keep focus too, so a keyboard user's place survives the 250 ms repaint; they have no value
     if (typing.value !== undefined) box.value = typing.value;
-    box.focus();
+    box.focus({ preventScroll: true });
     try { box.setSelectionRange(typing.at, typing.at); } catch (e) { /* not a text box */ }
   }
   function flush() {

@@ -130,7 +130,9 @@
     const head = '<div class="uhead"><span class="csid"><small>CSID</small>' + u.csid + '</span>' + stateMark(o.state) +
       (d.saturated ? mark('warn', 'accel saturated') : '') +
       '<span class="when">' + when + ' · run ' + o.run + ' of ' + o.runs +
-        (o.runs > 1 ? ' <button class="ghost" data-joinruns="' + u.csid + '" title="Opens the Runs tab">join runs</button>' : '') + '</span></div>';
+        (o.runs > 1 ? ' <button class="ghost" data-joinruns="' + u.csid + '" title="Opens the Runs tab">join runs</button>' : '') + '</span>' +
+      '<div class="validity-line">' + bitsHtml(d.values.validity) +
+        '<span class="hex">0x' + d.values.validity.toString(16).toUpperCase().padStart(2, '0') + '</span></div></div>';
     const crc = d.crcOk
       ? '<span class="good" title="' + (u.latestSource === 'csv' ? 'Old CSV receiver: packet rebuilt from the printed values to check the CRC' : 'CRC matches') + '">pass</span>'
       : '<span class="bad">fail</span>';

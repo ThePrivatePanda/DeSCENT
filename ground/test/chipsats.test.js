@@ -53,21 +53,29 @@ async function chipsats(o) {
 }
 // text() spaces out every tag, so "<b>CS9</b>." reads "CS9 ."
 const tidy = (t) => t.replace(/ ([,.;:?!)])/g, '$1');
-// Each value shown struck through, once, in the order it first appears
-const struck = (html) => [...new Set((html.match(/<span class="[^"]*\bwas\b[^"]*">[^<]*<\/span>/g) || []).map((s) => s.replace(/<[^>]*>/g, '')))];
+// Each value struck through, in the order it first appears, with how often: once beside
+// its control and once in the Write step, so a strike missing from either shows
+function struck(html) {
+  const n = new Map();
+  for (const s of html.match(/<span class="[^"]*\bwas\b[^"]*">[^<]*<\/span>/g) || []) {
+    const v = s.replace(/<[^>]*>/g, '');
+    n.set(v, (n.get(v) || 0) + 1);
+  }
+  return [...n];
+}
 
 test('a value on the board is struck through only when the build would replace it', async () => {
   const p = await chipsats({ read: FLIGHT, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
   assert.deepStrictEqual(struck(p.sheet()), []);
   await p.fire('screen-chipsats', 'change', { 'data-build': 'sf' }, { tagName: 'SELECT', value: '12' });
-  assert.deepStrictEqual(struck(p.sheet()), ['SF7']);
+  assert.deepStrictEqual(struck(p.sheet()), [['SF7', 2]]);
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1s' }, { tagName: 'INPUT', value: '0.5' });
-  assert.deepStrictEqual(struck(p.sheet()), ['SF7', 'every 10 s, log every 0.05 s']);
+  assert.deepStrictEqual(struck(p.sheet()), [['SF7', 2], ['every 10 s, log every 0.05 s', 2]]);
   // The log gap is its own box, in the same card.
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1l' }, { tagName: 'INPUT', value: '0.1' });
   assert.match(p.sheet(), /data-build="p1l" value="0.1"/);
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p0l' }, { tagName: 'INPUT', value: '10' });
-  assert.deepStrictEqual(struck(p.sheet()), ['SF7', 'every 60 s, log every 1 s', 'every 10 s, log every 0.05 s']);
+  assert.deepStrictEqual(struck(p.sheet()), [['SF7', 2], ['every 60 s, log every 1 s', 2], ['every 10 s, log every 0.05 s', 2]]);
 });
 
 test('a board with no settings block still gets the table and a Build and flash that works', async () => {
@@ -112,7 +120,7 @@ test('each phase has its own gap and its own battery table, edited in its card',
   assert.match(h, /data-build="p0soc0" value="75"/);
   assert.match(h, /data-build="p0ms4" value="180"/);
   assert.match(h, /while the gauge cannot be read/);
-  assert.deepStrictEqual(struck(h), ['every 60 s, log every 1 s']);
+  assert.deepStrictEqual(struck(h), [['every 60 s, log every 1 s', 2]]);
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p0soc1' }, { tagName: 'INPUT', value: '60' });
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p0ms4' }, { tagName: 'INPUT', value: '300' });
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1s' }, { tagName: 'INPUT', value: '5' });
@@ -120,7 +128,7 @@ test('each phase has its own gap and its own battery table, edited in its card',
   h = p.sheet();
   assert.match(h, /ground by battery: 10 s above 75 %, 30 s to 60 %, 60 s to 35 %, 120 s to 20 %, then 300 s \(60 s when the gauge cannot be read\), log nothing written/);
   assert.match(h, /air every 5 s, log every 0.05 s/);
-  assert.deepStrictEqual(struck(h), ['every 60 s, log every 1 s', 'every 10 s, log every 0.05 s']);
+  assert.deepStrictEqual(struck(h), [['every 60 s, log every 1 s', 2], ['every 10 s, log every 0.05 s', 2]]);
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
   const f = p.o.flashed;
@@ -146,7 +154,7 @@ test('a board on firmware from before the two phases shows its other slots and i
     block({ rates: [RATE(60000), RATE(10000), RATE(1000), RATE(60000)], logBlindMs: 500 })),
   chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
   const h = p.sheet();
-  assert.deepStrictEqual(struck(h), ['every 10 s, log every 0.05 s; falling slot every 1 s, log every 0.05 s'],
+  assert.deepStrictEqual(struck(h), [['every 10 s, log every 0.05 s; falling slot every 1 s, log every 0.05 s', 2]],
     'the air is written into both slots, so the falling one is replaced');
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
@@ -158,7 +166,7 @@ test('a board from before the phases starts from the rates a fresh image ships',
   const p = await chipsats({ read: readOf(UID9, { kind: 'flight', module: 'le', id: 'c4fb204d8f79e725' }, block({ layoutVersion: 1, txIntervalMs: 1000, rates: null, logMs: null, logBlindMs: null })),
     chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
   const h = p.sheet();
-  assert.deepStrictEqual(struck(h), ['no phases in this firmware', 'every 1 s (no phases in this firmware)'],
+  assert.deepStrictEqual(struck(h), [['no phases in this firmware', 2], ['every 1 s (no phases in this firmware)', 2]],
     'flashing gives it phases and log gaps, so every one is replaced');
   assert.match(h, /data-build="p0s" value="60"/, 'the draft starts from the defaults');
   assert.match(h, /data-build="p0l" value="10"/, 'the ground logs every 10 s unless the board says otherwise');
@@ -530,7 +538,6 @@ test('a Patch and flash that cannot go says why beside the button', async () => 
   assert.match(p.words(), /and flash(?: CS9)? Put the board on the ST-Link and press Read the board\./);
 });
 
-// ---------- the sheet in three steps ----------
 const FLIGHT_CS9 = Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' });
 const CONSOLE_PORT = [{ port: '/dev/ttyUSB0', usb: '1a86:7523', state: 'waiting' }];
 const pickRow = (uid) => ({ closest: (sel) => (sel === '[data-pick]' ? { getAttribute: () => uid } : null) });

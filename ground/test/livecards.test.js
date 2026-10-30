@@ -19,7 +19,7 @@ const text = (html) => html.replace(/<[^>]*>/g, ' ')
   .replace(/\s+/g, ' ').trim();
 const count = (s, re) => (s.match(re) || []).length;
 
-// CSID 9 as in the handoff frame: 425 packets, 3.98 V, heard by two receivers
+// CSID 9 as in the design frame: 425 packets, 3.98 V, heard by two receivers
 function nine() {
   const f = new Fleet();
   for (let c = 0; c < 425; c++) f.ingest(L.parseLine(line({ csid: 9, counter: c, battery: 3.98, validity: 0x6f }, -73)), c * 250, 'A');
@@ -106,6 +106,8 @@ test('the detail head says when, which run, and offers the join', () => {
   const t = u.lastT + 200;
   const s = text(V.detailHtml(u, { state: 'OK', t, run: 3, runs: 3, rx: [], cfg: f.cfg }));
   assert.match(s, /^CSID 9 OK Last packet \d\d:\d\d:\d\d · 0\.2 s ago · run 3 of 3 join runs/);
+  // the validity letters and the mask in hex, on their own line under the head
+  assert.match(V.detailHtml(u, { state: 'OK', t, run: 3, runs: 3, rx: [], cfg: f.cfg }), /<div class="validity-line"><span class="bits">(<span[^>]*>[A-Z]<\/span>){8}<\/span><span class="hex">0x6F<\/span><\/div><\/div>/);
   assert.match(V.detailHtml(u, { state: 'OK', t, run: 1, runs: 1, rx: [], cfg: f.cfg }), /^(?![\s\S]*join runs)/);
   assert.match(text(V.detailHtml(u, { state: 'OK', t, run: 2, runs: 3, rx: [], cfg: f.cfg, replay: true })), /Packet at \d\d:\d\d:\d\d · run 2 of 3/);
 });
