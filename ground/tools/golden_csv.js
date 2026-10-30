@@ -5,7 +5,8 @@
 // then toCsv, into <out>/<n>.js.csv where n is its line in the list.
 const fs = require('node:fs');
 const path = require('node:path');
-const web = path.join(__dirname, '..', 'web', 'js');
+// the reference JS, which left web/ in 1.4; the .sh scripts take it from git at 1.3.0
+const web = process.env.DG_REF_JS || path.join(__dirname, '..', 'web', 'js');
 const R = require(path.join(web, 'recorder.js'));
 const X = require(path.join(web, 'exportcsv.js'));
 

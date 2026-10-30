@@ -10,7 +10,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
-const web = path.join(__dirname, '..', 'web', 'js');
+// the reference JS, which left web/ in 1.4; the .sh scripts take it from git at 1.3.0
+const web = process.env.DG_REF_JS || path.join(__dirname, '..', 'web', 'js');
 
 // Midnight on a fixed day, so a file without times gets the same ones both sides
 const BASE_MS = 1793232000000;

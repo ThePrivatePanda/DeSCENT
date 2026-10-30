@@ -6,6 +6,10 @@ set -e
 here=$(cd "$(dirname "$0")/.." && pwd)
 data=${1:-$HOME/DeSCENT}
 work=${2:-$(mktemp -d)}
+# The JS the port is held to, as it was in 1.3.0 (da42787) before 1.4 took it out of web/
+mkdir -p "$work/ref"
+git -C "$here/.." archive da42787 ground/web/js | tar -x --strip-components=1 -C "$work/ref"
+export DG_REF_JS=$work/ref/web/js
 list=$work/files.txt
 
 {

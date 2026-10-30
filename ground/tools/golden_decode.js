@@ -4,7 +4,8 @@
 // node golden_decode.js <file of paths> <out.jsonl>
 const fs = require('node:fs');
 const path = require('node:path');
-const web = path.join(__dirname, '..', 'web', 'js');
+// the reference JS, which left web/ in 1.4; the .sh scripts take it from git at 1.3.0
+const web = process.env.DG_REF_JS || path.join(__dirname, '..', 'web', 'js');
 const L = require(path.join(web, 'lines.js'));
 const R = require(path.join(web, 'recorder.js'));
 
