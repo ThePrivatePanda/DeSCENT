@@ -55,7 +55,7 @@ A state is a word in a mark. The colour repeats the word and never replaces it. 
 | `warn` | accent-200 on accent-800 | incomplete, newer, on the ST-Link, module never set, dump firmware, sensor bench, being flashed, pulling, flashing, never pulled, nothing heard, not logging to a file, started, started again (a restart is worth noticing, not a failure), running … not flight software, left on the dump firmware, saturated, times not from GPS |
 | `bad` | solid accent-700, white | Lost, failed, ok=0, no permission, a port that will not open |
 
-A unit's state uses `.state` with the same three looks (OK good, STALE off, LOST bad). Nothing else is tinted.
+A unit's state is a mark too: `.mark good` for OK, `off` for Stale, `bad` for Lost. Nothing else is tinted.
 
 ## Type
 
@@ -78,7 +78,7 @@ A unit's state uses `.state` with the same three looks (OK good, STALE off, LOST
 | Body on the sheets, Data and the drawer (`--t-body`) | 14 px |
 | Labels, controls (`--t-label`, `--cf`) | 13 px (13.5 px on the sheets and the drawer) |
 | Notes and hints (`--t-note`) | 12.5 px, muted |
-| Status pills (`.mark`, `.state`) | 12 px 700 |
+| Status pills (`.mark`) | 12 px 700 |
 | Kickers, table heads, validity letters, axis text, units | 11 px |
 
 The floors: nothing is under 12.5 px except the 11 px group (kickers and table heads, validity letters, chart axis text, the unit after a value) and the 12 px pills. The operator is outdoors on a laptop, and anything smaller stops being readable in sun. A value carries the weight and its label does not.
@@ -105,7 +105,7 @@ The floors: nothing is under 12.5 px except the 11 px group (kickers and table h
 The chrome, on every screen:
 
 - The bar is 68 px. Left: the brand, then the screens as pill tabs: Live, Replay, ChipSats (small kicker "units"), T-Beams (small kicker "receivers"), Data. The picked one is sage-200 on sage-800. Replay is disabled until a log is open. ChipSats, T-Beams and Data need the app, so a page from anywhere else has only Live and Replay.
-- Right of the bar: the strip (the receivers button, the file being logged to in bold with Save a copy and New file, a chip for a running job that goes to its screen, the build and release notices), then Save session and the recording controls on Live only (`.live-only`), Open a file, Settings and the sun and moon button. Under 1640 px the bar drops two things it says elsewhere, so it keeps one row at 1440: the replayed file's name in the Replay tab (the replay bar names it) and "Logging to" before the log's name (its title says it). Two or three receivers stack inside their button. A job, build or release chip, or a window under about 1420 px in Replay, takes a second row.
+- Right of the bar: the strip (the receivers button, the file being logged to in bold with Save a copy and New file, a chip for a running job that goes to its screen, the build and release notices), then Save session and the recording controls on Live only (`.live-only`), Open a file, Settings and the sun and moon button. Under 1640 px the bar drops two things it says elsewhere, so it keeps one row at 1440: the replayed file's name in the Replay tab (the replay bar names it) and "Logging to" before the log's name (its title says it). Under 1420 px it also drops Save a copy (the Data screen's row for the log being written saves it), so Replay keeps one row on a Surface. Two or three receivers stack inside their button. A job, build or release chip takes a second row.
 - Under the bar, a banner (accent-100) for a recovered log or an unsupported browser, and on Replay a white pill bar with Play, speed, the scrubber, the time and Save log, Save CSV, Save raw, Close log. The toast is a dark pill at the bottom centre.
 - Frame padding is 20 px and the gap between panels 16 px. Panels are `--radius-lg` (28 px), cards `--radius-md` (16 px). There are no rules between panels; a hairline is allowed inside a card between rows.
 
@@ -121,7 +121,7 @@ ChipSats and T-Beams (the sheets), a 340 px list and a sheet:
 - The list is a panel of rows, one per board: its name, then its state in words. The picked row is a white card with a 2 px terracotta ring.
 - The sheet is a column of white cards that scrolls on its own. Its head is the name input, the state, the identity line and the actions for the whole board.
 - T-Beams: the head (Listen 5 s; Stop reading it, Read this one or Leave it alone) and three cards, Radio, This session and Receiver firmware, three across from 900 px of sheet width and stacked below. Under the list, a "Which board is which?" card.
-- ChipSats is being rebuilt from the handoff's Screen 3, and its CSS is not in yet (`chipsats.css` holds only a comment). The head card is the name input, the ST-Link pill and the identity line. Under it three step cards, each with a numbered circle: 1 Identity and radio (board id, module as LE | HP, spreading factor, transmit power), 2 Phases (Ground and Air as sub-cards, each with its log gap and transmit gap, or the battery bands), 3 Write (what changes from the board, the sentence on what will be built, and the one primary button). Below those, a Flight logs row (the latest pull, Open latest, All n ▾, Pull the flight log) with an Other images card beside it. The sensor bench pane is a further full-width card when the board is on the bench firmware. The step cards stack by a container query on the sheet at 1240 px.
+- ChipSats follows the handoff's Screen 3 (`chipsats.css`). The head card is the name input, the ST-Link pill and the identity line. Under it three step cards, each with a numbered circle: 1 Identity and radio (board id, module as LE | HP, spreading factor, transmit power), 2 Phases (Ground and Air as sub-cards, each with its log gap and transmit gap, or the battery bands), 3 Write (what changes from the board, the sentence on what will be built, and the one primary button). Below those, a Flight logs row (the latest pull, Open latest, All n ▾, Pull the flight log) with an Other images card beside it. The sensor bench pane is a further full-width card when the board is on the bench firmware. The step cards go three across from 960 px of sheet width, the first two side by side with Write under them from 620 px, and stack below that.
 
 Data (`data.css`):
 
@@ -136,11 +136,11 @@ Scrolling: above 1100 px the page itself does not scroll, each pane does. Below 
 ## Recipes
 
 - Anything that writes to a board takes a second click in an `.confirm` row (accent-100) that says what will be overwritten, with a primary button and Cancel. No dialogs.
-- On the board and what will be written (`.kv`): the setting, what was read off the board, the control for what will be written. A value that differs from the board shows the old one struck through (`.was`) and a ring on the control (`.changed`). The step cards will carry this over.
+- On the board and what will be written: each control in the step cards has the value read off the board under it. When the control would replace it, that value is struck through (`.was`), the control gets a ring (`.changed`), and the Write step lists the change as a row, the board's value struck beside the new one.
 - Step list of a running job (`.steps`): the steps as the app reports them, finished ones muted, the current one bold with its latest note at the right, then a 4 px bar (`.track` and `.bar-fill`). A step it failed on is marked and stays on screen.
 - Folded pane: a `details.fold` whose summary is the pane's name and one note saying why it is folded. It is for a pane a board has no use for in its current state (Radio and identity, Flight log on a bench board). It opens in place, with the browser's own triangle.
 - Sensor bench: a pane on a ChipSat's sheet, shown when the app last found the bench on that board (never because a console line arrived). Its head holds the one console chooser on the sheet and a way back to flight software. Under it a grid of part cards in the order the board starts them, then the tally of any board on the bench (254), the starts and the raw console, redrawn on their own so the rest of the sheet holds still. A card's head is the part and the last `ok=` the board printed, in a mark. A part with no line for a while gets an `off` mark saying how long. Event tags (the I2C bus) show their newest lines as printed, not parsed. Values are shown as the board gave them. When the console's start line disagrees with what was read, an `.outcome.bad` line names both.
-- A sheet is a container (`container-type: inline-size`), so its columns follow its own width, not the window's. Radio and identity puts the settings table left and the phases right from 1240 px.
+- A sheet is a container (`container-type: inline-size`), so its columns follow its own width, not the window's: the ChipSats step cards go three across from 960 px of it.
 - Each pane scrolls on its own, and a pane inside a grid has `min-height: 0` and `min-width: 0` or it pushes the page.
 - A receiver is called by the name it reports, else the name kept for its id, else `T-Beam` and its id. The port order (rx1, rx2) is shown only when nothing else is known.
 

@@ -223,12 +223,15 @@
       fmt.format(shown.length) + (shown.length === 1 ? ' file' : ' files') + ' · ' + D.bytes(bytes);
   }
 
+  const muted = (text, quiet) => '<td' + (quiet ? ' class="muted"' : '') + '>' + esc(text) + '</td>';
+
   function bootsHtml(rep, boots) {
     const ev = D.events(rep);
-    const head = ['Boot', 'Records', 'Ran for', 'Started', 'GPS anchors', 'Clock'].concat(ev ? ['Reset cause', 'Dropped'] : []);
+    const head = ['Boot', 'Board id', 'Records', 'Ran for', 'Started', 'GPS anchors', 'Clock'].concat(ev ? ['Reset cause', 'Dropped'] : []);
     return '<div class="bootwrap"><table class="boots"><thead><tr>' + head.map((h) => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
-      boots.map((b) => '<tr' + (b.dated ? '' : ' class="undated"') + '><td><b>' + esc(b.boot) + '</b></td><td>' + b.records + '</td><td>' + b.ranFor + '</td>' +
-        '<td>' + esc(b.started) + '</td><td>' + b.anchors + '</td>' +
+      boots.map((b) => '<tr' + (b.dated ? '' : ' class="undated"') + '><td><b>' + esc(b.boot) + '</b></td>' +
+        muted(b.ids, b.ids === '—') + '<td>' + b.records + '</td><td>' + b.ranFor + '</td>' +
+        muted(b.started, !b.dated) + muted(b.anchors, b.anchors === 'none') +
         '<td title="How fast the board\'s clock ran against GPS">' + b.clock + '</td>' +
         (ev ? '<td title="The reset flags the board found at this boot">' + esc(b.reset) + '</td>' +
           '<td title="Records lost when the RAM ring overran before the flash caught up">' + b.dropped + '</td>' : '') +

@@ -336,12 +336,14 @@ test('the newest pull is picked at first, and its report fills the panel', async
   const p = await screen();
   const t = p.text('data-detail');
   assert.match(t, /^Flight log pull · Falcon 2 today 00:00 · 12,480 of 12,480 records · 2 boots · 1 with GPS time · board id 9 complete/);
-  assert.match(t, /Boot Records Ran for Started GPS anchors Clock Reset cause Dropped/);
-  assert.match(t, /1 6,210 1 min 29 Oct 2026 \d\d:\d\d:\d\d UTC 3 used 11 ppm fast power on 0/);
-  assert.match(t, /2 420 1 min not dated none — pin 14/);
+  assert.match(t, /Boot Board id Records Ran for Started GPS anchors Clock Reset cause Dropped/);
+  assert.match(t, /1 9 6,210 1 min 29 Oct 2026 \d\d:\d\d:\d\d UTC 3 used 11 ppm fast power on 0/);
+  assert.match(t, /2 9 420 1 min not dated none — pin 14/);
   assert.match(t, /Read with the LE dump 2\.6\.3\. In 2026-10-29\/pulls\/1402-falcon-2\//);
   assert.match(t, /Open in Replay Save CSV Save raw$/);
   assert.equal((p.html('data-detail').match(/<tr class="undated">/g) || []).length, 1);
+  // the undated words are muted on their own; the row is not faded
+  assert.match(p.html('data-detail'), /<td class="muted">not dated<\/td><td class="muted">none<\/td>/);
 });
 
 test('a report with no event records has no reset or dropped columns', async () => {
@@ -349,7 +351,7 @@ test('a report with no event records has no reset or dropped columns', async () 
   for (const b of bare.boots) { delete b.reset; delete b.dropped; }
   const p = await screen({ reports: { '2026-10-29/pulls/1402-falcon-2/report.json': bare } });
   const t = p.text('data-detail');
-  assert.match(t, /Boot Records Ran for Started GPS anchors Clock 1 6,210/);
+  assert.match(t, /Boot Board id Records Ran for Started GPS anchors Clock 1 9 6,210/);
   assert.doesNotMatch(t, /Reset cause/);
   assert.doesNotMatch(t, /Dropped/);
 });

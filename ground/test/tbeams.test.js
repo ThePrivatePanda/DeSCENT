@@ -28,7 +28,6 @@ test('forgetting a T-Beam asks first, says nothing is sent to it, and leaves it 
   assert.doesNotMatch(p.html('tb-sheet'), /data-forgetgo/);
 });
 
-// ---------- the sheet as the redesign draws it ----------
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');

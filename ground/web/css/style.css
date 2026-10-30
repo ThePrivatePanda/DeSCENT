@@ -104,9 +104,8 @@
   --cf: 13px;
 }
 /* Dark: the handoff's swap, plus accent-200/700, accent-2-700 and neutral 400-700, which it
-   leaves light. Contrast is checked by the contrast script: solid fills on accent-700 (6.8:1
-   under white) and sage-700 (6.5:1), muted text at 70 % (5.7:1 or better); the design guide
-   gets the table in a later task. Kept twice, here and under [data-theme]. */
+   leaves light. Solid fills on accent-700 6.8:1 under white, sage-700 6.5:1, muted text at
+   70 % 5.7:1 or better (docs/design-guide.md). Kept twice, here and under [data-theme]. */
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
@@ -266,7 +265,7 @@ pre.raw, .raw {
   font: 700 12px/1.5 var(--font-body); white-space: nowrap;
 }
 .mark.good { background: var(--color-accent-2-200); color: var(--color-accent-2-800); }
-.mark.off, .rx .st.warning { background: var(--color-neutral-300); color: var(--color-neutral-800); }
+.mark.off { background: var(--color-neutral-300); color: var(--color-neutral-800); }
 .mark.warn { background: var(--color-accent-200); color: var(--color-accent-800); }
 .mark.bad { background: var(--color-fill); color: #fff; }
 
@@ -326,6 +325,11 @@ pre.raw, .raw {
    replay bar, and the log name says "Logging to" in its title */
 @media (max-width: 1640px) {
   #view-replay .pill-file, #strip-log-name .lead { display: none; }
+}
+/* Under 1420 px Save a copy goes too, or Replay's bar wraps on a Surface (1368). The Data
+   screen's row for the log being written saves the same file */
+@media (max-width: 1419px) {
+  #strip-log-save { display: none; }
 }
 
 /* Recording, when the page is not the app */
@@ -406,12 +410,6 @@ table { border-collapse: collapse; width: 100%; }
 .grid.plain tbody tr { cursor: default; }
 .grid.plain tbody tr:hover td { background: transparent; }
 
-/* The state word of a unit, as a pill */
-.state { display: inline-block; padding: 2px 9px; border-radius: 999px; font: 700 12px/1.5 var(--font-body); }
-.state.OK { background: var(--color-accent-2-200); color: var(--color-accent-2-800); }
-.state.STALE { background: var(--color-neutral-300); color: var(--color-neutral-800); }
-.state.LOST { background: var(--color-fill); color: #fff; }
-
 /* Time since the last packet over a bar filling toward this unit's stale limit */
 .age { display: inline-grid; justify-items: end; gap: 3px; min-width: 64px; }
 .age i { display: block; width: 64px; height: 4px; border-radius: 999px; background: var(--color-neutral-300); overflow: hidden; }
@@ -433,10 +431,6 @@ tr.gen td.csid { font-weight: 600; padding-left: 20px; white-space: nowrap; }
 .rx .sw { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .rx .name { font-weight: 700; }
 .rx .meta { color: var(--color-text-70); font-size: 12.5px; }
-/* The st word: live, or quiet / no data, or the port's own status */
-.rx .st { margin-left: auto; padding: 2px 9px; border-radius: 999px; font: 700 12px/1.5 var(--font-body); background: var(--color-neutral-300); color: var(--color-neutral-800); }
-.rx .st.good { background: var(--color-accent-2-200); color: var(--color-accent-2-800); }
-.rx .st.critical { background: var(--color-fill); color: #fff; }
 .rx button { min-height: 26px; padding: 0 9px; }
 .rx select { min-height: 26px; font-size: 12.5px; padding: 0 26px 0 10px; background-position: right 8px center; }
 
@@ -561,15 +555,6 @@ label.check { display: inline-flex; align-items: center; gap: 8px; cursor: point
 .phase-row { display: grid; grid-template-columns: max-content 1fr; gap: 8px; align-items: baseline; font-size: var(--t-label); }
 .phase-row .l { color: var(--color-text-70); }
 .phase .was-line { display: flex; gap: 8px; align-items: baseline; font-size: var(--t-label); border-top: 1px solid var(--color-neutral-300); padding-top: 6px; }
-/* Radio and identity: the table left, the phases right, by the sheet's width */
-.two.side { grid-template-columns: minmax(0, 1fr); gap: 0; }
-.two.side > .col { gap: 0; }
-.two.side h3 { display: flex; align-items: baseline; gap: 10px; padding: 18px 22px 8px; font: var(--font-heading-weight) 18px/1.3 var(--font-heading); }
-/* 1240: the table at its widest (about 670 px) plus two phase cards side by side */
-@container (min-width: 1240px) {
-  .two.side { grid-template-columns: minmax(0, auto) minmax(0, 1fr); }
-  .two.side .phases { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
-}
 .bands { display: grid; gap: 4px; width: 100%; margin-top: 4px; }
 .bands .band { display: flex; justify-content: space-between; gap: 12px; font-size: var(--t-label); color: var(--color-text-70); }
 .bands .band input { margin: 0 4px; }

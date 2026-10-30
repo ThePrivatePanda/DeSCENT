@@ -146,6 +146,21 @@ test('the fake page draws a mark the way screens.js does', () => {
   }
 });
 
+test('every literal mark() class in the js is one of good, off, warn, bad', () => {
+  const dir = path.join(WEB, 'js');
+  const bad = [];
+  let n = 0;
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.js'))) {
+    for (const m of fs.readFileSync(path.join(dir, f), 'utf8').matchAll(/\bmark\(\s*(['"])([^'"]*)\1\s*,/g)) {
+      n++;
+      if (!['good', 'off', 'warn', 'bad'].includes(m[2])) bad.push(f + ': ' + m[2]);
+    }
+  }
+  // a pattern that stopped matching would pass with nothing checked
+  assert.ok(n > 20, 'found ' + n + ' calls');
+  assert.deepStrictEqual(bad, []);
+});
+
 // sw.js run in a vm with a fake network, cache and timer; no browser needed.
 function worker(net, cached) {
   const vm = require('node:vm');

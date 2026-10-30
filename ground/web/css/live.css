@@ -51,7 +51,7 @@
 #dash #rxpanel > .pane-head { padding: 0; min-height: 0; margin-bottom: 4px; }
 #dash #rxpanel .asrec { font-size: 12.5px; }
 /* Shown in a replay too, as the log's receivers; only Rescan is live chrome */
-#dash #receivers.live-only { display: flex; flex-direction: column; gap: 0; padding: 0; }
+#dash #receivers { display: flex; flex-direction: column; gap: 0; padding: 0; }
 #dash .rx {
   display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center;
   min-height: 0; padding: 9px 0; font-size: 13px; cursor: pointer;
@@ -90,6 +90,7 @@
 #dash .uhead .when { font-size: 14px; color: var(--color-text-70); }
 #dash .uhead .when b { color: var(--color-text); font-weight: 700; }
 #dash .uhead .when .ghost { min-height: 0; padding: 0 0 0 4px; font-size: 14px; }
+#dash .uhead .validity-line { flex-basis: 100%; padding: 0; gap: 8px; }
 #dash .readings { grid-area: read; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 28px; }
 #dash .readings .col { min-width: 0; }
 #dash .group { margin-bottom: 8px; }
