@@ -101,8 +101,8 @@
   }
 
   // The fleet as this page sees it. The same read calls fleet.js had, over the app's rows.
-  // Hidden units, joined and deleted runs and Clear are this page's own: the contract has no
-  // call for them yet, so they change what this page shows, never what the app keeps.
+  // Hidden units, joined and deleted runs and Clear are this page's own: 1.4.0 has no call
+  // for them, so they change what this page shows, never what the app keeps.
   class StreamFleet {
     constructor(cfg) {
       this.cfg = {};
@@ -284,25 +284,46 @@
       }
     }
 
-    // The series the app holds for a run, for a page that opened after it started. Points
-    // that came on the stream while it was being asked for are kept on the end.
-    setHistory(label, series) {
+    // The series the app holds for a run, for a page that opened after it started: what
+    // fleet.js's history() gave, {history, rxHistory}. Points that came on the stream while
+    // it was being asked for are kept on the end. A bare series is taken as the history.
+    setHistory(label, got) {
       const row = this.appRows.get(String(label));
-      if (!row || !series || !Array.isArray(series.t)) return false;
+      if (!row || !got) return false;
+      const series = got.history && typeof got.history === 'object' ? got.history : got;
+      if (!Array.isArray(series.t)) return false;
       const r = this.run(runIdOf(row));
-      const h = newHistory();
-      const n = series.t.length;
-      for (const k of Object.keys(h)) {
-        const col = Array.isArray(series[k]) ? series[k] : [];
-        h[k] = col.length === n ? col.slice() : new Array(n).fill(null);
+      const take = (from, keys) => {
+        const n = from.t.length;
+        const h = {};
+        for (const k of keys) {
+          const col = Array.isArray(from[k]) ? from[k] : [];
+          h[k] = col.length === n ? col.slice() : new Array(n).fill(null);
+        }
+        return h;
+      };
+      // the app's points, then the stream's newer than its last
+      const join = (h, old, keys) => {
+        const last = h.t.length ? h.t[h.t.length - 1] : -Infinity;
+        for (let i = 0; i < old.t.length; i++) {
+          if (old.t[i] <= last) continue;
+          for (const k of keys) h[k].push(old[k][i]);
+        }
+        return h;
+      };
+      const keys = Object.keys(newHistory());
+      r.history = join(take(series, keys), r.history, keys);
+      if (got.rxHistory && typeof got.rxHistory === 'object') {
+        const rxKeys = ['t', 'rssi', 'snr'];
+        const out = {};
+        for (const [rx, h] of Object.entries(got.rxHistory)) {
+          if (!h || !Array.isArray(h.t)) continue;
+          out[rx] = join(take(h, rxKeys), r.rxHistory[rx] || { t: [], rssi: [], snr: [] }, rxKeys);
+        }
+        // a receiver heard only since the ask
+        for (const [rx, h] of Object.entries(r.rxHistory)) if (!out[rx]) out[rx] = h;
+        r.rxHistory = out;
       }
-      const last = n ? h.t[n - 1] : -Infinity;
-      const old = r.history;
-      for (let i = 0; i < old.t.length; i++) {
-        if (old.t[i] <= last) continue;
-        for (const k of Object.keys(h)) h[k].push(old[k][i]);
-      }
-      r.history = h;
       r.fetched = true;
       this.trim(r);
       this.show(row.label);
@@ -464,6 +485,7 @@
     }
 
     // ---------- this page's own changes ----------
+    // Join, delete and clear are page-side in 1.4.0; the app gets them in 1.4.1.
     // Join an earlier run into the one after it, on this page.
     mergeRun(label) {
       const a = this.retired.get(String(label));
@@ -613,7 +635,16 @@
         }
         if (this.lastSeq === null || m.seq > this.lastSeq) this.lastSeq = m.seq;
       }
-      if (m.kind === 'reset') { this.next = this.fleet.fresh(); return; }
+      // A replay after a seek: the app starts its fleet again on the same socket. What was on
+      // screen goes now, graphs included, and the snapshot that follows is the whole state.
+      // Counted like a new connection, so a history ask from before is not taken.
+      if (m.kind === 'reset') {
+        this.fleet.adopt(this.fleet.fresh(), false);
+        this.next = this.fleet.fresh();
+        this.connects++;
+        if (this.o.onChange) this.o.onChange('reset');
+        return;
+      }
       if (m.kind === 'snapshot-end') {
         if (this.next) this.fleet.adopt(this.next, this.o.keepHistory && this.ready);
         this.next = null;

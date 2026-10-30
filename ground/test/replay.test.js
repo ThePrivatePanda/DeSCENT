@@ -38,7 +38,7 @@ test('files picked on this computer go up in one body with their names and sizes
   assert.strictEqual(calls[1].body, 'x');
 });
 
-test('the replay bar: play, pause, speed and seek are POSTs to the replay, and seek takes the stream again', async () => {
+test('the replay bar: play, pause, speed and seek are POSTs to the replay, on one socket', async () => {
   const { calls, net, o } = app();
   const r = await Replay.open(o, { path: 'x.log' });
   calls.length = 0;
@@ -52,8 +52,8 @@ test('the replay bar: play, pause, speed and seek are POSTs to the replay, and s
     ['POST', '/api/replay/r7/pause', null],
     ['POST', '/api/replay/r7/seek', '{"position":250}'],
   ]);
-  assert.strictEqual(net.sockets.length, 2, 'a seek reconnects for a fresh snapshot');
-  assert.strictEqual(net.sockets[0].closed, true);
+  assert.strictEqual(net.sockets.length, 1, 'the app resets the same socket after a seek');
+  assert.strictEqual(net.sockets[0].closed, false);
 });
 
 test('the bar reads where the replay is from GET /api/replay/{id}', async () => {
@@ -83,13 +83,40 @@ test('save CSV and save log are the app\'s; close tells the app and stops listen
 });
 
 test('a graph for a replay comes from the replay\'s own history', async () => {
-  const series = { t: [1, 2], counter: [5, 6] };
+  const series = { history: { t: [1, 2], counter: [5, 6] }, rxHistory: { rx1: { t: [1, 2], rssi: [-80, -81], snr: [9, 8] } } };
   const { calls, net, o } = app((url) => (url.includes('/history') ? { ok: true, json: async () => series } : null));
   const r = await Replay.open(o, { path: 'x.log' });
   net.last().open().send(numbered([{ kind: 'unit', csid: 9, label: '9a', live: false, firstT: 1000, lastT: 2000 }, { kind: 'snapshot-end' }]));
   assert.strictEqual(await r.stream.wantHistory('9a'), true);
   assert.strictEqual(calls[calls.length - 1].url, '/api/replay/r7/history?label=9a');
   assert.deepStrictEqual(r.fleet.unit('9a').history.counter, [5, 6]);
+  assert.deepStrictEqual(r.fleet.unit('9a').rxHistory.rx1.rssi, [-80, -81]);
+});
+
+test('after a seek the app resets the replay\'s socket: the old units and graphs go before the new snapshot', async () => {
+  const series = { history: { t: [1, 2, 3], counter: [1, 2, 3] }, rxHistory: { rx1: { t: [1, 2, 3], rssi: [-80, -80, -80], snr: [9, 9, 9] } } };
+  const { calls, net, o } = app((url) => (url.includes('/history') ? { ok: true, json: async () => series } : null));
+  const r = await Replay.open(o, { path: 'x.log' });
+  const ws = net.last().open();
+  ws.send(numbered([{ kind: 'unit', csid: 9, label: '9', firstT: 1000, lastT: 3000 }, { kind: 'unit', csid: 4, label: '4', firstT: 1000, lastT: 3000 },
+    { kind: 'snapshot-end' }]));
+  await r.stream.wantHistory('9');
+  assert.deepStrictEqual(r.fleet.unit('9').history.t, [1, 2, 3]);
+  await r.seek(1);
+  ws.send({ kind: 'reset', seq: 4 });
+  assert.strictEqual(r.fleet.allUnits().size, 0, 'nothing from before the seek is drawn');
+  assert.strictEqual(r.fleet.runs.size, 0, 'and no graph is kept for it');
+  ws.send({ kind: 'unit', csid: 9, label: '9', firstT: 1000, lastT: 1000, seq: 5 });
+  assert.strictEqual(r.fleet.allUnits().size, 0, 'the new snapshot is held until it ends');
+  ws.send({ kind: 'snapshot-end', seq: 6 });
+  assert.deepStrictEqual([...r.fleet.allUnits().keys()], ['9'], 'unit 4 had not started by the new place');
+  assert.deepStrictEqual(r.fleet.unit('9').history.t, [], 'the graph from before the seek is gone');
+  series.history = { t: [1], counter: [1] };
+  series.rxHistory = { rx1: { t: [1], rssi: [-80], snr: [9] } };
+  assert.strictEqual(await r.stream.wantHistory('9'), true, 'asked again for the new place');
+  assert.deepStrictEqual(r.fleet.unit('9').history.t, [1]);
+  assert.strictEqual(calls.filter((c) => c.url.includes('/history')).length, 2);
+  assert.strictEqual(net.sockets.length, 1);
 });
 
 test('an app that refuses says why, and one without replay says so in words', async () => {

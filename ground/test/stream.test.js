@@ -264,6 +264,43 @@ test('a page that opens late asks the app for the selected unit\'s graph, and th
   assert.deepStrictEqual(f.unit('9').history.t, [1, 2, 3, 4, 5]);
 });
 
+test('the history answer carries every receiver\'s series for the Radio tab, and the stream adds to them', async () => {
+  const h = fetcher({ 9: {
+    history: { t: [1, 2], counter: [1, 2], rssi: [-70, -71], snr: [9, 9] },
+    rxHistory: { rx1: { t: [1, 2], rssi: [-80, -81], snr: [8, 8] }, rx2: { t: [1, 2], rssi: [-70, -71], snr: [9, 9] } },
+  } });
+  const { net, f, c } = client(h);
+  const ws = net.last().open().send(numbered([unit(9), { kind: 'snapshot-end' }]));
+  const asking = c.wantHistory('9');
+  // receptions while the ask is out: one the app already had, one newer, one from a third receiver
+  ws.send(pkt(9, 2000, 'rx1', { seq: 3 }), pkt(9, 3000, 'rx1', { seq: 4, rssi: -82 }), pkt(9, 3000, 'rx3', { seq: 5, rssi: -90, dup: true }));
+  await asking;
+  const rh = f.unit('9').rxHistory;
+  assert.deepStrictEqual(Object.keys(rh).sort(), ['rx1', 'rx2', 'rx3']);
+  assert.deepStrictEqual(rh.rx1.t, [1, 2, 3]);
+  assert.deepStrictEqual(rh.rx1.rssi, [-80, -81, -82]);
+  assert.deepStrictEqual(rh.rx2.rssi, [-70, -71]);
+  assert.deepStrictEqual(rh.rx3.rssi, [-90], 'a receiver heard only since the ask stays');
+  assert.deepStrictEqual(f.unit('9').history.t, [1, 2, 3]);
+});
+
+test('a reset on the live socket clears what is shown at once, and the snapshot after it is the whole state', () => {
+  const { net, f, c, seen } = client();
+  const ws = net.last().open().send(numbered([unit(9), unit(3), { kind: 'snapshot-end' }]));
+  ws.send(pkt(9, 2000, 'rx1', { seq: 4 }), { kind: 'line', rx: 'rx1', t: 2000, text: 'HB,1,2,3', seq: 5 });
+  ws.send({ kind: 'reset', seq: 6 });
+  assert.strictEqual(f.units.size, 0);
+  assert.strictEqual(f.lines.size, 0);
+  ws.send({ kind: 'unit', ...unit(9), seq: 7 }, { kind: 'line', rx: 'rx1', t: 2100, text: 'in the snapshot', seq: 8 });
+  assert.strictEqual(f.units.size, 0, 'held until snapshot-end');
+  ws.send({ kind: 'snapshot-end', seq: 9 });
+  assert.deepStrictEqual([...f.units.keys()], [9]);
+  assert.deepStrictEqual(f.unit('9').history.t, [], 'no graph kept over a reset, even live');
+  assert.strictEqual(seen.lines.length, 1, 'the snapshot\'s line is not news to the taps');
+  assert.strictEqual(c.gaps, 0, 'seq goes on across a reset on the same socket');
+  assert.strictEqual(net.sockets.length, 1);
+});
+
 test('a history ask the app cannot answer leaves the graph as the stream drew it', async () => {
   const h = fetcher({});
   const { net, f, c } = client(h);

@@ -419,7 +419,8 @@
   // ---------- clearing ----------
   // Tick what should go, press Clear. The app keeps its own counts and every line on disk:
   // this clears what this page shows, and a unit still transmitting comes back with its
-  // next packet. Only the new log file is asked of the app.
+  // next packet. Only the new log file is asked of the app. Clear, join and delete run
+  // page-side in 1.4.0; the app gets them in 1.4.1.
   const clearBoxes = { units: 'cl-units', sel: 'cl-sel', rx: 'cl-rx', hidden: 'cl-hidden', log: 'cl-log' };
   const clearWanted = () => Object.fromEntries(Object.entries(clearBoxes).map(([k, id]) => [k, $(id).checked]));
 

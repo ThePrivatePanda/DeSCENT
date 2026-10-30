@@ -77,11 +77,10 @@
     pause() { return this.post('pause'); }
     speed(n) { return this.post('speed', { speed: Number(n) }); }
 
-    // The app's fleet starts again from the new place, so the stream is taken again
-    async seek(position) {
-      const j = await this.post('seek', { position: Math.max(0, Math.round(Number(position) || 0)) });
-      this.stream.reconnect();
-      return j;
+    // The app starts its fleet again from the new place and says so on the same socket:
+    // {kind: "reset"}, then a fresh snapshot
+    seek(position) {
+      return this.post('seek', { position: Math.max(0, Math.round(Number(position) || 0)) });
     }
 
     async poll() {
