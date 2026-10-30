@@ -40,7 +40,7 @@ function fakeNet() {
 
 // Numbered the way the app numbers them, from 1, unless a message has its own seq
 function numbered(msgs, from) {
-  let seq = from || 1;
+  let seq = from === undefined ? 1 : from;
   return msgs.map((m) => (m.seq === undefined ? Object.assign({ seq: seq++ }, m) : (seq = m.seq + 1, m)));
 }
 
