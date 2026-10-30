@@ -1,1 +1,146 @@
 /* ChipSats. Only selectors under #screen-chipsats; a class another screen needs goes in style.css */
+
+/* ---------- the list: the board on the ST-Link, then the remembered ones ---------- */
+#screen-chipsats .picklist > .pane-head { min-height: 0; padding: 16px 22px 2px; }
+#screen-chipsats #cs-list { display: flex; flex-direction: column; padding: 0 14px 14px; }
+#screen-chipsats .kick { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 12px 8px 6px; }
+#screen-chipsats .kick .note { font-size: 12.5px; overflow-wrap: anywhere; text-align: right; }
+#screen-chipsats .card.probe { padding: 14px 16px; margin-bottom: 8px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+#screen-chipsats .card.probe .item { padding: 0; }
+#screen-chipsats .card.probe .item:hover { background: transparent; }
+#screen-chipsats .card.probe .item b { font-size: 20px; }
+#screen-chipsats .card.probe .none { margin: 0; color: var(--color-text-70); }
+#screen-chipsats #cs-list .item small { display: block; font-size: 12.5px; margin-top: 2px; }
+/* style.css's button.on would colour the picked row's words sage */
+#screen-chipsats #cs-list .item.on { color: var(--color-text); }
+#screen-chipsats .item .nm { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
+#screen-chipsats .cs-foot { margin: auto 8px 0; padding-top: 16px; line-height: 1.5; }
+
+/* ---------- the head card ---------- */
+#screen-chipsats .sheet-head { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 6px; padding: 14px 24px; border-radius: var(--radius-lg); }
+/* style.css gives .line a 100% basis for a row head; in a column that is a height */
+#screen-chipsats .sheet-head > * { flex-basis: auto; }
+#screen-chipsats .sheet-head .top { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; min-width: 0; }
+#screen-chipsats .sheet-head .where { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#screen-chipsats .sheet-head .cs-ident { flex: 1 1 260px; min-width: 0; font-size: 13px; color: var(--color-text-70); overflow-wrap: anywhere; }
+#screen-chipsats .sheet-head .cs-ident .val { color: var(--color-text); }
+#screen-chipsats .sheet-head .acts { margin-left: auto; }
+#screen-chipsats .sheet-head .line { margin: 0; }
+#screen-chipsats .sheet-head .inpane { margin: 0; }
+#screen-chipsats .sheet-head .confirm { margin-top: 4px; }
+
+/* ---------- the three steps ---------- */
+/* By the sheet's width, not the window's: at 1440 the sheet is 1044 px, a Surface's 972 */
+#screen-chipsats .cs-steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: stretch; }
+@container (min-width: 620px) {
+  #screen-chipsats .cs-steps { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
+  #screen-chipsats .cs-steps > .write { grid-column: 1 / -1; }
+}
+@container (min-width: 960px) {
+  #screen-chipsats .cs-steps { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr); }
+  #screen-chipsats .cs-steps > .write { grid-column: auto; }
+}
+#screen-chipsats .pane.step { padding: 20px 22px; border-radius: var(--radius-lg); }
+#screen-chipsats .pane.step > h3 { padding: 0; margin: 0 0 18px; align-items: center; gap: 12px; flex-wrap: nowrap; }
+#screen-chipsats .pane.step > h3 .note { margin-left: auto; font: 400 12.5px/1.3 var(--font-body); text-align: right; }
+#screen-chipsats .step .plain { margin: 14px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--color-text-70); }
+#screen-chipsats .step .outcome { margin: 0 0 12px; }
+#screen-chipsats .step .hint { margin: 4px 0 0; font-size: 12.5px; line-height: 1.45; }
+#screen-chipsats .step .hint .val { font-weight: 600; }
+#screen-chipsats .chg { color: var(--color-accent-700); font-weight: 700; }
+/* a control whose value would replace the board's */
+#screen-chipsats .changed { display: inline-flex; border-radius: 999px; box-shadow: 0 0 0 2px var(--color-accent); }
+
+/* 1 Identity and radio */
+#screen-chipsats .form { display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 16px 12px; align-items: start; font-size: 13.5px; }
+#screen-chipsats .form > .l { padding-top: 9px; color: var(--color-text-70); }
+#screen-chipsats .form input[type=text] { width: 90px; }
+#screen-chipsats .form select { width: 124px; }
+#screen-chipsats .seg { background: var(--color-surface); border-color: transparent; padding: 3px; }
+#screen-chipsats .seg button { min-height: 30px; padding: 0 16px; }
+#screen-chipsats .seg button.on { background: var(--color-fill-2); color: #fff; font-weight: 700; }
+
+/* 2 Phases */
+#screen-chipsats .step .phases { padding: 0; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+#screen-chipsats .phase { gap: 8px; padding: 14px 12px 12px; }
+#screen-chipsats .phase-name { display: flex; align-items: center; gap: 8px; font-size: 17px; }
+#screen-chipsats .phase-what { font-size: 12.5px; line-height: 1.45; min-height: 0; }
+#screen-chipsats .phase-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; font-size: 12.5px; }
+#screen-chipsats .phase-row .ctl { display: inline-flex; align-items: center; gap: 6px; }
+#screen-chipsats .phase-row input { width: 58px; min-height: 32px; padding: 0 10px 0 6px; text-align: right; }
+#screen-chipsats .phase-row .u { font-size: 12.5px; color: var(--color-text-70); }
+#screen-chipsats .phase .hint { margin: -4px 0 0; }
+#screen-chipsats .phase .check { margin-top: 4px; font-size: 13px; font-weight: 600; }
+#screen-chipsats .phase .bands { gap: 2px; margin-top: 0; }
+#screen-chipsats .phase .bands .band { align-items: center; font-size: 12.5px; white-space: nowrap; }
+#screen-chipsats .phase .bands input { width: 48px; min-height: 28px; padding: 0 6px; text-align: right; }
+
+/* 3 Write */
+#screen-chipsats .pane.write { display: flex; flex-direction: column; }
+#screen-chipsats .write .kicker { margin: 0 0 2px; }
+#screen-chipsats .chrow {
+  display: flex; justify-content: space-between; gap: 4px 10px; flex-wrap: wrap; margin-top: 6px;
+  padding: 10px 14px; border-radius: var(--radius-sm); background: var(--color-surface); font-size: 13.5px;
+}
+#screen-chipsats .write .check { margin-top: 14px; font-size: 13px; font-weight: 600; }
+#screen-chipsats .write .block { margin-top: 16px; min-height: 46px; font-size: 15px; white-space: normal; text-align: center; }
+#screen-chipsats .write > .note { margin: 8px 0 0; }
+#screen-chipsats .write .confirm { margin: 12px 0 0; }
+#screen-chipsats .write .job { padding: 0; margin-top: 16px; border: 0; }
+#screen-chipsats .write .outcome { margin: 12px 0 0; }
+#screen-chipsats .lastw { margin-top: auto; padding-top: 16px; }
+
+/* ---------- flight logs and other images ---------- */
+#screen-chipsats .cs-lower { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+@container (min-width: 760px) {
+  #screen-chipsats .cs-lower { grid-template-columns: minmax(0, 1fr) 230px; }
+  #screen-chipsats .cs-lower:has(.images.open) { grid-template-columns: minmax(0, 1fr); }
+}
+#screen-chipsats .pane.logs { padding: 14px 24px; gap: 10px; border-radius: var(--radius-lg); }
+#screen-chipsats .pane.logs > h3 { padding: 4px 0 0; }
+#screen-chipsats .logs-top { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; }
+#screen-chipsats .logs-top h3 { margin: 0; font: var(--font-heading-weight) 18px/1.3 var(--font-heading); }
+#screen-chipsats .logs-top .sum { flex: 1 1 220px; min-width: 0; font-size: 13px; line-height: 1.4; }
+#screen-chipsats .logs-top .acts { margin-left: auto; }
+#screen-chipsats .logs .expander { min-height: var(--ch); padding: 0 14px; border: 1px solid var(--color-divider); border-radius: 999px; color: var(--color-text); }
+#screen-chipsats .opts { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; font-size: 13px; }
+#screen-chipsats .opts .l, #screen-chipsats .says .l { min-width: 96px; color: var(--color-text-70); }
+#screen-chipsats .says { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; font-size: 12.5px; }
+#screen-chipsats .logs .inpane, #screen-chipsats .images .inpane, #screen-chipsats .bench .inpane { margin-inline: 0; }
+#screen-chipsats .logs .rows > div, #screen-chipsats .images .rows > div, #screen-chipsats .bench .rows > div { padding: 8px 0; }
+#screen-chipsats .logs .rows.pulls { border-top: 1px solid var(--color-neutral-200); }
+#screen-chipsats .logs .confirm, #screen-chipsats .images .confirm, #screen-chipsats .bench .confirm { margin: 0; }
+
+#screen-chipsats .sheet .pane.images { background: var(--color-surface); padding: 14px 20px; gap: 10px; border-radius: var(--radius-lg); }
+#screen-chipsats .images-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 12px; }
+#screen-chipsats .images-top h3 { margin: 0; font: var(--font-heading-weight) 16px/1.3 var(--font-heading); color: var(--color-text-70); }
+#screen-chipsats .images-top .note { grid-row: 2; }
+#screen-chipsats .images-top .expander { grid-row: 1 / span 2; grid-column: 2; }
+#screen-chipsats .images .rows > div { border-color: var(--color-neutral-300); }
+
+/* ---------- the sensor bench, first on a bench board ---------- */
+#screen-chipsats .pane.bench { padding: 18px 22px; gap: 10px; border-radius: var(--radius-lg); }
+#screen-chipsats .pane.bench > h3 { padding: 0; }
+#screen-chipsats .benchlive .card { padding: 0; background: var(--color-surface); overflow: hidden; }
+#screen-chipsats .benchlive .card h3 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; padding: 12px 16px 6px; font: var(--font-heading-weight) 16px/1.3 var(--font-heading); }
+#screen-chipsats .benchlive .card .line, #screen-chipsats .benchlive .card .boot { padding: 6px 16px; }
+#screen-chipsats .benchlive .card .line .l { color: var(--color-text-70); font-size: var(--t-label); margin-right: 6px; }
+#screen-chipsats .benchlive .boot { border-bottom-color: var(--color-neutral-300); }
+#screen-chipsats .benchlive .grid td { border-bottom-color: var(--color-neutral-300); }
+#screen-chipsats .benchlive .grid th { background: var(--color-surface); }
+#screen-chipsats .benchlive .card pre.raw { background: var(--color-neutral-100); margin: 0 10px 10px; border-radius: var(--radius-sm); }
+#screen-chipsats .benchlive .card .empty { padding: 6px 16px 14px; }
+
+/* ---------- folded on a bench board ---------- */
+#screen-chipsats details.fold > .cs-steps { padding: 0 16px 16px; }
+#screen-chipsats details.fold .pane.step { background: var(--color-surface); }
+#screen-chipsats details.fold .phase, #screen-chipsats details.fold .chrow { background: var(--color-neutral-100); }
+#screen-chipsats details.fold .logs-top h3 { display: none; }
+
+@media (max-width: 700px) {
+  #screen-chipsats .sheet-head, #screen-chipsats .pane.logs { padding: 14px 16px; }
+  #screen-chipsats .pane.step, #screen-chipsats .pane.bench { padding: 18px 16px; }
+  #screen-chipsats .form { grid-template-columns: minmax(0, 96px) minmax(0, 1fr); }
+  #screen-chipsats .sheet-head .acts, #screen-chipsats .logs-top .acts { margin-left: 0; }
+  #screen-chipsats input.nameit { font-size: 20px; min-height: 40px; }
+}
