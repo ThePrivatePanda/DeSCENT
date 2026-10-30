@@ -277,7 +277,7 @@ pre.raw, .raw {
 
 /* ---------- top bar ---------- */
 .bar {
-  flex: none; display: flex; align-items: center; gap: 8px 20px; flex-wrap: wrap;
+  flex: none; display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap;
   min-height: 68px; padding: 10px 28px;
 }
 .brand { font: 400 22px/1 var(--font-heading); white-space: nowrap; }
@@ -285,7 +285,7 @@ pre.raw, .raw {
 .views { display: flex; gap: 4px; min-width: 0; }
 .views button {
   display: inline-block; flex: none; max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
-  border: 0; padding: 0 16px; line-height: 36px; font: 600 14px/36px var(--font-body); color: var(--color-text-70);
+  border: 0; padding: 0 12px; line-height: 36px; font: 600 14px/36px var(--font-body); color: var(--color-text-70);
 }
 .views button small { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; margin-left: 3px; }
 .views button:hover { color: var(--color-text); }
@@ -297,18 +297,29 @@ pre.raw, .raw {
   display: inline-flex; align-items: center; gap: 8px; min-height: var(--ch); min-width: 0;
   padding: 0 8px 0 14px; border-radius: 999px; background: var(--color-surface); font-size: 13px;
 }
+#strip-log { gap: 4px; }
 .strip-part { font-size: 13px; }
 .strip-file { display: inline-block; min-width: 0; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .strip-file .dot { margin-right: 8px; vertical-align: 0; }
 .strip-file b { font-weight: 700; }
 .strip-part b { font-weight: 700; }
-.strip-rx { border-color: transparent; font-weight: 400; color: var(--color-text-70); padding: 0 8px; gap: 10px; }
+.strip-rx { border-color: transparent; font-weight: 400; color: var(--color-text-70); padding: 0 8px; gap: 6px; }
 .strip-one { display: inline-flex; align-items: center; gap: 5px; }
 .strip-one b { color: var(--color-text); }
 .strip-one + .strip-one::before { content: "·"; margin-right: 5px; }
 .strip-job { border-color: transparent; background: var(--color-accent-100); color: var(--color-accent-800); }
 .strip-job:hover { background: var(--color-accent-200); }
 .chip .button.ghost, .chip button.ghost { min-height: 28px; }
+.mode:empty { display: none; }
+/* Two or three receivers stack in their chip, so the bar keeps one row */
+.strip-rx:has(.strip-one + .strip-one) { flex-direction: column; align-items: flex-start; gap: 2px; padding-block: 2px; }
+.strip-rx:has(.strip-one + .strip-one) .strip-one::before { content: none; }
+.strip-rx:has(.strip-one + .strip-one) .mark { padding-block: 0; line-height: 1.35; }
+/* Under 1640 px the bar drops words it repeats: the replayed file is named in full in the
+   replay bar, and the log name says "Logging to" in its title */
+@media (max-width: 1640px) {
+  #view-replay .pill-file, #strip-log-name .lead { display: none; }
+}
 
 /* Recording, when the page is not the app */
 .recpanel { gap: 6px; padding-right: 4px; }
@@ -686,7 +697,8 @@ body:not([data-screen="live"]) .live-only { display: none; }
 @media (max-width: 700px) {
   .bar { padding: 10px 16px; gap: 8px 12px; }
   /* the nav scrolls inside the bar, the page does not */
-  .views { order: 3; flex: 1 0 100%; overflow-x: auto; }
+  /* padding: a scroll box clips the focus ring otherwise */
+  .views { order: 3; flex: 1 0 100%; overflow-x: auto; padding: 4px; }
   .bar-right { justify-content: flex-start; }
   .strip-file { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
   .layout, .screen, .screen-data { padding: 0 16px 16px; }
