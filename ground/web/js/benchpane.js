@@ -83,7 +83,7 @@
     if (!s || (!s.boots.length && !s.gaps.length)) return '';
     const rows = [
       ...s.boots.map((b) => ({ t: b.t, html: '<div class="boot"><span class="when">' + esc(clock(b.t)) + '</span> ' +
-        mark(b.unseen ? 'warn' : 'bad', b.unseen ? 'started again (its start line was lost)' : 'started') +
+        mark('warn', b.unseen ? 'started again (its start line was lost)' : 'started') +
         (b.upMs !== null ? ' after ' + esc(secs(b.upMs)) + ' up' : ' (first seen)') +
         ' <span class="note">cause: ' + esc(causeWords(b.cause)) + '</span>' +
         (b.before ? '<div class="hex muted">last before it: ' + esc(b.before) + '</div>' : '') + '</div>' })),
@@ -99,7 +99,7 @@
     const said = p.lastOk === null ? '' : p.lastOk ? mark('good', 'ok=1') : mark('bad', 'ok=0');
     const rate = m ? p.rate(m.name) : null;
     return '<div class="card part' + (q.gone ? ' gone' : '') + '">' +
-      '<h3>' + esc(NAMES[p.tag] || p.tag) + ' ' + said + (q.gone ? ' ' + mark('bad', 'no line for ' + secs(q.ms)) : '') + '</h3>' +
+      '<h3>' + esc(NAMES[p.tag] || p.tag) + ' ' + said + (q.gone ? ' ' + mark('off', 'no line for ' + secs(q.ms)) : '') + '</h3>' +
       (p.init ? '<div class="line"><span class="l">init</span> ' + (p.init.ok === '1' ? mark('good', 'ok=1') : p.init.ok === '0' ? mark('bad', 'ok=0') : '') + ' ' + fieldsOf(p.init) + '</div>' : '') +
       '<div class="line"><span class="l">lines</span> ' + p.ok + ' ok=1, ' + p.failed + ' ok=0' +
         (p.errors ? ', ' + p.errors + ' E' : '') + (p.warnings ? ', ' + p.warnings + ' W' : '') +

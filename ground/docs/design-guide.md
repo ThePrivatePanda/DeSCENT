@@ -50,9 +50,9 @@ A state is a word in a mark. The colour repeats the word and never replaces it. 
 
 | Class | Look | Words |
 |---|---|---|
-| `good` | sage-200 on sage-800 | OK, live, complete, reading, reading it, being read, this one, the one you replugged, finished, ok=1 |
-| `off` | neutral-300 on neutral-800 | stale, quiet, not read, not read yet, unconfigured, not touched, left alone, disconnected by you, as recorded, no receiver being read, no line for N s, last on the probe |
-| `warn` | accent-200 on accent-800 | incomplete, newer, on the ST-Link, module never set, dump firmware, sensor bench, being flashed, pulling, flashing, never pulled, nothing heard, not logging to a file, started (a restart is worth noticing, not a failure) |
+| `good` | sage-200 on sage-800 | OK, live, complete, reading, reading it, being read, this one, the one you replugged, finished, ok=1, being written now, transmitting now, the module (LE, HP) on the ChipSats list |
+| `off` | neutral-300 on neutral-800 | stale, quiet, quiet for N, not read, not read yet, unconfigured, not touched, left alone, disconnected by you, as recorded, no receiver being read, no line for N s, the port went quiet, last on the probe, earlier run |
+| `warn` | accent-200 on accent-800 | incomplete, newer, on the ST-Link, module never set, dump firmware, sensor bench, being flashed, pulling, flashing, never pulled, nothing heard, not logging to a file, started, started again (a restart is worth noticing, not a failure), running … not flight software, left on the dump firmware, saturated, times not from GPS |
 | `bad` | solid accent-700, white | Lost, failed, ok=0, no permission, a port that will not open |
 
 A unit's state uses `.state` with the same three looks (OK good, STALE off, LOST bad). Nothing else is tinted.

@@ -581,8 +581,8 @@
     $('btn-clear').disabled = !bits.length;
   }
   for (const id of Object.values(clearBoxes)) $(id).addEventListener('change', renderClear);
-  // The ticks stay folded away: the line beside the button already says what will go,
-  // and the unit's own readings need the room more than five tick boxes do.
+  // Clear… opens one row under the head: the ticks, what will go, and the Clear button.
+  // Folded the rest of the time, since the unit's readings need the room more than five ticks do.
   $('cl-toggle').addEventListener('click', (e) => {
     const box = $('clear-opts');
     box.hidden = !box.hidden;
