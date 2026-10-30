@@ -289,6 +289,9 @@ pre.raw, .raw {
 }
 .views button small { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; margin-left: 3px; }
 .views button:hover { color: var(--color-text); }
+/* Which screen is up changes at once: a fade left Live lit after a ?screen= load, and a
+   background tab never finished it */
+.views button, .tabs button { transition: none; }
 .views button[aria-selected="true"] { background: var(--color-accent-2-200); color: var(--color-accent-2-800); }
 .bar-right { flex: 1 1 auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .mode { color: var(--color-text-70); font-size: 13px; }
