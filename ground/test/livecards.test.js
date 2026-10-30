@@ -1,31 +1,47 @@
-// The Live screen's cards, summary, detail and runs, from js/livecards.js. Words only:
-// how they look is the browser's business.
+// The Live screen's cards, summary, detail and runs, from js/livecards.js, over units that
+// came off the app's stream (test/mock/fakestream.js). Words only: how they look is the
+// browser's business.
 const test = require('node:test');
 const assert = require('node:assert');
-const L = require('../web/js/lines.js');
-const P = require('../web/js/packet.js');
-const { Fleet } = require('../web/js/fleet.js');
+const S = require('../web/js/stream.js');
 const V = require('../web/js/livecards.js');
 const { page } = require('./mock/fakepage.js');
+const { fakeNet, numbered } = require('./mock/fakestream.js');
 
-const BASE = P.decode(P.hexToBytes('00 00 00 00 00 00 00 00 98 BD FF FF 23 5B 00 00 FD FF 00 00 FD FF 01 00 FF FF FF FF AC FF 18 FF D4 FD 4A 06 8E 02 ED 82 56 1A 7A 0A 7F 26 0F 11 04 00 09 6D 6F 09 23')).values;
-function line(more, rssi) {
-  const v = Object.assign({}, BASE, more);
-  const crc = P.crc16(P.encode(v, 0), 53);
-  return 'PKT,55,' + P.bytesToHex(P.encode(v, crc)) + ',' + rssi + ',10.00,0';
+const VALID = Object.fromEntries(S.VALIDITY_BITS.map((b) => [b.key, true]));
+const validOf = (mask) => Object.fromEntries(S.VALIDITY_BITS.map((b) => [b.key, ((mask >> b.bit) & 1) === 1]));
+const VALUES = { lat: 0, lon: 0, gpsAlt: -17, envAlt: 233.79, ax: -0.03, ay: 0, az: -0.03, gx: 0.1, gy: -0.1, gz: -0.1,
+  mx: -8.4, my: -23.2, mz: -55.6, qi: 0.0497, qj: 0.0199, qk: -0.9805, qr: 0.2057, temp: 26.82, pressure: 983.9,
+  humidity: 43.35, counter: 4, csid: 9, battery: 3.59, validity: 0xff };
+// A unit row as the app sends it: fleet.js's unit, plus its state and issues
+function unit(more, latest) {
+  const m = Object.assign({ csid: 9, packets: 1, missed: 0, resets: 0, repeats: 0, firstT: 0, lastT: 0, intervalMs: null,
+    bestRssi: -80, bestSnr: 10, receptions: [{ rx: 'A', rssi: -80, snr: 10 }], lastValid: {}, saturatedCount: 0,
+    state: 'OK', issues: [] }, more);
+  const values = Object.assign({}, VALUES, { csid: m.csid }, latest);
+  return Object.assign({ kind: 'unit', label: String(m.csid), live: true,
+    latest: { crcOk: true, crcReceived: 0x2309, values, valid: validOf(values.validity), saturated: false } }, m);
+}
+const rx = (id, packets) => ({ kind: 'receiver', id, name: id, sf: 9, packets, dups: 0, badCrc: 0, errors: 0, lastLine: 0 });
+// The fleet a page has once the app's snapshot is in
+function fleetFrom(msgs) {
+  const net = fakeNet();
+  const c = new S.StreamClient('ws://x/api/stream', { WebSocket: net.WebSocket, setTimeout: net.setTimeout }).start();
+  net.last().open().send(numbered(msgs.concat([{ kind: 'snapshot-end' }])));
+  return c.fleet;
+}
+
+// CSID 9 as in the design frame: 425 packets, 3.98 V, heard by two receivers, interval 250 ms
+function nine() {
+  return fleetFrom([rx('A', 425), rx('B', 1),
+    unit({ packets: 425, firstT: 0, lastT: 424 * 250 + 100, intervalMs: 250, staleAfterMs: 5000, bestRssi: -73,
+      receptions: [{ rx: 'A', rssi: -73, snr: 10 }, { rx: 'B', rssi: -88.5, snr: 10 }] }, { battery: 3.98, validity: 0x6f, counter: 424 })]);
 }
 const text = (html) => html.replace(/<[^>]*>/g, ' ')
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
   .replace(/\s+/g, ' ').trim();
 const count = (s, re) => (s.match(re) || []).length;
 
-// CSID 9 as in the design frame: 425 packets, 3.98 V, heard by two receivers
-function nine() {
-  const f = new Fleet();
-  for (let c = 0; c < 425; c++) f.ingest(L.parseLine(line({ csid: 9, counter: c, battery: 3.98, validity: 0x6f }, -73)), c * 250, 'A');
-  f.ingest(L.parseLine(line({ csid: 9, counter: 424, battery: 3.98, validity: 0x6f }, -88.5)), 424 * 250 + 100, 'B');
-  return f;
-}
 
 test('a unit card has the words of the frame and no missed count', () => {
   const f = nine();
@@ -49,18 +65,13 @@ test('a unit card and its runs pill keep keyboard focus across the 250 ms repain
   assert.match(html, /data-runs="9"[^>]*data-keep="runs-9"|data-keep="runs-9"[^>]*data-runs="9"/);
 });
 
-test('the issues line counts lost, stale and low battery, or says there are none', () => {
-  const f = new Fleet();
-  const feed = (csid, battery, from, n) => {
-    for (let c = 0; c < n; c++) f.ingest(L.parseLine(line({ csid, counter: c, battery, validity: 0xff }, -80)), from + c * 1000, 'A');
-  };
-  feed(7, 3.9, 0, 3);              // lost by the end
-  feed(3, 3.9, 700000, 3);         // stale
-  feed(12, 3.42, 760000, 3);       // low battery, still OK
+test('the issues line counts lost, stale and low battery as the app said them, or says there are none', () => {
+  const f = fleetFrom([rx('A', 9),
+    unit({ csid: 7, state: 'LOST' }), unit({ csid: 3, state: 'STALE' }),
+    unit({ csid: 12, state: 'OK', issues: ['low battery'] }, { battery: 3.42 })]);
   const t = 762500;
   assert.equal(V.issuesText(f, t), '1 lost · 1 stale · 1 low battery');
-  const ok = new Fleet();
-  for (let c = 0; c < 3; c++) ok.ingest(L.parseLine(line({ csid: 1, counter: c, battery: 4.0, validity: 0xff }, -80)), c * 1000, 'A');
+  const ok = fleetFrom([rx('A', 3), unit({ csid: 1 }, { battery: 4.0 })]);
   assert.equal(V.issuesText(ok, 2500), 'No issues');
 });
 
@@ -72,7 +83,7 @@ test('the summary counts units and packets with one number format', () => {
 
 // Review focus 1
 test('no packets yet: 0 units, no stray CSID, a connected receiver with 0 packets', () => {
-  const f = new Fleet();
+  const f = fleetFrom([]);
   assert.equal(text(V.summaryHtml(f, 0)), '0 units · 0 packets');
   assert.equal(V.fleetHtml(f, 0, { sort: 'attention', sel: null }), '');
   const none = text(V.detailHtml(null));
@@ -87,8 +98,7 @@ test('no packets yet: 0 units, no stray CSID, a connected receiver with 0 packet
 
 // Review focus 2
 test('a unit with every validity bit clear: every group says not valid, values are dashes', () => {
-  const f = new Fleet();
-  for (let c = 0; c < 3; c++) f.ingest(L.parseLine(line({ csid: 5, counter: c, validity: 0 }, -80)), c * 1000, 'A');
+  const f = fleetFrom([rx('A', 3), unit({ csid: 5, packets: 3, lastT: 2000 }, { validity: 0 })]);
   const u = f.units.get(5);
   const html = V.detailHtml(u, { state: 'OK', t: 2100, run: 1, runs: 1, rx: [{ name: 'Mast', rssi: -80, snr: 10 }], cfg: f.cfg });
   assert.equal(count(html, /kicker bad">Not valid/g), 6, 'GPS, Environment, Accelerometer, Gyroscope, Magnetometer, Orientation');
@@ -114,11 +124,13 @@ test('the detail head says when, which run, and offers the join', () => {
 
 // Review focus 3
 test('thirty runs of one board: the pill says 30 runs and the list has one card', () => {
-  const f = new Fleet();
-  let t = 0;
-  for (let run = 0; run < 30; run++) {
-    for (let c = 0; c < 3; c++) f.ingest(L.parseLine(line({ csid: 4, counter: c, validity: 0xff }, -80)), (t += 1000), 'A');
+  const runs = [];
+  for (let run = 0; run < 29; run++) {
+    runs.push(unit({ csid: 4, label: '4' + String.fromCharCode(97 + (run % 26)) + (run >= 26 ? run : ''), live: false, gen: run,
+      packets: 3, firstT: run * 3000 + 1000, lastT: run * 3000 + 3000 }));
   }
+  const t = 90000;
+  const f = fleetFrom([rx('A', 90), ...runs, unit({ csid: 4, packets: 3, firstT: 88000, lastT: t })]);
   assert.equal(f.earlierRuns(4).length, 29);
   const html = V.fleetHtml(f, t + 100, { sort: 'attention', sel: '4' });
   assert.equal(count(html, /<tr\b/g), 1);
@@ -126,8 +138,8 @@ test('thirty runs of one board: the pill says 30 runs and the list has one card'
 });
 
 test('deleting a run takes a second click that says what goes', () => {
-  const f = new Fleet();
-  for (const c of [0, 1, 2, 0, 1]) f.ingest(L.parseLine(line({ csid: 9, counter: c, validity: 0xff }, -80)), f.total * 1000 + 1000, 'A');
+  const f = fleetFrom([rx('A', 5), unit({ label: '9a', live: false, gen: 0, packets: 3, firstT: 1000, lastT: 3000 }),
+    unit({ packets: 2, firstT: 4000, lastT: 5000 })]);
   const runs = f.earlierRuns(9).concat([f.units.get(9)]);
   const first = V.runsHtml(9, runs, { sel: '9', ask: null });
   assert.match(first, /data-drop="9a"/);
@@ -141,5 +153,5 @@ test('deleting a run takes a second click that says what goes', () => {
 
 test('the module loads into a page and registers as DGLive', () => {
   // fakepage does not hand its window back, so this only shows it runs there
-  assert.doesNotThrow(() => page(['packet.js', 'livecards.js'], {}, {}));
+  assert.doesNotThrow(() => page(['stream.js', 'livecards.js'], {}, {}));
 });

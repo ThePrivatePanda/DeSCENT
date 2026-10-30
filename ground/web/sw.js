@@ -4,8 +4,7 @@
 const CACHE = 'descent-ground-v15';
 const FILES = [
   './', 'index.html', 'css/style.css', 'css/live.css', 'css/chipsats.css', 'css/tbeams.css', 'css/data.css',
-  'js/packet.js', 'js/lines.js', 'js/bench.js', 'js/fleet.js', 'js/store.js', 'js/serial.js', 'js/serial_native.js',
-  'js/recorder.js', 'js/exportcsv.js', 'js/datamodel.js', 'js/boardmodel.js', 'js/update.js', 'js/livecards.js', 'js/charts.js', 'js/app.js',
+  'js/stream.js', 'js/bench.js', 'js/store.js', 'js/serial_native.js', 'js/replay.js', 'js/datamodel.js', 'js/boardmodel.js', 'js/update.js', 'js/livecards.js', 'js/charts.js', 'js/app.js',
   'js/screens.js', 'js/tbeams.js', 'js/chipsats.js', 'js/benchpane.js', 'js/datascreen.js',
   'vendor/uPlot.iife.min.js', 'vendor/uPlot.min.css',
   'vendor/fonts/figtree-latin-400-normal.woff2', 'vendor/fonts/figtree-latin-600-normal.woff2',

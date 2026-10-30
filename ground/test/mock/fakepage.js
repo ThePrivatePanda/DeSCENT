@@ -32,7 +32,7 @@ function page(scripts, hub, o) {
   sandbox.window = sandbox;
   sandbox.self = sandbox;
   sandbox.DGApp = {
-    hub, live: { receivers: new Map() }, taps: [],
+    hub, live: { receivers: new Map() }, taps: [], packetTaps: [],
     ui: { $: el, esc, toast: (t) => toasts.push(t), logUrl: (n) => n, flatName: (n) => n, age: () => '', sfSelect: () => '' },
     shell: {
       paint: (e, html) => { e.html = html; },
@@ -51,7 +51,7 @@ function page(scripts, hub, o) {
     { getAttribute: (n) => (n in attrs ? attrs[n] : null), closest: () => null, blur() {}, tagName: 'BUTTON' }, more || {});
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    parts, jobs, toasts, settle, target, taps: sandbox.DGApp.taps, shell: sandbox.DGApp.shell,
+    parts, jobs, toasts, settle, target, taps: sandbox.DGApp.taps, packetTaps: sandbox.DGApp.packetTaps, shell: sandbox.DGApp.shell,
     html: (id) => el(id).html,
     // What a person reads: tags out, entities back, runs of space as one
     text: (id) => el(id).html.replace(/<[^>]*>/g, ' ')

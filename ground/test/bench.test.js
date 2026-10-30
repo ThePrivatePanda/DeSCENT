@@ -2,7 +2,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const B = require('../web/js/bench.js');
-const P = require('../web/js/packet.js');
 
 const BOOT = [
   'I BOOT 12 c0: start test=bench module=le csid=254 sf=7 dbm=10 txoffms=30000',
@@ -121,29 +120,26 @@ test("a start whose line was lost is still a start, from the board's clock going
 });
 
 test('the receivers count only the bench, and say what went missing', () => {
-  const bytes = (counter, csid) => {
-    const values = {};
-    for (const f of P.FIELDS) values[f.key] = 0;
-    Object.assign(values, { counter, csid, validity: 0 });
-    const b = P.encode(values, 0);
-    return P.bytesToHex(P.encode(values, P.crc16(b, P.DATA_LENGTH)));
-  };
+  // packet messages off the app's stream
+  const pkt = (t, rx, counter, csid = 254, more) => Object.assign({ kind: 'packet', csid, rx, t, rssi: -40, snr: 9.5, crcOk: true,
+    values: { counter, csid, validity: 0 }, valid: {} }, more);
   const r = new B.Radio();
-  const line = (c, csid = 254) => 'PKT,55,' + bytes(c, csid) + ',-40,9.5,120';
-  assert.strictEqual(r.add(1, 'rx1', line(1)), true);
-  r.add(2, 'rx1', line(2));
-  r.add(2, 'rx2', line(2));             // the same packet at the second receiver
-  r.add(3, 'rx1', line(5));             // 3 and 4 never reached rx1
-  assert.strictEqual(r.add(4, 'rx1', line(6, 9)), false, 'a flight board is not the bench');
-  r.add(5, 'rx1', line(0));             // started again
-  r.add(6, 'rx3', line(65534));
-  r.add(7, 'rx3', line(65535));
-  r.add(8, 'rx3', line(1));             // wrapped past 65535, 0 never arrived
+  assert.strictEqual(r.add(pkt(1, 'rx1', 1)), true);
+  r.add(pkt(2, 'rx1', 2));
+  r.add(pkt(2, 'rx2', 2));             // the same packet at the second receiver
+  r.add(pkt(3, 'rx1', 5));             // 3 and 4 never reached rx1
+  assert.strictEqual(r.add(pkt(4, 'rx1', 6, 9)), false, 'a flight board is not the bench');
+  r.add(pkt(5, 'rx1', 0));             // started again
+  r.add(pkt(6, 'rx3', 65534));
+  r.add(pkt(7, 'rx3', 65535));
+  r.add(pkt(8, 'rx3', 1));             // wrapped past 65535, 0 never arrived
+  r.add(pkt(9, 'rx2', 3, 254, { crcOk: false, rssi: null }));
+  assert.strictEqual(r.add({ kind: 'line', rx: 'rx1', text: 'PKT,55,00' }), false, 'a line is not a packet');
   const one = r.by.get('rx1');
   const two = r.by.get('rx2');
   const three = r.by.get('rx3');
   assert.deepStrictEqual([one.heard, one.missed, one.restarts, one.badCrc], [4, 2, 1, 0]);
-  assert.deepStrictEqual([two.heard, two.missed, two.restarts], [1, 0, 0], 'a packet both heard is no restart');
+  assert.deepStrictEqual([two.heard, two.missed, two.restarts, two.badCrc], [2, 0, 0, 1], 'a packet both heard is no restart');
   assert.deepStrictEqual([three.heard, three.missed, three.restarts], [3, 1, 0]);
   assert.deepStrictEqual(one.rssi.slice(0, 1), [-40]);
 });
