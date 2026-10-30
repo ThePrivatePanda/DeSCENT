@@ -53,9 +53,9 @@
     const batt = d.valid.soc ? d.values.battery : null;
     const low = batt !== null && batt < cfg.lowBatteryV;
     const weak = Number.isFinite(u.bestRssi) && u.bestRssi < cfg.weakRssiDbm;
-    return '<div class="ucard' + (o.sel ? ' card sel' : '') + '" tabindex="0">' +
+    return '<div class="ucard' + (o.sel ? ' card sel' : '') + '" tabindex="0" data-keep="card-' + u.csid + '">' +
       '<div class="u1"><span class="csid"><small>CSID</small>' + u.csid + '</span>' + stateMark(state) +
-        '<button class="runs-pill" data-runs="' + u.csid + '" title="A run ends when the board restarts and its counter starts again. Opens the Runs tab">' +
+        '<button class="runs-pill" data-runs="' + u.csid + '" data-keep="runs-' + u.csid + '" title="A run ends when the board restarts and its counter starts again. Opens the Runs tab">' +
           runsWord(o.runs) + '</button>' +
         (d.saturated ? mark('warn', 'saturated') : '') +
         '<span class="ago" title="Stale after ' + num(o.staleMs / 1000, 1) + ' s without a packet">' + ago(age) + ' ago</span></div>' +

@@ -40,6 +40,15 @@ test('a unit card has the words of the frame and no missed count', () => {
   assert.equal(count(html, /NOT valid/g), 2, '0x6F clears two bits');
 });
 
+test('a unit card and its runs pill keep keyboard focus across the 250 ms repaint', () => {
+  const f = nine();
+  const u = f.units.get(9);
+  const html = V.unitCardHtml(u, f.state(u, u.lastT), 0, 2, { runs: 3, staleMs: f.staleAfterMs(u), sel: false, cfg: f.cfg });
+  // shell.paint puts focus back on the element with the same data-keep
+  assert.match(html, /class="ucard"[^>]*data-keep="card-9"/);
+  assert.match(html, /data-runs="9"[^>]*data-keep="runs-9"|data-keep="runs-9"[^>]*data-runs="9"/);
+});
+
 test('the issues line counts lost, stale and low battery, or says there are none', () => {
   const f = new Fleet();
   const feed = (csid, battery, from, n) => {

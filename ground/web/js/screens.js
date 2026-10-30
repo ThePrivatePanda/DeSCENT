@@ -35,7 +35,8 @@
     if (!typing) return;
     const box = [...el.querySelectorAll('[data-keep]')].find((x) => x.dataset.keep === typing.key);
     if (!box) return;
-    box.value = typing.value;
+    // Cards keep focus too, so a keyboard user's place survives the 250 ms repaint; they have no value
+    if (typing.value !== undefined) box.value = typing.value;
     box.focus();
     try { box.setSelectionRange(typing.at, typing.at); } catch (e) { /* not a text box */ }
   }
