@@ -104,8 +104,10 @@ test('the receivers count the bench as board 254 and nothing else', async () => 
   assert.match(p.sheet(), /from any board on the sensor bench \(254\)/, 'not said to be this board');
 });
 
-test('writing the sensor bench is a Firmware row that asks first, saves nothing, and goes by the board\'s module', async () => {
+test('writing the sensor bench is a row under Other images that asks first, saves nothing, and goes by the board\'s module', async () => {
   const p = await bench({ chips: [FLIGHT9], probes: [PROBE], read: readOf('flight') });
+  await p.fire('screen-chipsats', 'click', { 'data-images': '1' });
+  assert.match(p.headWords(), /Other images .*Write the sensor bench/);
   assert.match(p.head(), /data-benchwrite="1"[^>]*>Write the sensor bench/);
   await p.fire('screen-chipsats', 'click', { 'data-benchwrite': '1' });
   assert.match(p.head(), /Nothing is saved first/);
@@ -126,9 +128,11 @@ test('the sensor bench write keeps the save-first box', async () => {
 
 test('a sensor bench write that cannot go says why beside the button', async () => {
   let p = await bench({ chips: [FLIGHT9] });
+  await p.fire('screen-chipsats', 'click', { 'data-images': '1' });
   assert.match(p.head(), /data-benchwrite="1"[^>]*disabled[^>]*>Write the sensor bench/);
   assert.match(p.headWords(), /Write the sensor bench Put the board on the ST-Link and press Read the board\./);
   p = await bench({ chips: [Object.assign({}, FLIGHT9, { module: null })], probes: [PROBE], read: readOf('flight') });
+  await p.fire('screen-chipsats', 'click', { 'data-images': '1' });
   assert.match(p.head(), /data-benchwrite="1"[^>]*disabled[^>]*>Write the sensor bench/);
   assert.match(p.headWords(), /Write the sensor bench Choose the radio module/);
 });
@@ -197,21 +201,21 @@ test('a flight board keeps its layout and has no bench pane', async () => {
   const p = await bench({ chips: [FLIGHT9], probes: [PROBE], read: readOf('flight') });
   const h = p.head();
   assert.doesNotMatch(h, /id="cs-bench"|<details/);
-  assert.match(h, /<h3>Radio and identity[\s\S]*<h3>Phases<\/h3>[\s\S]*<h3>Firmware<\/h3>[\s\S]*<h3>Flight log<\/h3>/);
+  assert.match(p.headWords(), /Identity and radio.*\bPhases\b.*\bWrite\b.*Flight logs.*Other images/);
 });
 
-test('a bench board has the bench first, then Firmware, then the flight panes folded with why', async () => {
+test('a bench board has the bench first, then Other images, then the flight panes folded with why', async () => {
   const p = await bench();
   const h = p.head();
   const at = (re) => h.search(re);
   assert.ok(at(/data-radio=/) > 0);
   assert.ok(at(/data-radio=/) < at(/id="cs-bench"/));
-  assert.ok(at(/id="cs-bench"/) < at(/<h3>Firmware<\/h3>/));
-  assert.ok(at(/<h3>Firmware<\/h3>/) < at(/<details class="fold" data-fold="radio">/));
+  assert.ok(at(/id="cs-bench"/) < at(/data-images=/));
+  assert.ok(at(/data-images=/) < at(/<details class="fold" data-fold="radio">/));
   assert.ok(at(/data-fold="radio"/) < at(/<details class="fold" data-fold="log">/));
-  assert.match(p.headWords(), /Radio and identity, phases Not on the board: the sensor bench has no settings block/);
+  assert.match(p.headWords(), /Identity and radio, phases Not on the board: the sensor bench has no settings block/);
   assert.match(h, /data-fold="log"/);
-  assert.match(p.headWords(), /Flight log Pull or clear the chip\./);
+  assert.match(p.headWords(), /Flight logs Pull or clear the chip\./);
   // one console chooser on the sheet, in the bench pane
   assert.equal((h.match(/<select data-console=/g) || []).length, 1);
   assert.ok(at(/<select data-console=/) < at(/id="cs-bench"/));
