@@ -7,6 +7,7 @@ mod chips;
 mod decode;
 mod dump;
 mod flash;
+mod fleet;
 mod flight;
 mod fswbuild;
 mod framing;

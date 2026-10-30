@@ -317,7 +317,7 @@ pub fn parse_line(input: &str) -> Event {
     Event { kind, clock, text: line.to_string() }
 }
 
-fn info_json(info: &Info) -> String {
+pub(crate) fn info_json(info: &Info) -> String {
     let pairs: Vec<String> = info.iter().map(|(k, v)| format!("\"{}\":\"{}\"", esc(k), esc(v))).collect();
     format!("{{{}}}", pairs.join(","))
 }
@@ -381,6 +381,60 @@ pub fn log_texts(content: &str) -> Vec<&str> {
         return out;
     }
     lines.into_iter().filter(|l| !js_trim(l).is_empty()).collect()
+}
+
+pub struct LogLine<'a> {
+    pub t: f64,   // ms
+    pub rx: String,
+    pub text: &'a str,
+}
+
+// recorder.js parseLogFile with the time and receiver of each line, which a replay
+// feeds the fleet. A file that is not our own log is one receiver, named after the
+// file, timed by its Serial Monitor clock (a day added when it goes back over 12 h) or
+// else one line a second from base_ms.
+pub fn log_events<'a>(content: &'a str, name: &str, base_ms: f64) -> Vec<LogLine<'a>> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let lines: Vec<&str> = content.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+    let mut out = Vec::new();
+    if lines[0].starts_with("# descent-ground log v1") {
+        for l in &lines[1..] {
+            let Some(a) = l.find('\t') else { continue };
+            let Some(b) = l[a + 1..].find('\t').map(|b| a + 1 + b) else { continue };
+            let t = js_number(&l[..a]);
+            if t.is_finite() {
+                out.push(LogLine { t, rx: l[a + 1..b].to_string(), text: &l[b + 1..] });
+            }
+        }
+        return out;
+    }
+    let rx = name.rfind('.').map_or(name, |i| &name[..i]);
+    let (mut day, mut prev, mut t, mut n) = (0.0, None::<f64>, base_ms, 0.0);
+    for l in lines {
+        if js_trim(l).is_empty() {
+            continue;
+        }
+        if let Some(clock) = parse_line(l).clock {
+            if prev.is_some_and(|p| clock < p - 12.0 * 3600e3) {
+                day += 1.0;
+            }
+            prev = Some(clock);
+            t = base_ms + clock + day * 86400e3;
+        } else if prev.is_none() {
+            t = base_ms + 1000.0 * n;
+            n += 1.0;
+        }
+        out.push(LogLine { t, rx: rx.to_string(), text: l });
+    }
+    out
+}
+
+// recorder.js mergeFiles: every file's lines in time order, a stable sort so lines at
+// the same time keep the order they were read in
+pub fn merge_files(files: Vec<Vec<LogLine<'_>>>) -> Vec<LogLine<'_>> {
+    let mut all: Vec<LogLine> = files.into_iter().flatten().collect();
+    all.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+    all
 }
 
 #[cfg(test)]

@@ -130,7 +130,7 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, String> {
 }
 
 // Math.round: halves go up, toward +infinity, not away from zero
-fn js_round(x: f64) -> f64 {
+pub(crate) fn js_round(x: f64) -> f64 {
     let r = x.floor();
     if x - r >= 0.5 {
         r + 1.0
