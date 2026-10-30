@@ -548,6 +548,7 @@
       this.delay = StreamClient.RETRY_MS;
       this.stopped = true;
       this.asked = new Map();    // history asks in flight
+      this.done = new Set();     // history asks finished, by connection and run
     }
 
     start() {
@@ -645,6 +646,8 @@
     if (r && r.fetched) return null;
     const key = this.connects + ':' + runIdOf(row);
     if (this.asked.has(key)) return this.asked.get(key);
+    // answered or not, once per run per connection: the page asks on every redraw
+    if (this.done.has(key)) return null;
     const at = this.connects;
     const go = (this.o.fetch || fetch)(this.o.historyUrl(String(label)))
       .then((res) => (res.ok ? res.json() : null))
@@ -656,7 +659,7 @@
         return ok;
       })
       .catch(() => false)
-      .finally(() => this.asked.delete(key));
+      .finally(() => { this.asked.delete(key); this.done.add(key); });
     this.asked.set(key, go);
     return go;
   };

@@ -1,6 +1,5 @@
 // The screens, and the strip in the top bar that every one of them carries: which
 // receivers are being read, the file being logged to, and any job that is running.
-// ChipSats, T-Beams and Data need the app; a page from anywhere else has Live and Replay.
 (function () {
   'use strict';
   const A = window.DGApp;
@@ -237,16 +236,12 @@
     renderStrip();
   }
 
-  // ---------- the app, or a page from somewhere else ----------
-  // Called again if the transport changes under us, so it sets both ways round.
+  // ---------- the app's screens ----------
+  // The app writes every line to disk on its own, so its bar names that file and Save a
+  // copy there is the session's download.
   function applyTransport() {
     const native = hub.native;
     for (const s of NEED_APP) $('view-' + s).hidden = !native;
-    // The app writes every line to disk on its own, so its bar names that file. Anywhere
-    // else nothing records unless asked, and the recording controls stay.
-    $('recpanel').hidden = native;
-    $('btn-save').hidden = native;
-    $('mode').hidden = native;
     if (!native && NEED_APP.includes(screen)) A.showView('live');
     renderStrip();
   }

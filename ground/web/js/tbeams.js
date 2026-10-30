@@ -51,7 +51,7 @@
   };
 
   // Only the app's own taps see every line of every port; the last three of each are the
-  // raw box, and a heartbeat's uptime is nowhere else (fleet.js keeps when, not how long).
+  // raw box, and a heartbeat's uptime is nowhere else (the receiver rows say when, not how long).
   A.taps.push((rx, text, t) => {
     const seen = state.lines.get(rx) || [];
     seen.push(String(text).replace(/\r$/, ''));

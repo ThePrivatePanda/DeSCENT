@@ -57,8 +57,9 @@
 
   // Every port, whichever board is up: receiver packets go to the radio count, log format
   // lines to that port's session
+  A.packetTaps.push((m) => state.radio.add(m));
   A.taps.push((rx, text, t) => {
-    if (state.radio.add(t, rx, text)) return;
+    if (text.startsWith('PKT,')) return;
     if (state.sessions.has(rx) || BN.parse(text)) session(rx).add(t, text);
   });
 

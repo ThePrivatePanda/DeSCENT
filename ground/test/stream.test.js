@@ -272,6 +272,8 @@ test('a history ask the app cannot answer leaves the graph as the stream drew it
   assert.strictEqual(await c.wantHistory('9'), false);
   assert.deepStrictEqual(f.unit('9').history.t, [3]);
   assert.strictEqual(c.wantHistory('77'), null, 'no row, no ask');
+  assert.strictEqual(c.wantHistory('9'), null, 'not asked again on the next redraw');
+  assert.strictEqual(h.asked.length, 1);
 });
 
 test('the master\'s recorded stream fixtures load and end their snapshot', { skip: fixtures().length ? false : 'no fixture at docs/internals/frontend/fixtures yet' }, () => {
