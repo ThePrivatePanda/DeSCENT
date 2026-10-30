@@ -4,6 +4,7 @@
 mod assets;
 mod chipflash;
 mod chips;
+mod decode;
 mod dump;
 mod flash;
 mod flight;
@@ -11,6 +12,7 @@ mod fswbuild;
 mod framing;
 mod json;
 mod layout;
+mod lines;
 mod localfw;
 mod logfile;
 mod opts;
