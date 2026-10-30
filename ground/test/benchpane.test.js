@@ -2,7 +2,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { page } = require('./mock/fakepage.js');
-const P = require('../web/js/packet.js');
 
 const UID9 = '2032374555435010002C002E';
 const PROBE = { serial: '002A00', kind: 'STLink V3', access: true };
@@ -37,7 +36,7 @@ async function bench(o) {
     setBoard: async (port, read) => { o.listened = [port, read]; },
     pull: async () => {}, pullStop: async () => {},
   };
-  const p = page(['packet.js', 'lines.js', 'bench.js', 'boardmodel.js', 'datamodel.js', 'chipsats.js', 'benchpane.js'], hub, o);
+  const p = page(['bench.js', 'boardmodel.js', 'datamodel.js', 'chipsats.js', 'benchpane.js'], hub, o);
   await p.settle();
   p.parts.chipsats.show();
   await p.settle();
@@ -91,14 +90,9 @@ test('a board that does not say test=bench is said not to be on the bench, besid
 
 test('the receivers count the bench as board 254 and nothing else', async () => {
   const p = await bench();
-  const pkt = (counter, csid) => {
-    const v = {};
-    for (const f of P.FIELDS) v[f.key] = 0;
-    Object.assign(v, { counter, csid, validity: 0 });
-    const b = P.encode(v, 0);
-    return 'PKT,55,' + P.bytesToHex(P.encode(v, P.crc16(b, P.DATA_LENGTH))) + ',-41,9.0,100';
-  };
-  p.say(TBEAM.key, [pkt(1, 254), pkt(2, 254), pkt(4, 254), pkt(7, 9)]);
+  const pkt = (counter, csid) => ({ kind: 'packet', csid, rx: TBEAM.key, t: Date.now(), rssi: -41, snr: 9.0, crcOk: true,
+    values: { counter, csid, validity: 0 }, valid: {} });
+  for (const m of [pkt(1, 254), pkt(2, 254), pkt(4, 254), pkt(7, 9)]) p.packetTaps.forEach((tap) => tap(m));
   await p.tick();
   assert.match(p.words(), /usb-tbeam-1 3 1 0 0 -41\b/);
   assert.match(p.sheet(), /from any board on the sensor bench \(254\)/, 'not said to be this board');

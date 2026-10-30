@@ -1,7 +1,7 @@
-// Wires the page together: serial / log input -> fleet -> panels and charts.
+// Wires the page together: the app's stream (live) or a replay's -> panels and charts.
 (function () {
   'use strict';
-  const { packet: P, lines: L, fleet: F, recorder: R, store: S, exportcsv: X, boardmodel: B } = DG;
+  const { store: S, boardmodel: B, replay: RP } = DG;
   const $ = (id) => document.getElementById(id);
   // What the other screens reach this file through. Filled in at the bottom; the hooks
   // on it (onView, onReceivers, onTransport) are set by js/screens.js once it has loaded.
@@ -17,11 +17,10 @@
     el.dgHtml = html;
   }
 
+  // Display settings are this browser's; the model's (stale, lost, limits) are the app's
   let settings = S.loadSettings();
-  const live = new F.Fleet(settings);
-  const recorder = new R.Recorder();
-  const autosave = new S.Autosave();
-  const rxMeta = new Map();   // rxKey -> {index, source}
+  const model = new S.ModelSettings({ fetch: (u, i) => fetch(u, i), onChange: () => applyModel() });
+  const rxMeta = new Map();   // rxKey -> {index}
   let rxCount = 0;
 
   const view = {
@@ -29,17 +28,37 @@
     rxSel: null,     // the receiver row opened for its SF and disconnect
     dropAsk: null,   // the run whose delete waits for its second click
     sels: { live: null, replay: null },
-    replay: null,   // {events, pos, clock, playing, speed, fleet, names}
+    replay: null,    // {r: DG.replay.Replay, names, from: {log, raw, dir}, dirty, toasted}
   };
-  const fleet = () => (view.mode === 'replay' && view.replay ? view.replay.fleet : live);
+  const graphCfg = () => ({ maxPoints: settings.maxPoints, retainMin: settings.retainMin });
+
+  // Every line from every receiver, for panes that want them all, e.g. the sensor bench
+  const taps = [];       // (rx, text, t)
+  const packetTaps = []; // (packet message)
+  const hub = DG.makeHub({
+    cfg: graphCfg(),
+    onLine: (m) => { const t = Number(m.t) || Date.now(); for (const tap of taps) tap(String(m.rx), String(m.text), t); },
+    onPacket: (m) => { for (const tap of packetTaps) tap(m); },
+    onSettings: (m) => model.fromStream(m),
+    onChange: () => renderReceivers(),
+    note: (msg) => toast(msg),
+  });
+  const live = hub.stream.fleet;
+
+  const fleet = () => (view.mode === 'replay' && view.replay ? view.replay.r.fleet : live);
+  const client = () => (view.mode === 'replay' && view.replay ? view.replay.r.stream : hub.stream);
   // The replay's own clock only while the replay is what is on screen: with a log open
   // and Live showing, live units are aged against the real time.
-  const now = () => (view.mode === 'replay' && view.replay ? view.replay.clock : Date.now());
+  const now = () => {
+    if (!(view.mode === 'replay' && view.replay)) return Date.now();
+    const c = view.replay.r.clock();
+    return c === null ? NaN : c;
+  };
   const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 
   function meta(rx) {
     let m = rxMeta.get(rx);
-    if (!m) { m = { index: rxCount++ % 8, source: null }; rxMeta.set(rx, m); }
+    if (!m) { m = { index: rxCount++ % 8 }; rxMeta.set(rx, m); }
     return m;
   }
   // A receiver goes by its own name or its id, which stay with the board. Its key (rx1,
@@ -67,49 +86,13 @@
   }
 
   // ---------- input ----------
-  function ingestLine(target, rx, text, t) {
-    const ev = L.parseLine(text);
-    const m = meta(rx);
-    if (ev.kind === 'packet' || ev.kind === 'badlength') m.source = ev.source;
-    if (ev.kind === 'rxinfo') m.source = 'raw';
-    return target.ingest(ev, t, rx);
-  }
-
-  // Every line from every connected receiver is recorded, whichever unit is on screen.
-  // The native app or Web Serial, depending on where the page was loaded from.
-  // for panes that want every line, e.g. the sensor bench
-  const taps = [];
-  const hub = DG.makeHub((rx, text) => {
-    const t = Date.now();
-    for (const tap of taps) tap(rx, text, t);
-    const result = ingestLine(live, rx, text, t);
-    recorder.add(t, rx, text, result === 'new' || result === 'duplicate' || result === 'badcrc');
-    if (settings.autosave) autosave.add(R.formatLine(t, rx, text));
-  }, () => renderReceivers(), (msg) => { toast(msg); serialBanner(); });
-
-  // Called again if the transport changes under us, so it has to set both ways round.
-  function serialBanner() {
-    const native = hub.native;
-    $('btn-connect').textContent = native ? 'Rescan' : 'Connect receiver';
-    $('btn-connect').title = native
-      ? 'Look for receivers again'
-      : 'Pick a T-Beam serial port';
-    if (api.onTransport) api.onTransport();
-    if (hub.supported) return;
-    $('unsupported').hidden = false; $('btn-connect').disabled = true;
-  }
-  serialBanner();
-
+  // The app finds the receivers itself, so this is a rescan
   $('btn-connect').addEventListener('click', async () => {
     try {
-      const p = await hub.add();
-      meta(p.key);
-      toast(hub.native
-        ? hub.ports.length + (hub.ports.length === 1 ? ' receiver' : ' receivers') + ' found'
-        : 'Connected ' + p.key + (p.usb ? ' (USB ' + p.usb + ')' : ''));
+      await hub.add();
+      toast(hub.ports.length + (hub.ports.length === 1 ? ' receiver' : ' receivers') + ' found');
     } catch (e) {
-      if (e && e.name !== 'NotFoundError') toast('Could not open port: ' + (e.message || e));
-      else if (hub.native) toast('No receiver found');
+      toast(e && e.name === 'NotFoundError' ? 'No receiver found' : 'Could not look for receivers: ' + (e.message || e));
     }
   });
 
@@ -123,117 +106,15 @@
     return String(name).replace(/[\\/]+/g, '-');
   }
 
-  // A log the app wrote, read back through its own server. more is what the caller knows
+  // A log the app wrote, opened in the app by its name. more is what the caller knows
   // about it: {raw, dir}. A pull's log has the dump the board printed beside it.
-  async function openServerLog(name, more) {
-    try {
-      const r = await fetch(logUrl(name));
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
-      const events = R.mergeFiles([R.parseLogFile(await r.text(), name, midnight.getTime())]);
-      if (!events.length) { toast('Nothing in ' + name); return; }
-      const pulled = /^(.*)\/ground\.log$/.exec(name);
-      startReplay(events, [name], Object.assign({ log: name, raw: pulled ? pulled[1] + '/dump.txt' : null, dir: null }, more));
-    } catch (e) {
-      toast('Could not open ' + name + ': ' + (e.message || e));
-    }
+  function openServerLog(name, more) {
+    const pulled = /^(.*)\/ground\.log$/.exec(name);
+    return openReplay({ path: name }, [name], Object.assign({ log: name, raw: pulled ? pulled[1] + '/dump.txt' : null, dir: null }, more));
   }
-
-  // Which build this page is, for when someone asks whether the hosted copy is current.
-  // Written by the deploy; absent when the page came off a disk or out of the app. Not
-  // asked for in the app, where it is a 404 in the console on every start.
-  if (!hub.native) fetch('version.json').then((r) => (r.ok ? r.json() : null)).then((v) => {
-    if (v && v.commit) {
-      document.querySelector('.brand').title = 'build ' + v.commit + ', deployed ' + v.built;
-    }
-  }).catch(() => { /* not deployed from the repo */ });
-
-  // ---------- recording ----------
-  $('rec-start').addEventListener('click', async () => {
-    try {
-      await recorder.start(settings.fileTag);
-      toast(recorder.toFile ? 'Recording to ' + recorder.fileName : 'Recording. This browser saves the file when you press Stop.');
-    } catch (e) {
-      if (e && e.name !== 'AbortError') toast('Could not start recording: ' + (e.message || e));
-    }
-    renderRecorder();
-  });
-  $('rec-pause').addEventListener('click', () => {
-    if (recorder.state === 'recording') recorder.pause(); else recorder.resume();
-    renderRecorder();
-  });
-  $('rec-stop').addEventListener('click', async () => {
-    const lines = recorder.rec.lines;
-    const blob = await recorder.stop();
-    if (blob) download(blob, recorder.fileName);
-    toast('Saved ' + lines + ' lines to ' + recorder.fileName);
-    renderRecorder();
-  });
-
-  function renderRecorder() {
-    const st = recorder.state;
-    const label = { idle: 'Not recording', recording: 'Recording', paused: 'Paused' }[st];
-    $('rec-state').textContent = label;
-    $('rec-state').className = 'rec-state ' + st;
-    $('rec-start').disabled = st !== 'idle';
-    $('rec-pause').disabled = st === 'idle';
-    $('rec-pause').textContent = st === 'paused' ? 'Resume' : 'Pause';
-    $('rec-stop').disabled = st === 'idle';
-    const r = recorder.rec;
-    const rxs = Object.keys(r.perRx);
-    if (st === 'idle') {
-      $('rec-info').innerHTML = recorder.fileName ? 'Last: ' + esc(recorder.fileName) : '';
-      $('rec-info').title = '';
-      return;
-    }
-    const secs = Math.floor(recorder.elapsedMs(Date.now()) / 1000);
-    const hms = [Math.floor(secs / 3600), Math.floor(secs / 60) % 60, secs % 60].map((n) => String(n).padStart(2, '0')).join(':');
-    $('rec-info').innerHTML = '<b>' + hms + '</b>  ' + r.packets + ' packets from ' + rxs.length + (rxs.length === 1 ? ' receiver' : ' receivers');
-    $('rec-info').title = 'File: ' + recorder.fileName + '\n' + rxs.map((k) => rxName(k) + ': ' + r.perRx[k].packets + ' packets, ' + r.perRx[k].lines + ' lines').join('\n') +
-      (recorder.error ? '\nWrite error: ' + recorder.error : '');
-  }
-
-  $('btn-save').addEventListener('click', () => {
-    const name = settings.fileTag + '-session-' + stamp() + '.log';
-    download(recorder.sessionBlob(), name);
-    toast('Saved ' + recorder.lines + ' lines to ' + name);
-  });
 
   window.addEventListener('beforeunload', (e) => {
-    if (recorder.state !== 'idle' || live.total > 0) { e.preventDefault(); e.returnValue = ''; }
-  });
-
-  // ---------- crash autosave ----------
-  function armAutosave() {
-    clearInterval(armAutosave.timer);
-    if (settings.autosave) armAutosave.timer = setInterval(() => autosave.flush().catch(() => {}), settings.autosaveS * 1000);
-  }
-  armAutosave();
-
-  let recovering = null;
-  autosave.previous().then((list) => {
-    const withLines = list.filter((s) => s.lines > 0);
-    if (!withLines.length) return;
-    recovering = withLines[0];
-    $('recover-text').textContent = 'Unsaved session from ' + new Date(recovering.started).toLocaleString() +
-      ' (' + recovering.lines + ' lines) is still in this browser.' + (withLines.length > 1 ? ' ' + (withLines.length - 1) + ' older.' : '');
-    $('recover').hidden = false;
-  }).catch(() => {});
-
-  const recoveredText = async () => R.HEADER + ' recovered ' + recovering.started + '\n' + await autosave.text(recovering.id);
-  $('recover-open').addEventListener('click', async () => {
-    const events = R.parseLogFile(await recoveredText(), 'recovered', 0);
-    if (events.length) startReplay(events, ['recovered session']);
-  });
-  $('recover-download').addEventListener('click', async () => {
-    const name = settings.fileTag + '-recovered-' + recovering.started.slice(0, 19).replace(/[:T]/g, '-') + '.log';
-    download(new Blob([await recoveredText()], { type: 'text/plain' }), name);
-    toast('Saved ' + name);
-  });
-  $('recover-discard').addEventListener('click', async () => {
-    await autosave.remove(recovering.id);
-    $('recover').hidden = true;
-    toast('Discarded the stored session');
+    if (live.total > 0) { e.preventDefault(); e.returnValue = ''; }
   });
 
   // ---------- replay ----------
@@ -244,16 +125,11 @@
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('file-open').click(); }
     });
   }
-  $('file-open').addEventListener('change', async (e) => {
+  $('file-open').addEventListener('change', (e) => {
     const files = [...e.target.files];
     e.target.value = '';
     if (!files.length) return;
-    const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
-    const parsed = [];
-    for (const f of files) parsed.push(R.parseLogFile(await f.text(), f.name, midnight.getTime()));
-    const events = R.mergeFiles(parsed);
-    if (!events.length) { toast('No lines found in ' + files.map((f) => f.name).join(', ')); return; }
-    startReplay(events, files.map((f) => f.name));
+    openReplay({ files: files.map((f) => ({ name: f.name, size: f.size, body: f })) }, files.map((f) => f.name));
   });
 
   // ?log=<url> replays a file without anyone clicking Open log, so pulling a chip can
@@ -262,24 +138,19 @@
   async function openFromUrl() {
     const urls = new URLSearchParams(location.search).getAll('log');
     if (!urls.length) return;
-    const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
-    const parsed = [];
-    const names = [];
+    const files = [];
     for (const u of urls) {
       try {
         const r = await fetch(u);
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        const name = (u.split('?')[0].split(/[\\/]/).pop()) || 'log';
-        parsed.push(R.parseLogFile(await r.text(), name, midnight.getTime()));
-        names.push(name);
+        const body = await r.blob();
+        files.push({ name: (u.split('?')[0].split(/[\\/]/).pop()) || 'log', size: body.size, body });
       } catch (err) {
         // A bad link leaves a working dashboard and says why, rather than a blank page.
         toast('Could not open ' + u + ': ' + (err.message || err));
       }
     }
-    const events = R.mergeFiles(parsed);
-    if (!events.length) return;
-    startReplay(events, names);
+    if (files.length) openReplay({ files }, files.map((f) => f.name));
   }
   openFromUrl();
 
@@ -306,148 +177,117 @@
     render(true);
   }
 
-  // A log is finite and already on disk. Capping its history would quietly drop the
-  // start of a long flight from every graph, which is the part worth looking at. So a
-  // replay keeps everything, whatever the live trimming is set to.
-  const replayCfg = () => Object.assign({}, settings, { maxPoints: Infinity, retainMin: 0 });
-
-  // from is only given for a log the app serves: {log, raw, dir}, see servedLog.
-  function startReplay(events, names, from) {
-    stopPlay();
-    // Scrubbing backwards used to throw the fleet away and feed every event in again.
-    // Copies are kept along the way so a rewind restarts from the nearest one; the cost
-    // of dragging then stops depending on how long the log is.
-    view.replay = {
-      events, pos: 0, clock: events[0].t, playing: false, speed: +$('rp-speed').value,
-      fleet: new F.Fleet(replayCfg()), names,
-      checks: [], every: Math.max(250, Math.ceil(events.length / 12)),
-      from: from || null,
+  const blobOf = (parts) => new Blob(parts);
+  function replayOpts() {
+    return {
+      fetch: (u, i) => fetch(u, i), location, join: blobOf,
+      cfg: { model: model.values },
+      // The replay's stream redraws on the next look at the replay's state, not per message
+      onChange: () => { if (view.replay) view.replay.dirty = true; },
+      log: (s) => console.warn(s),
     };
-    view.sel = null;
-    $('rp-pos').max = events.length;
-    showView('replay');
-    // Feeding a long log in one go blocks the page for seconds with nothing on screen.
-    // It goes in a slice at a time, the count keeps moving, and the browser stays awake.
-    fillTo(events.length, () => {
-      toast('Opened ' + names.join(', ') + ': ' + events.length + ' lines, ' +
-        view.replay.fleet.total + ' packets');
-    });
   }
 
-  function seek(pos) {
-    const r = view.replay;
-    // The nearest copy at or before the target, whichever direction the handle moved: a
-    // long jump forward is as expensive as a rewind if it replays from where we happen
-    // to be standing.
-    let from = null;
-    for (const c of r.checks) if (c.pos <= pos && (!from || c.pos > from.pos)) from = c;
-    if (pos < r.pos && !from) { r.fleet = new F.Fleet(replayCfg()); r.pos = 0; }
-    if (from && from.pos > r.pos) { r.fleet.restore(from.state); r.pos = from.pos; }
-    else if (pos < r.pos && from) { r.fleet.restore(from.state); r.pos = from.pos; }
-    while (r.pos < pos) {
-      const e = r.events[r.pos++];
-      ingestLine(r.fleet, e.rx, e.text, e.t);
-      if (r.pos % r.every === 0 && !r.checks.some((c) => c.pos === r.pos)) {
-        r.checks.push({ pos: r.pos, state: r.fleet.snapshot() });
-      }
+  // The app reads the file and runs its own fleet over it. from is only given for a log
+  // the app serves: {log, raw, dir}.
+  async function openReplay(what, names, from) {
+    let r;
+    try {
+      r = await RP.Replay.open(replayOpts(), what);
+    } catch (e) {
+      toast('Could not open ' + names.join(', ') + ': ' + (e.message || e));
+      return;
     }
-    r.clock = r.pos ? r.events[r.pos - 1].t : r.events[0].t;
-    $('rp-pos').value = r.pos;
-    $('rp-time').textContent = new Date(r.clock).toTimeString().slice(0, 8);
-    render(true);
+    closeReplay();
+    view.replay = { r, names, from: from || null, dirty: true, toasted: false, polls: 0, busy: false, dragging: false };
+    view.sel = null;
+    view.sels.replay = null;
+    showView('replay');
+    pollReplay(true);
   }
 
-  // Reading a log in slices, so a long one arrives visibly instead of freezing the page.
-  // Twelve milliseconds a slice leaves the rest of the frame to draw.
-  function fillTo(target, done) {
-    const r = view.replay;
-    if (!r) return;
-    const total = r.events.length;
-    const step = () => {
-      if (view.replay !== r) return;   // the log was closed under us
-      const until = performance.now() + 12;
-      while (r.pos < target && performance.now() < until) {
-        const e = r.events[r.pos++];
-        ingestLine(r.fleet, e.rx, e.text, e.t);
-        if (r.pos % r.every === 0 && !r.checks.some((c) => c.pos === r.pos)) {
-          r.checks.push({ pos: r.pos, state: r.fleet.snapshot() });
-        }
-      }
-      r.clock = r.pos ? r.events[r.pos - 1].t : r.events[0].t;
-      $('rp-pos').value = r.pos;
-      if (r.pos < target) {
-        $('rp-time').textContent = 'reading ' + V.num(r.pos) + ' of ' + V.num(total);
-        requestAnimationFrame(step);
-        return;
-      }
-      $('rp-time').textContent = new Date(r.clock).toTimeString().slice(0, 8);
-      render(true);
-      if (done) done();
-    };
-    step();
+  function closeReplay() {
+    const rp = view.replay;
+    if (!rp) return;
+    rp.r.close();
+    view.replay = null;
+    view.sels.replay = null;
   }
 
-  // Dragging fires far faster than a rebuild can finish, so the work is coalesced to one
-  // per frame and the time under the handle keeps up on its own.
-  let seekWanted = null;
-  function seekSoon(pos) {
-    const r = view.replay;
-    if (!r) return;
-    $('rp-time').textContent = new Date(r.events[Math.max(0, Math.min(pos, r.events.length) - 1)].t)
-      .toTimeString().slice(0, 8);
-    if (seekWanted !== null) { seekWanted = pos; return; }
-    seekWanted = pos;
-    requestAnimationFrame(() => {
-      const want = seekWanted;
-      seekWanted = null;
-      if (want !== null) seek(want);
-    });
+  // Where the replay is, asked of the app. Four times a second while it plays or until it
+  // has said, then every two seconds: a paused replay does not move.
+  async function pollReplay(now) {
+    const rp = view.replay;
+    if (!rp || rp.busy) return;
+    const st = rp.r.state;
+    if (!now && !st.playing && rp.r.stream.ready && rp.toasted && rp.polls++ % 8) {
+      if (rp.dirty && view.mode === 'replay') { rp.dirty = false; render(true); }
+      return;
+    }
+    rp.busy = true;
+    const was = st;
+    try {
+      await rp.r.poll();
+    } catch (e) {
+      return;
+    } finally {
+      rp.busy = false;
+    }
+    if (view.replay !== rp) return;   // closed under us
+    const s = rp.r.state;
+    if (!rp.from && s.kept) rp.from = s.kept;
+    $('rp-pos').max = s.lines;
+    if (!rp.dragging) $('rp-pos').value = s.position;
+    $('rp-play').textContent = s.playing ? 'Pause' : 'Play';
+    const t = rp.r.clock();
+    if (!rp.dragging) $('rp-time').textContent = Number.isFinite(t) && t !== null ? V.clock(t) : '';
+    if (!rp.toasted && rp.r.stream.ready) {
+      rp.toasted = true;
+      toast('Opened ' + rp.names.join(', ') + ': ' + V.num(s.lines) + ' lines, ' + V.num(s.packets) + ' packets');
+    }
+    const moved = was.position !== s.position || was.packets !== s.packets;
+    if ((moved || rp.dirty) && view.mode === 'replay') { rp.dirty = false; render(true); }
+  }
+  setInterval(() => pollReplay(false), 250);
+
+  async function replayDo(what) {
+    const rp = view.replay;
+    if (!rp) return;
+    try {
+      await what(rp.r);
+    } catch (e) {
+      toast('The replay did not answer: ' + (e.message || e));
+    }
+    pollReplay(true);
   }
 
-
-  function stopPlay() {
-    if (view.replay) view.replay.playing = false;
-    clearInterval(view.playTimer);
-    $('rp-play').textContent = 'Play';
-  }
-
-  $('rp-play').addEventListener('click', () => {
-    const r = view.replay;
-    if (r.playing) { stopPlay(); return; }
-    if (r.pos >= r.events.length) seek(0);
-    r.playing = true;
+  $('rp-play').addEventListener('click', () => replayDo(async (r) => {
+    if (r.state.playing) { $('rp-play').textContent = 'Play'; await r.pause(); return; }
     $('rp-play').textContent = 'Pause';
-    view.playTimer = setInterval(() => {
-      r.clock += 100 * r.speed;
-      let pos = r.pos;
-      while (pos < r.events.length && r.events[pos].t <= r.clock) pos++;
-      const keepClock = r.clock;
-      if (pos !== r.pos) seek(pos);
-      r.clock = keepClock;
-      // seek() already redrew if the position moved, so there is nothing to throttle
-      // here. What matters is not asking for the next tick until this one is done.
-      if (r.pos >= r.events.length) stopPlay();
-    }, 100);
-  });
-  $('rp-speed').addEventListener('change', (e) => { if (view.replay) view.replay.speed = +e.target.value; });
-  // Each rebuild costs hundreds of milliseconds on a long log, and input fires far
-  // faster than that, so dragging queued work the page could never finish. The time
-  // under the handle follows the drag; the fleet catches up when it is let go.
+    await r.speed($('rp-speed').value);
+    if (r.state.lines && r.state.position >= r.state.lines) await r.seek(0);
+    await r.play();
+  }));
+  $('rp-speed').addEventListener('change', (e) => replayDo((r) => r.speed(e.target.value)));
+  // The app rebuilds its fleet on a seek, so it is asked once the handle is let go. Under
+  // the handle meanwhile: which line it is on.
   $('rp-pos').addEventListener('input', (e) => {
-    stopPlay();
-    const r = view.replay;
-    if (!r) return;
-    const at = Math.max(0, Math.min(+e.target.value, r.events.length) - 1);
-    $('rp-time').textContent = new Date(r.events[at].t).toTimeString().slice(0, 8);
+    const rp = view.replay;
+    if (!rp) return;
+    rp.dragging = true;
+    $('rp-time').textContent = 'line ' + V.num(+e.target.value) + ' of ' + V.num(rp.r.state.lines);
   });
-  $('rp-pos').addEventListener('change', (e) => { stopPlay(); seek(+e.target.value); });
-  $('rp-exit').addEventListener('click', () => {
-    stopPlay(); view.replay = null; view.sels.replay = null; showView('live');
+  $('rp-pos').addEventListener('change', (e) => {
+    const rp = view.replay;
+    if (!rp) return;
+    rp.dragging = false;
+    replayDo((r) => r.seek(+e.target.value));
   });
+  $('rp-exit').addEventListener('click', () => { closeReplay(); showView('live'); });
 
   // ---------- saving what is open ----------
-  // A finished pull lands in replay, where Save session and the rest of the live chrome
-  // are hidden, so the replay bar carries its own ways out.
+  // A finished pull lands in replay, where the live chrome is hidden, so the replay bar
+  // carries its own ways out.
 
   // Where a log the app wrote is on this computer, when the app has said. Session logs
   // and pull folders both sit beside the log being written now, which it reports.
@@ -460,37 +300,46 @@
     return cur.slice(0, cut) + (slash > 0 ? cur[cut] + from.log.slice(0, slash) : '');
   }
 
-  // Where the replay is and what it has read, then which file and where it is kept. The
-  // second half is worked out once a log: R.sources walks every line.
   function renderReplayFile() {
-    const r = view.replay;
-    $('rp-raw').hidden = !(r && r.from && r.from.raw);
-    if (!r) { $('rp-file').textContent = ''; return; }
-    const where = r.from ? onDisk(r.from) : '';
-    // The receiver strip is live chrome and is hidden here, so this line is where a
-    // replay says its records came off a chip and which of them have a real clock.
-    const src = R.sources(r.events);
-    const undated = src.flash - src.dated;
-    const chip = !src.flash ? '' : 'Off a chip, not a radio: ' + src.flash + (src.flash === 1 ? ' boot, ' : ' boots, ') +
-      src.dated + ' with GPS time' + (undated ? ', ' + undated + ' not dated' : '') + '.';
-    const file = where ? r.from.log.split('/').pop() + ' in ' + where : r.names.join(', ');
-    r.words = [file, chip].filter(Boolean).join('. ');
+    const rp = view.replay;
+    $('rp-raw').hidden = !(rp && rp.from && rp.from.raw);
+    if (!rp) { $('rp-file').textContent = ''; return; }
     renderReplayProgress();
   }
+
+  // Where the replay is and what it has read, then which file and where it is kept. The
+  // receiver strip is live chrome and is hidden here, so this line is where a replay says
+  // its records came off a chip and which of them have a real clock.
+  function replayWords(rp) {
+    const where = rp.from ? onDisk(rp.from) : '';
+    let flash = 0; let dated = 0;
+    for (const src of rp.r.fleet.sources.values()) {
+      if (src.kind !== 'flash') continue;
+      flash++;
+      if (src.time_source === 'anchor') dated++;
+    }
+    const undated = flash - dated;
+    const chip = !flash ? '' : 'Off a chip, not a radio: ' + flash + (flash === 1 ? ' boot, ' : ' boots, ') +
+      dated + ' with GPS time' + (undated ? ', ' + undated + ' not dated' : '') + '.';
+    const file = where ? rp.from.log.split('/').pop() + ' in ' + where : rp.names.join(', ');
+    return [file, chip].filter(Boolean).join('. ');
+  }
   function renderReplayProgress() {
-    const r = view.replay;
-    if (!r) return;
-    const html = '<span class="rp-prog">line ' + V.num(r.pos) + ' of ' + V.num(r.events.length) + ' · ' +
-      V.num(r.fleet.total) + ' packets · from ' + V.clock(r.events[0].t) + '</span>' +
-      (r.words ? ' <span class="rp-where">· ' + esc(r.words) + '</span>' : '');
+    const rp = view.replay;
+    if (!rp) return;
+    const s = rp.r.state;
+    const words = replayWords(rp);
+    const html = '<span class="rp-prog">line ' + V.num(s.position) + ' of ' + V.num(s.lines) + ' · ' +
+      V.num(s.packets) + ' packets · from ' + (s.from !== null ? V.clock(s.from) : '—') + '</span>' +
+      (words ? ' <span class="rp-where">· ' + esc(words) + '</span>' : '');
     paint($('rp-file'), html);
   }
 
   // The open file's own name less its extension. Several files merged get a new one.
   function replayBase() {
-    const r = view.replay;
-    if (r.from) return flatName(r.from.log).replace(/\.[^.]*$/, '');
-    if (r.names.length === 1) return flatName(r.names[0]).replace(/\.[^.]*$/, '');
+    const rp = view.replay;
+    if (rp.from) return flatName(rp.from.log).replace(/\.[^.]*$/, '');
+    if (rp.names.length === 1) return flatName(rp.names[0]).replace(/\.[^.]*$/, '');
     return settings.fileTag + '-merged-' + stamp();
   }
 
@@ -501,45 +350,51 @@
   }
 
   $('rp-save').addEventListener('click', async () => {
-    const r = view.replay;
-    if (!r) return;
+    const rp = view.replay;
+    if (!rp) return;
     const name = replayBase() + '.log';
-    if (r.from) {
-      try {
-        download(await served(r.from.log), name);
-        toast('Saved ' + name);
-        return;
-      } catch (e) {
-        // The app may have been closed since the log was opened. Its lines are still
-        // here, so they are written out below; only the file's comment lines are lost.
+    try {
+      if (rp.from) download(await served(rp.from.log), name);
+      else {
+        const r = await fetch(rp.r.logUrl);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        download(await r.blob(), name);
       }
+      toast('Saved ' + name);
+    } catch (e) {
+      toast('Could not get the log from the app: ' + (e.message || e));
     }
-    const text = R.HEADER + ' saved ' + new Date().toISOString() + '\n' +
-      r.events.map((e) => R.formatLine(e.t, e.rx, e.text)).join('');
-    download(new Blob([text], { type: 'text/plain' }), name);
-    toast((r.from ? 'The app did not answer. ' : '') + 'Saved ' + r.events.length.toLocaleString() + ' lines to ' + name);
   });
 
-  $('rp-csv').addEventListener('click', () => {
-    const r = view.replay;
-    if (!r) return;
-    const csv = X.toCsv(r.events);
+  // The app writes the table, the same columns 1.3 wrote
+  $('rp-csv').addEventListener('click', async () => {
+    const rp = view.replay;
+    if (!rp) return;
+    let csv;
+    try {
+      const r = await fetch(rp.r.csvUrl);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      csv = await r.text();
+    } catch (e) {
+      toast('Could not get the table from the app: ' + (e.message || e));
+      return;
+    }
     const rows = csv.split('\n').length - 2;   // less the header and the last newline
     if (rows < 1) { toast('Nothing to save: no packet in this log passes its CRC.'); return; }
     const name = replayBase() + '.csv';
     download(new Blob([csv], { type: 'text/csv' }), name);
-    toast('Saved ' + rows.toLocaleString() + ' rows to ' + name);
+    toast('Saved ' + V.num(rows) + ' rows to ' + name);
   });
 
   $('rp-raw').addEventListener('click', async () => {
-    const r = view.replay;
-    if (!r || !r.from || !r.from.raw) return;
-    const name = flatName(r.from.raw);
+    const rp = view.replay;
+    if (!rp || !rp.from || !rp.from.raw) return;
+    const name = flatName(rp.from.raw);
     try {
-      download(await served(r.from.raw), name);
+      download(await served(rp.from.raw), name);
       toast('Saved ' + name);
     } catch (e) {
-      toast('Could not get ' + r.from.raw + ': ' + (e.message || e));
+      toast('Could not get ' + rp.from.raw + ': ' + (e.message || e));
     }
   });
 
@@ -562,8 +417,10 @@
     render(true);
   });
   // ---------- clearing ----------
-  // Everything is on the page: tick what should go, press Clear. Nothing here touches
-  // lines already written to disk unless a new log file is asked for.
+  // Tick what should go, press Clear. The app keeps its own counts and every line on disk:
+  // this clears what this page shows, and a unit still transmitting comes back with its
+  // next packet. Only the new log file is asked of the app. Clear, join and delete run
+  // page-side in 1.4.0; the app gets them in 1.4.1.
   const clearBoxes = { units: 'cl-units', sel: 'cl-sel', rx: 'cl-rx', hidden: 'cl-hidden', log: 'cl-log' };
   const clearWanted = () => Object.fromEntries(Object.entries(clearBoxes).map(([k, id]) => [k, $(id).checked]));
 
@@ -628,47 +485,22 @@
   });
 
   // ---------- settings ----------
-  const MIN = (n) => [n, n ? 'Last ' + n + ' min' : 'All data kept'];
-  const FIELDS = [
-    { section: 'Graphs' },
-    { key: 'graphWindowMin', label: 'Time shown', type: 'select', options: [0, 1, 5, 15, 30, 60].map(MIN),
-      hint: 'Counted back from the newest packet.' },
-    { key: 'retainMin', label: 'Drop graph data older than', type: 'select',
-      options: [[0, 'Never'], [5, '5 min'], [15, '15 min'], [30, '30 min'], [60, '1 hour'], [180, '3 hours']],
-      hint: 'Graph history only. Packet counts, misses and resets are kept.' },
-    { key: 'maxPoints', label: 'Max graph points per unit', type: 'number', min: 100, step: 100 },
-    { key: 'lineWidth', label: 'Line width', type: 'select', options: [[1, 'Thin'], [1.25, 'Normal'], [2, 'Thick']] },
-    { section: 'Status' },
-    { key: 'lostMin', label: 'Lost after silence of (min)', type: 'number', min: 1, step: 1 },
-    { key: 'staleFactor', label: 'Stale after missed intervals', type: 'number', min: 1, step: 0.5 },
-    { key: 'staleMinS', label: 'Stale no sooner than (s)', type: 'number', min: 1, step: 1 },
-    { key: 'lowBatteryV', label: 'Low battery below (V)', type: 'number', min: 2.5, max: 4.5, step: 0.05 },
-    { key: 'weakRssiDbm', label: 'Weak RF below (dBm)', type: 'number', max: 0, step: 1 },
-    { key: 'saturationMps2', label: 'Accel saturation at (m/s²)', type: 'number', min: 1, step: 1,
-      hint: 'BNO085 range is ±8 g ≈ 78 m/s².' },
-    { key: 'dedupeMs', label: 'Same packet across receivers within (ms)', type: 'number', min: 100, step: 100 },
-    { key: 'alarmSound', label: 'Beep when a unit goes lost', type: 'checkbox' },
-    { section: 'Saving' },
-    { key: 'autosave', label: 'Autosave session in this browser', type: 'checkbox',
-      hint: 'Offered back on the next visit after a crash.' },
-    { key: 'autosaveS', label: 'Autosave every (s)', type: 'number', min: 1, step: 1 },
-    { key: 'fileTag', label: 'File name prefix', type: 'text' },
-  ];
-
   function buildSettingsForm() {
     const form = $('settings-form');
     form.innerHTML = '';
     let card = form;
-    for (const f of FIELDS) {
+    for (const f of S.FIELDS) {
       if (f.section) {
         card = document.createElement('section'); card.className = 'card';
         const h = document.createElement('h3'); h.textContent = f.section;
         card.appendChild(h); form.appendChild(card);
+        if (f.note) { const n = document.createElement('div'); n.className = 'hint'; n.textContent = f.note; card.appendChild(n); }
         continue;
       }
       const row = document.createElement('div'); row.className = 'field';
       const id = 'set-' + f.key;
       let input;
+      const value = S.shown(f, settings, model.values);
       if (f.type === 'select') {
         input = document.createElement('select');
         for (const [v, label] of f.options) input.add(new Option(label, v));
@@ -683,7 +515,7 @@
         input = document.createElement('input');
         input.type = f.type;
         for (const a of ['min', 'max', 'step']) if (f[a] !== undefined) input[a] = f[a];
-        if (f.type === 'checkbox') input.checked = settings[f.key]; else input.value = settings[f.key];
+        if (f.type === 'checkbox') input.checked = value; else input.value = value;
       }
       input.id = id; input.dataset.key = f.key;
       const label = document.createElement('label'); label.htmlFor = id; label.textContent = f.label;
@@ -703,26 +535,48 @@
   function applySettings(next) {
     settings = next;
     S.saveSettings(settings);
-    live.setConfig(settings);
-    if (view.replay) view.replay.fleet.setConfig(replayCfg());
+    live.setConfig(graphCfg());
     $('window').value = settings.graphWindowMin;
-    armAutosave();
+    render(true);
+  }
+
+  // The app's settings changed, from this screen or another: the fleets judge nothing, but
+  // the cards and charts draw the limits, and an open drawer shows the new values
+  function applyModel() {
+    live.setConfig({ model: model.values });
+    if (view.replay) view.replay.r.fleet.setConfig({ model: model.values });
+    if (!$('settings').hidden && !$('settings').contains(document.activeElement)) buildSettingsForm();
     render(true);
   }
 
   $('settings-form').addEventListener('change', (e) => {
     const k = e.target.dataset.key;
     if (!k) return;
-    const def = S.defaults()[k];
-    let v = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
-    if (typeof def === 'number') { v = Number(v); if (!Number.isFinite(v)) { e.target.value = settings[k]; return; } }
-    applySettings(Object.assign({}, settings, { [k]: v }));
-    const f = FIELDS.find((x) => x.key === k);
-    const shown = e.target.type === 'checkbox' ? (v ? 'on' : 'off')
-      : e.target.tagName === 'SELECT' ? e.target.options[e.target.selectedIndex].text : v;
-    toast(f.label + ': ' + shown);
+    const f = S.field(k);
+    const ask = S.change(k, e.target.type === 'checkbox' ? e.target.checked : e.target.value);
+    if (!ask) { e.target.value = S.shown(f, settings, model.values); return; }
+    const shown = e.target.type === 'checkbox' ? (e.target.checked ? 'on' : 'off')
+      : e.target.tagName === 'SELECT' ? e.target.options[e.target.selectedIndex].text : e.target.value;
+    if (ask.display) {
+      applySettings(Object.assign({}, settings, ask.display));
+      toast(f.label + ': ' + shown);
+      return;
+    }
+    model.set(ask.model).then(() => toast(f.label + ': ' + shown), (err) => {
+      e.target.value = S.shown(f, settings, model.values);
+      toast('The app kept ' + f.label.toLowerCase() + ' as it was: ' + (err.message || err));
+    });
   });
-  $('settings-reset').addEventListener('click', () => { applySettings(S.defaults()); buildSettingsForm(); toast('Settings reset to defaults'); });
+  $('settings-reset').addEventListener('click', async () => {
+    applySettings(S.defaults());
+    try {
+      await model.set(S.MODEL_DEFAULTS);
+      toast('Settings reset to defaults');
+    } catch (err) {
+      toast('Display settings reset. The app kept its status settings: ' + (err.message || err));
+    }
+    buildSettingsForm();
+  });
   // Focus goes into the drawer and back, or a keyboard user tabs through the whole page to reach it
   function closeSettings() {
     const inside = $('settings').contains(document.activeElement);
@@ -737,10 +591,12 @@
   $('settings-close').addEventListener('click', closeSettings);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settings').hidden) closeSettings(); });
 
-  for (const [v, label] of [0, 1, 5, 15, 30, 60].map(MIN)) $('window').add(new Option(label, v));
+  for (const [v, label] of [0, 1, 5, 15, 30, 60].map(S.MIN)) $('window').add(new Option(label, v));
   $('window').value = settings.graphWindowMin;
   buildSettingsForm();   // also corrects values an older version saved
   $('window').addEventListener('change', (e) => { applySettings(Object.assign({}, settings, { graphWindowMin: +e.target.value })); buildSettingsForm(); });
+  // Asked, never sent: another screen may have changed them
+  model.load().catch(() => { /* the drawer shows the defaults until the app answers or the stream says */ });
 
   // ---------- theme ----------
   try { const th = localStorage.getItem('dg-theme'); if (th) document.documentElement.dataset.theme = th; } catch (e) { /* storage blocked */ }
@@ -765,8 +621,8 @@
   }
 
   function renderSummary(f, t) {
-    const r = view.mode === 'replay' ? view.replay : null;
-    paint($('summary'), V.summaryHtml(f, t, r ? r.pos : undefined));
+    const rp = view.mode === 'replay' ? view.replay : null;
+    paint($('summary'), V.summaryHtml(f, t, rp ? rp.r.state.position : undefined));
     // With nothing heard there are no issues to list, but bad CRCs still say so
     const words = V.issuesText(f, t);
     paint($('issues'), esc(f.summary(t).heard || words !== 'No issues' ? words : ''));
@@ -827,10 +683,11 @@
   }
 
   // A replay is a recording of something that already happened, so it never alarms.
-  function watchForLost(f, t) {
+  // The state is the app's; the page only notices it change.
+  function watchForLost(t) {
     if (view.mode === 'replay') return;
-    for (const u of f.units.values()) {
-      const st = f.state(u, t);
+    for (const u of live.units.values()) {
+      const st = live.state(u);
       const was = heard.get(u.csid);
       if (was && was !== 'LOST' && st === 'LOST') {
         beep(3);
@@ -846,7 +703,7 @@
     let o = null;
     if (u) {
       const all = runsOf(f, u.csid);
-      o = { state: f.state(u, t), t, run: all.indexOf(u) + 1, runs: all.length, cfg: settings, replay: view.mode === 'replay',
+      o = { state: f.state(u, t), t, run: all.indexOf(u) + 1, runs: all.length, cfg: f.cfg, replay: view.mode === 'replay',
         rx: u.receptions.map((r) => ({ name: rxName(r.rx), rssi: r.rssi, snr: r.snr })) };
     }
     paint($('latest'), V.detailHtml(u, o));
@@ -904,12 +761,13 @@
       const port = replaying ? null : hub.ports.find((p) => p.key === k);
       const m = meta(k);
       const st = V.receiverState(r, port, t);
-      const kind = m.source === 'csv' ? 'CSV firmware' : m.source === 'raw' ? 'raw firmware' : '';
+      const source = f.rxSource.get(k);
+      const kind = source === 'csv' ? 'CSV firmware' : source === 'raw' ? 'raw firmware' : '';
       const detail = [kind, r ? V.num(r.unique) + ' new, ' + V.num(r.packets - r.unique - r.badCrc) + ' duplicate' : '',
         r && r.badCrc ? V.num(r.badCrc) + ' bad CRC' : '', r && r.radioErrors ? V.num(r.radioErrors) + ' radio errors' : '',
         port && port.usb ? 'USB ' + port.usb : '', port && port.error ? port.error : '']
         .filter(Boolean).join('\n');
-      const controls = replaying ? '' : (hub.native && r && r.info.sf ? sfSelect(k, r.info.sf) : '') +
+      const controls = replaying ? '' : (r && r.info.sf ? sfSelect(k, r.info.sf) : '') +
         (port && port.status === 'open' ? '<button data-close="' + esc(k) + '" title="Disconnect" aria-label="Disconnect ' + esc(rxName(k)) + '">✕</button>' : '');
       return V.receiverRowHtml({ key: k, name: rxName(k), id: r && r.id, sf: r && r.info.sf, packets: r ? r.unique : 0,
         word: st.word, cls: st.cls, index: m.index, detail, controls, sel: view.rxSel === k });
@@ -943,7 +801,6 @@
     paint($('receivers'), rows.join(''));
     if (api.onReceivers) api.onReceivers();
     renderClear();
-    $('mode').textContent = view.replay ? '' : (recorder.lines ? recorder.lines + ' lines this session' : '');
   }
   $('receivers').addEventListener('click', (e) => {
     const k = e.target.dataset.close;
@@ -1009,41 +866,35 @@
     // Another screen is up. The alarm and the bar carry on; the dashboard is not drawn,
     // and is drawn in full when it comes back.
     if ($('dash').hidden) {
-      watchForLost(f, t);
+      watchForLost(Date.now());
       renderReceivers();
-      renderRecorder();
       return;
     }
     renderSummary(f, t);
     renderFleet(f, t);
+    // The selected run's graph from before this page opened, asked once per run and connection
+    client().wantHistory(view.sel);
     renderLatest(f, t);
-    watchForLost(f, t);
+    watchForLost(Date.now());
     renderReceivers();
-    renderRecorder();
     if (view.mode === 'replay') renderReplayProgress();
     if (force || Date.now() - lastChart > 500) {
       lastChart = Date.now();
       const u = view.sel === null ? null : f.unit(view.sel);
       $('graph-title').textContent = u ? 'CSID ' + u.csid + ' history' : 'History';
-      charts.update(u, { windowMin: settings.graphWindowMin, lineWidth: settings.lineWidth, saturationMps2: settings.saturationMps2 });
+      charts.update(u, { windowMin: settings.graphWindowMin, lineWidth: settings.lineWidth, saturationMps2: f.cfg.saturationMps2 });
     }
   }
 
-  // Live needs redrawing because time passes: ages grow, units go stale. A paused replay
-  // is a still picture of a moment that has already happened, and redrawing it four times
-  // a second over thousands of points is what made the page impossible to click.
+  // Live needs redrawing because time passes: ages grow, units go stale. A replay redraws
+  // when the app says it moved; a paused one is a still picture, and redrawing it four
+  // times a second over thousands of points is what made the page impossible to click.
   setInterval(() => {
     if (view.mode === 'replay') return;
     render();
   }, 250);
   render(true);
 
-  // Offline copy for the hosted site. file:// pages don't need it.
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
-
-  // Handle for manual checks in the console.
   // Late, because switching views draws the whole dashboard and that reaches helpers
   // defined further down this file.
   $('view-live').addEventListener('click', () => showView('live'));
@@ -1051,7 +902,7 @@
   showView('live');
 
   window.DGApp = Object.assign(api, {
-    live, view, hub, recorder, autosave, startReplay, seek, settings: () => settings, taps,
+    live, view, hub, model, openReplay, closeReplay, settings: () => settings, taps, packetTaps,
     showView, openServerLog, rxName,
     // The plots were sized for a hidden box while another screen was up.
     redraw: () => { render(true); charts.resize(); },

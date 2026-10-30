@@ -1044,13 +1044,12 @@ async function pull(anyConsole) {
     render();
   }
 
-  // A log as a table, straight from the file the app wrote.
+  // A log as a table, written by the app from the file it wrote.
   async function saveCsv(name) {
     try {
-      const r = await fetch(logUrl(name));
+      const r = await fetch(logUrl(name).replace(/^api\/log\//, 'api/csv/'));
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      const events = DG.recorder.mergeFiles([DG.recorder.parseLogFile(await r.text(), name, 0)]);
-      const csv = DG.exportcsv.toCsv(events);
+      const csv = await r.text();
       const count = csv.split('\n').length - 2;   // less the header and the last newline
       if (count < 1) { toast('Nothing to save: no packet in this log passes its CRC.'); return; }
       const out = flatName(name).replace(/\.[^.]*$/, '') + '.csv';

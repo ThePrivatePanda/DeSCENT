@@ -93,18 +93,22 @@ test('the names the js reads through getComputedStyle are plain values', () => {
 });
 
 // The ids of the 1.2.2 page, and which of them started hidden or disabled.
-const IDS_122 = ('view-chipsats view-tbeams view-live view-data view-replay btn-connect receivers mode strip strip-rx ' +
+const IDS_122 = ('view-chipsats view-tbeams view-live view-data view-replay btn-connect receivers strip strip-rx ' +
   'strip-log strip-log-name strip-log-save strip-log-new strip-job strip-build strip-release strip-release-version ' +
-  'strip-release-link recpanel rec-state rec-start rec-pause rec-stop rec-info btn-save file-open btn-settings btn-theme ' +
-  'recover recover-text recover-open recover-download recover-discard replay rp-play rp-speed rp-pos rp-time rp-save ' +
-  'rp-csv rp-raw rp-exit rp-file unsupported dash sel-unit btn-pause latest clear-what cl-toggle btn-clear clear-opts ' +
+  'strip-release-link file-open btn-settings btn-theme ' +
+  'replay rp-play rp-speed rp-pos rp-time rp-save ' +
+  'rp-csv rp-raw rp-exit rp-file dash sel-unit btn-pause latest clear-what cl-toggle btn-clear clear-opts ' +
   'cl-units cl-sel cl-rx cl-hidden cl-log summary sort btn-hide btn-restore fleet fleet-empty graph-title tabs window ' +
   'charts screen-chipsats cs-look cs-list cs-sheet screen-tbeams tb-ident tb-ident-stop tb-list tb-sheet screen-data ' +
   'data-where data-look data-table data-empty data-detail settings settings-close settings-form built settings-reset toast').split(' ');
 const HIDDEN_122 = ['view-chipsats', 'view-tbeams', 'view-data', 'strip', 'strip-job', 'strip-build', 'strip-release',
-  'file-open', 'recover', 'replay', 'rp-raw', 'unsupported', 'clear-opts', 'screen-chipsats', 'tb-ident-stop',
+  'file-open', 'replay', 'rp-raw', 'clear-opts', 'screen-chipsats', 'tb-ident-stop',
   'screen-tbeams', 'screen-data', 'data-empty', 'data-detail', 'settings', 'toast'];
-const DISABLED_122 = ['view-replay', 'rec-pause', 'rec-stop'];
+const DISABLED_122 = ['view-replay'];
+// 1.4: the browser's own recording, the crash autosave and Web Serial went with the page's
+// decoder; the app records every line and Save a copy in the strip downloads it.
+const GONE_14 = ('mode recpanel rec-state rec-start rec-pause rec-stop rec-info btn-save ' +
+  'recover recover-text recover-open recover-download recover-discard unsupported').split(' ');
 
 const tagOf = (id) => {
   const m = new RegExp('<[a-z][a-z0-9]*\\b[^>]*\\bid="' + id + '"[^>]*>').exec(html);
@@ -126,6 +130,7 @@ test('every id of the 1.2.2 page and every id the js asks for is in index.html',
   assert.deepStrictEqual([...new Set(missing)], []);
   assert.deepStrictEqual(HIDDEN_122.filter((id) => !/\shidden[\s>]/.test(tagOf(id) || '')), [], 'still hidden at load');
   assert.deepStrictEqual(DISABLED_122.filter((id) => !/\sdisabled[\s>]/.test(tagOf(id) || '')), [], 'still disabled at load');
+  assert.deepStrictEqual(GONE_14.filter((id) => tagOf(id) || asked.has(id) || painted.has(id)), [], 'gone from the page and the js');
 });
 
 test('app.js reaches into #fleet tbody at load, so #fleet is still a table with one', () => {

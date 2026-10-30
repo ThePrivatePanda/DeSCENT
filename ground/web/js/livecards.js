@@ -2,7 +2,8 @@
 // and reading columns, the receiver rows and the Runs tab. No DOM and no page state, so
 // node can test it; app.js decides what is shown and paints it.
 (function (root, factory) {
-  const P = typeof require === 'function' ? require('./packet.js') : root.DG.packet;
+  // the validity bits and field groups; the packet itself is decoded in the app
+  const P = typeof require === 'function' ? require('./stream.js') : root.DG.stream;
   const mod = factory(P);
   if (typeof module === 'object' && module.exports) module.exports = mod;
   else root.DGLive = mod;
@@ -141,7 +142,7 @@
       row('Counter', num(d.values.counter, 0)),
       row('Cell voltage', v.soc ? num(d.values.battery, 2) : '—', 'V'),
       row('Interval', Number.isFinite(u.intervalMs) ? num(u.intervalMs / 1000, 2) : '—', 's'),
-      row('CRC', crc, d.crcReceived.toString(16).toUpperCase().padStart(4, '0')),
+      row('CRC', crc, Number.isFinite(d.crcReceived) ? d.crcReceived.toString(16).toUpperCase().padStart(4, '0') : ''),
       row('Packets', num(u.packets, 0)), row('Missed', num(u.missed, 0)), row('Resets', num(u.resets, 0)),
       row('Received', expected ? num(100 * u.packets / expected, 1) : '—', '%'),
     ].concat((o.rx || []).map((r) => row(esc(r.name), num(r.rssi, 1) + ' / ' + num(r.snr, 2), 'dBm/dB')));
