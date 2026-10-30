@@ -151,6 +151,15 @@ test('the fake page draws a mark the way screens.js does', () => {
   }
 });
 
+// The ring that marks a control the build would replace is on a span round it, but the phase
+// card carries the same class, so a bare .changed rule in chipsats.css restyles the card too
+// (2026-10-30: it turned the card into an inline-flex row on the first keystroke)
+test('chipsats.css styles the changed ring on span.changed only', () => {
+  const css = fs.readFileSync(path.join(WEB, 'css', 'chipsats.css'), 'utf8');
+  const bare = [...css.matchAll(/^[^{]*?(?:^|[\s,>])\.changed\b[^{]*\{/gm)].map((m) => m[0].trim());
+  assert.deepStrictEqual(bare, [], 'selectors that reach every .changed, the phase card included');
+});
+
 test('every literal mark() class in the js is one of good, off, warn, bad', () => {
   const dir = path.join(WEB, 'js');
   const bad = [];

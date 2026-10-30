@@ -74,6 +74,9 @@
   --color-fill: #8c491a;
   --color-fill-hover: #643312;
   --color-fill-2: #56633f;
+  /* A control's fill: one step off whatever it sits on. On a surface box the card colour instead */
+  --color-control: var(--color-surface);
+  --color-control-on-surface: var(--color-neutral-100);
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235f5c5a' stroke-width='2.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
   /* Old names, plain hex: charts.js reads them through getComputedStyle,
@@ -115,6 +118,7 @@
     --color-neutral-700: #b8b2ae; --color-neutral-800: #d7d3d3; --color-neutral-900: #f3f2f2;
     --color-accent-100: #4d170e; --color-accent-200: #5c2a1a; --color-accent-700: #f2a477; --color-accent-800: #ffc4b8;
     --color-accent-2-200: #272e1b; --color-accent-2-700: #b3c398; --color-accent-2-800: #ccdbb2;
+    --color-control: #3a3736; --color-control-on-surface: #3a3736;
     --shadow-lg: 0 0 0 1px color-mix(in srgb, #f3f2f2 12%, transparent), 0 12px 32px rgba(0, 0, 0, .5);
     --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b6b4b4' stroke-width='2.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     --bg: #1a1817; --panel: #2d2b2b; --sunk: #262322; --rule: #333030; --rule-strong: #444141;
@@ -131,6 +135,7 @@
   --color-neutral-700: #b8b2ae; --color-neutral-800: #d7d3d3; --color-neutral-900: #f3f2f2;
   --color-accent-100: #4d170e; --color-accent-200: #5c2a1a; --color-accent-700: #f2a477; --color-accent-800: #ffc4b8;
   --color-accent-2-200: #272e1b; --color-accent-2-700: #b3c398; --color-accent-2-800: #ccdbb2;
+  --color-control: #3a3736; --color-control-on-surface: #3a3736;
   --shadow-lg: 0 0 0 1px color-mix(in srgb, #f3f2f2 12%, transparent), 0 12px 32px rgba(0, 0, 0, .5);
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b6b4b4' stroke-width='2.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --bg: #1a1817; --panel: #2d2b2b; --sunk: #262322; --rule: #333030; --rule-strong: #444141;
@@ -170,12 +175,12 @@ button, .button {
 }
 select {
   appearance: none; cursor: pointer; padding: 0 34px 0 14px; max-width: 100%;
-  background-color: var(--color-surface); background-image: var(--select-chevron);
+  background-color: var(--color-control); background-image: var(--select-chevron);
   background-repeat: no-repeat; background-position: right 12px center; background-size: 14px 14px;
 }
 /* A select that reads as text, like "by attention" */
 select.quiet { border-color: transparent; background-color: transparent; padding: 0 22px 0 6px; background-position: right 4px center; font-size: 12.5px; color: var(--color-text-70); }
-input[type=text], input[type=number], input[type=search], input:not([type]) { background: var(--color-surface); padding: 0 14px; min-width: 0; }
+input[type=text], input[type=number], input[type=search], input:not([type]) { background: var(--color-control); padding: 0 14px; min-width: 0; }
 input::placeholder { color: var(--color-text-70); font-weight: 400; }
 a.button { text-decoration: none; }
 button:hover, .button:hover, select:hover { background-color: color-mix(in srgb, var(--color-text) 7%, transparent); }
@@ -658,7 +663,7 @@ details.fold > .pane > h3:first-child { display: none; }
 .field .hint { grid-column: 1; }
 .field > input, .field > select { grid-column: 2; grid-row: 1 / span 2; width: 100%; font-weight: 700; }
 /* The checkbox is still the input; On and Off are its two faces */
-.toggle { grid-column: 2; grid-row: 1 / span 2; justify-self: start; position: relative; display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--color-surface); cursor: pointer; }
+.toggle { grid-column: 2; grid-row: 1 / span 2; justify-self: start; position: relative; display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--color-control); cursor: pointer; }
 .toggle input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .toggle span { padding: 5px 14px; border-radius: 999px; font: 600 13px/1.2 var(--font-body); color: var(--color-neutral-700); }
 .toggle input:checked ~ .t-on { background: var(--color-accent-2-200); color: var(--color-accent-2-800); }

@@ -11,7 +11,9 @@ Names are the design handoff's. Dark swaps the values below, and the plain-hex a
 | Token | Light | Dark | Meaning (only this) |
 |---|---|---|---|
 | `--color-bg` | `#faf8f5` | `#1a1817` | The page ground |
-| `--color-surface` | `#f1eee8` | `#262322` | A panel (`.pane`), a filled input, a sub-card |
+| `--color-surface` | `#f1eee8` | `#262322` | A panel (`.pane`), a sub-card |
+| `--color-control` | surface | `#3a3736` | The fill of a select, a text input, a segmented control, a toggle track: one step off the card it sits on |
+| `--color-control-on-surface` | neutral-100 | `#3a3736` | The same control inside a surface box (a phase card), where it takes the card colour |
 | `--color-neutral-100` | `#ffffff` | `#2d2b2b` | A card inside a panel, a raised pane, the picked row |
 | `--color-neutral-200` | `#f3f0eb` | `#333030` | A hairline between rows inside a card |
 | `--color-neutral-300` | `#e3dfd8` | `#444141` | A track, the fill of an `off` mark, a filter pill's border |
@@ -85,7 +87,7 @@ The floors: nothing is under 12.5 px except the 11 px group (kickers and table h
 
 ## Controls
 
-- Pills, all of them: `border-radius: 999px`, `--ch` high (36 px; 26 to 30 px inside a row, a receiver or a table). A button is transparent with a 1 px divider border, a select or text input is the same on `--color-surface`. Hover tints the text colour at 7 % and pressing at 12 %. Disabled is 45 % opacity.
+- Pills, all of them: `border-radius: 999px`, `--ch` high (36 px; 26 to 30 px inside a row, a receiver or a table). A button is transparent with a 1 px divider border, a select or text input is the same on `--color-control` (`--color-control-on-surface` inside a surface box), never on the colour it sits on. Hover tints the text colour at 7 % and pressing at 12 %. Disabled is 45 % opacity.
 - Primary is solid `--color-fill` (accent-700) with white text, hover accent-800.
 - Ghost is no border, accent-700 text, underlined on hover. It is for a link-like action: Rescan, New file, Show hidden units, Look for a probe.
 - A selected `button.on` is sage-200 on sage-800. A filter is a pill with its count (`.fpill`), the same sage when on. An open-in-place list is an `.expander` with a ▾.

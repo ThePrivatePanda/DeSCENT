@@ -49,14 +49,14 @@
 #screen-chipsats .step .hint .val { font-weight: 600; }
 #screen-chipsats .chg { color: var(--color-accent-700); font-weight: 700; }
 /* a control whose value would replace the board's */
-#screen-chipsats .changed { display: inline-flex; border-radius: 999px; box-shadow: 0 0 0 2px var(--color-accent); }
+#screen-chipsats span.changed { display: inline-flex; border-radius: 999px; box-shadow: 0 0 0 2px var(--color-accent); }
 
 /* 1 Identity and radio */
 #screen-chipsats .form { display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 16px 12px; align-items: start; font-size: 13.5px; }
 #screen-chipsats .form > .l { padding-top: 9px; color: var(--color-text-70); }
 #screen-chipsats .form input[type=text] { width: 90px; }
 #screen-chipsats .form select { width: 124px; }
-#screen-chipsats .seg { background: var(--color-surface); border-color: transparent; padding: 3px; }
+#screen-chipsats .seg { background: var(--color-control); border-color: transparent; padding: 3px; }
 #screen-chipsats .seg button { min-height: 30px; padding: 0 16px; }
 #screen-chipsats .seg button.on { background: var(--color-fill-2); color: #fff; font-weight: 700; }
 
@@ -68,6 +68,8 @@
 #screen-chipsats .phase-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; font-size: 12.5px; }
 #screen-chipsats .phase-row .ctl { display: inline-flex; align-items: center; gap: 6px; }
 #screen-chipsats .phase-row input { width: 58px; min-height: 32px; padding: 0 10px 0 6px; text-align: right; }
+/* On a surface box the control takes the card colour, as the handoff draws it */
+#screen-chipsats .phase input[type=text] { background: var(--color-control-on-surface); }
 #screen-chipsats .phase-row .u { font-size: 12.5px; color: var(--color-text-70); }
 #screen-chipsats .phase .hint { margin: -4px 0 0; }
 #screen-chipsats .phase .check { margin-top: 4px; font-size: 13px; font-weight: 600; }
