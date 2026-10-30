@@ -284,9 +284,10 @@
       }
     }
 
-    // The series the app holds for a run, for a page that opened after it started: what
-    // fleet.js's history() gave, {history, rxHistory}. Points that came on the stream while
-    // it was being asked for are kept on the end. A bare series is taken as the history.
+    // The series the app holds for a run, for a page that opened after it started: the flat
+    // series fleet.js kept ({t, counter, rssi, snr, <fields>}) with rxHistory beside it, or
+    // the same under {history, rxHistory}. Points that came on the stream while it was being
+    // asked for are kept on the end.
     setHistory(label, got) {
       const row = this.appRows.get(String(label));
       if (!row || !got) return false;
@@ -355,6 +356,9 @@
       const key = String(m.id);
       const raw = receiverFrom(m, this.rawRx.get(key));
       this.rawRx.set(key, raw);
+      // The app's own word on the firmware and on lines off a chip; their lines say it too
+      if (m.format === 'raw' || m.format === 'csv') this.rxSource.set(key, m.format);
+      if (m.source && typeof m.source === 'object') this.sources.set(key, m.source);
       this.showRx(key);
     }
 

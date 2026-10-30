@@ -50,14 +50,16 @@ function loadJsonl(file) {
   });
 }
 
-// The master's recorded streams, docs/internals/frontend/fixtures/stream-*.jsonl, in this
-// checkout or in the main one this worktree hangs off.
+// Recorded streams of the app: the head of one in test/data, and the master's whole ones,
+// docs/internals/frontend/fixtures/stream-*.jsonl (gitignored), in this checkout or in the
+// main one this worktree hangs off.
+const HEAD = path.join(__dirname, '..', 'data', 'stream-1402-head.jsonl');
 function fixtures() {
   const repo = path.resolve(__dirname, '..', '..', '..');
   const roots = [repo];
   const at = repo.indexOf(path.sep + '.worktrees' + path.sep);
   if (at > 0) roots.push(repo.slice(0, at));
-  const out = [];
+  const out = fs.existsSync(HEAD) ? [HEAD] : [];
   for (const r of roots) {
     const dir = path.join(r, 'docs', 'internals', 'frontend', 'fixtures');
     if (!fs.existsSync(dir)) continue;
@@ -66,4 +68,4 @@ function fixtures() {
   return out;
 }
 
-module.exports = { fakeNet, numbered, loadJsonl, fixtures };
+module.exports = { fakeNet, numbered, loadJsonl, fixtures, HEAD };

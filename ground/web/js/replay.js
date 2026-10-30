@@ -27,6 +27,7 @@
       kept: j.from && typeof j.from === 'object' ? j.from : null,
       t: typeof j.t === 'number' ? j.t : typeof j.clock === 'number' ? j.clock : null,
       playing: !!j.playing, speed: j.speed === undefined ? null : Number(j.speed),
+      names: Array.isArray(j.names) ? j.names.map(String) : null,
     };
   }
 
@@ -63,7 +64,10 @@
       const r = await o.fetch('/api/replay/open?' + q.toString(), { method: 'POST', body });
       const j = await answered(r);
       if (j.id === undefined || j.id === null) throw new Error(j.error || 'the app gave no replay id');
-      return new Replay(j.id, o).start();
+      const replay = new Replay(j.id, o);
+      // the reply is the replay's state
+      replay.state = stateFrom(j);
+      return replay.start();
     }
 
     start() { this.stream.start(); return this; }
