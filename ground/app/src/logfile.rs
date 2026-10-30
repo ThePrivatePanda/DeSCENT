@@ -44,11 +44,7 @@ impl Log {
     }
 
     pub fn write_line(&mut self, t_ms: u128, rx: &str, text: &str) {
-        let clean: String = text
-            .chars()
-            .map(|c| if c == '\t' || c == '\r' || c == '\n' { ' ' } else { c })
-            .collect();
-        let _ = writeln!(self.file, "{}\t{}\t{}", t_ms, rx, clean);
+        let _ = writeln!(self.file, "{}\t{}\t{}", t_ms, rx, one_field(text));
     }
 
     pub fn flush(&mut self) {
@@ -70,6 +66,11 @@ pub fn rotate(slot: &Mutex<Option<Log>>, data: &Path) -> Result<PathBuf, String>
     }
     *slot = Some(new);   // the old one is dropped here, after its flush
     Ok(path)
+}
+
+// A line as the log keeps it: a tab would split the field and a CR or LF the line
+pub fn one_field(text: &str) -> String {
+    text.chars().map(|c| if c == '\t' || c == '\r' || c == '\n' { ' ' } else { c }).collect()
 }
 
 pub fn now_ms() -> u128 {

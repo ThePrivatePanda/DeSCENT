@@ -15,6 +15,8 @@ mod framing;
 mod json;
 mod layout;
 mod lines;
+#[cfg(test)]
+mod live_path;
 mod localfw;
 mod logfile;
 mod opts;
@@ -203,14 +205,7 @@ fn main() {
     let mut since_flush = std::time::Instant::now();
     for ev in rx {
         match ev {
-            serial::Event::Line { key, t_ms, text } => {
-                if let Ok(mut l) = log.lock() {
-                    if let Some(l) = l.as_mut() {
-                        l.write_line(t_ms, &key, &text);
-                    }
-                }
-                live.line(&key, t_ms as f64, &text, true);
-            }
+            serial::Event::Line { key, t_ms, text } => take_line(&log, &live, &key, t_ms, &text),
             serial::Event::Ports => {
                 broadcast.send(&ws::ports_frame());
                 let ports = hub.lock().unwrap().ports();
@@ -229,6 +224,19 @@ fn main() {
     // Only reached if every receiver's sender has gone. Out the same way /api/quit
     // goes, so the log is flushed and the url file removed either way.
     server::shutdown(&ctx, "stopping: nothing left to read");
+}
+
+// Every line a reader thread sends: into the log, then out to the live stream. Both
+// get the text as the log keeps it, so a replay of the log is what was seen live; a
+// tab or a lone CR inside a line reads as a space either way.
+fn take_line(log: &Mutex<Option<logfile::Log>>, live: &stream::Stream, key: &str, t_ms: u128, text: &str) {
+    let text = logfile::one_field(text);
+    if let Ok(mut l) = log.lock() {
+        if let Some(l) = l.as_mut() {
+            l.write_line(t_ms, key, &text);
+        }
+    }
+    live.line(key, t_ms as f64, &text, true);
 }
 
 // --stop from the outside. Nothing running is not a fault of ours, but a script that
