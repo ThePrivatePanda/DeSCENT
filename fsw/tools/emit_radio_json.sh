@@ -9,9 +9,9 @@ test="$here/V2_6_X_Tests"
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 echo "{"
-echo '  "layoutVersion": 3,'
 echo '  "spreadingFactor": {"min": 5, "max": 12},'
-# the transmit rate per phase a fresh image carries, from config.h, so the dashboard prefills the same numbers
+# the block layout and the rate slots a fresh image carries, from the headers, so the dashboard
+# prefills the same numbers and can tell a tree that writes another layout
 g++ -std=gnu++17 -I"$test/test/mock" -I"$src" "$test/test/emit_battery_json.cpp" -o "$out/battery"
 "$out/battery"
 echo ","

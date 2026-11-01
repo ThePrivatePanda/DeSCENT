@@ -52,13 +52,14 @@ int main(int argc, char** argv)
       printf("  the board would run: csid %u  module %s  sf %u  dbm %d  set by %s\n",
              s.csid, s.module == kModuleHp ? "hp" : "le", s.spreadingFactor, s.targetDbm,
              s.setBy == kSetByTool ? "tool" : "build");
-      for (size_t p = 0; p < kPhases; p++) {
-        static const char* names[4] = {"waiting", "rising", "falling", "landed"};
-        printf("    %-8s every %u ms%s", names[p], s.rate[p].fixedMs, s.rate[p].fromSoc ? ", by battery:" : "\n");
-        if (s.rate[p].fromSoc) {
+      for (size_t slot = 0; slot < kRateSlots; slot++) {
+        static const char* names[kRateSlots] = {"ground transmit", "air transmit", "ground log", "air log"};
+        const Rate& rate = slot < kPhases ? s.transmit[slot] : s.log[slot - kPhases];
+        printf("    %-15s every %u ms%s", names[slot], rate.fixedMs, rate.fromSoc ? ", by battery:" : "\n");
+        if (rate.fromSoc) {
           for (size_t i = 0; i < kSocBands; i++) {
-            if (i < kSocBands - 1) printf(" %u ms >= %u %%,", s.rate[p].socIntervalMs[i], s.rate[p].socPercent[i]);
-            else printf(" then %u ms\n", s.rate[p].socIntervalMs[i]);
+            if (i < kSocBands - 1) printf(" %u ms >= %u %%,", rate.socIntervalMs[i], rate.socPercent[i]);
+            else printf(" then %u ms\n", rate.socIntervalMs[i]);
           }
         }
       }

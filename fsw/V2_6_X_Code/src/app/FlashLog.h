@@ -120,7 +120,8 @@ public:
   void setAir(bool air);
 
   // One packet record per this many ms is kept on the ground, plus time and event records. 0 keeps
-  // only the boot event. Goes by the record's own uptime
+  // only the boot event, so no time anchors either. Goes by the record's own uptime. The controller
+  // moves it with the battery, a record already in the ring keeps the decision made for it
   void setGroundGapMs(uint32_t ms) { groundGapMs_ = ms; }
 
   // Starts erasing the next sector if the log needs it and returns straight away. Keeps one erased

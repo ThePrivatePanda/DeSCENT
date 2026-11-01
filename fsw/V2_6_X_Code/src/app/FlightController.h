@@ -11,6 +11,7 @@
 #include "../platform/I2cBus.h"
 #include "../platform/System.h"
 #include "../platform/Uart.h"
+#include "../Settings.h"
 #include "../devices/Flash.h"
 #include "FlashLog.h"
 #include "Health.h"
@@ -62,6 +63,7 @@ private:
   void sampleSensors();     // each sensor at its own pace, nothing waits on the radio
   void followPhase();       // hands fresh readings to the phase and acts on a change
   uint32_t phaseTxIntervalMs(bool socOkay);
+  void updateLogGaps(bool socOkay);
   void logIfDue();
   void anchorUtc(uint32_t nowMs);
   void buildPacket(ChipSatTelemetry::TelemetryPacket &into, bool &allFresh, uint16_t counter);
@@ -105,6 +107,7 @@ private:
   uint32_t previousReadMs_ = 0;
   bool phaseDue_ = false;   // a phase change wants the next packet now
   uint32_t txIntervalMs_;
+  uint32_t logGapMs_[ChipSatSettings::kPhases] = {};   // what each log rate gives for the charge now
   uint32_t resetCsr_ = 0;
   uint32_t cycle_ = 0;   // for logging
   bool radioReady_ = false;

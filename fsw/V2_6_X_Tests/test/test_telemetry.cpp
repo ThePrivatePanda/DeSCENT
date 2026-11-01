@@ -1,6 +1,6 @@
-// Telemetry.cpp and TxInterval.cpp on the laptop. Writes 20000 packets to the file you name, diff
+// Telemetry.cpp and RateGap.cpp on the laptop. Writes 20000 packets to the file you name, diff
 // that against test_v25_telemetry's to check the ground station can still decode us
-//   g++ -std=gnu++17 -Wall -Wextra -Itest/mock -I../V2_6_X_Code/src -I../V2_6_X_Code/src/app test/test_telemetry.cpp ../V2_6_X_Code/src/app/{Telemetry,TxInterval}.cpp -o /tmp/enc && /tmp/enc /tmp/enc.txt
+//   g++ -std=gnu++17 -Wall -Wextra -Itest/mock -I../V2_6_X_Code/src -I../V2_6_X_Code/src/app test/test_telemetry.cpp ../V2_6_X_Code/src/app/{Telemetry,RateGap}.cpp -o /tmp/enc && /tmp/enc /tmp/enc.txt
 #include <stdint.h>
 #include <cstdio>
 #include <cstring>
@@ -9,8 +9,8 @@
 #include "Telemetry.h"
 
 
-#include "TxInterval.h"
-using ChipSatApp::txIntervalFromSoc;
+#include "RateGap.h"
+using ChipSatApp::gapFromRate;
 
 using ChipSatSensors::SensorData;
 using ChipSatTelemetry::TelemetryPacket;
@@ -103,15 +103,20 @@ int main(int argc, char **argv) {
     {35.0f, 60000}, {34.99f, 120000}, {20.0f, 120000}, {19.99f, 180000}, {0.0f, 180000}, {NAN, 180000}};
   // the table as the build ships it; a charge at exactly a threshold is in the band above it
   ChipSatSettings::Rate table{};
+  table.fixedMs = 7000;
+  table.fromSoc = true;
   const uint8_t pct[4] = {75, 50, 35, 20};
   const uint32_t ms[5] = {10000, 30000, 60000, 120000, 180000};
   for (size_t i = 0; i < 4; i++) table.socPercent[i] = pct[i];
   for (size_t i = 0; i < 5; i++) table.socIntervalMs[i] = ms[i];
   for (auto &c : iv) {
-    char what[96]; uint32_t got = txIntervalFromSoc(table, c.soc);
-    snprintf(what, sizeof what, "txIntervalFromSoc(%g) = %u ms (want %u)", c.soc, got, c.ms);
+    char what[96]; uint32_t got = gapFromRate(table, true, c.soc);
+    snprintf(what, sizeof what, "gapFromRate(%g) = %u ms (want %u)", c.soc, got, c.ms);
     check(got == c.ms, what);
   }
+  check(gapFromRate(table, false, 10.0f) == 7000, "the gauge can't be read: the fixed gap");
+  table.fromSoc = false;
+  check(gapFromRate(table, true, 10.0f) == 7000, "not following the battery: the fixed gap");
 
   FILE *f = fopen(vecPath, "w");
   const int N = 20000;

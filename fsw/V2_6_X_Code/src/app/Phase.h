@@ -7,7 +7,8 @@ namespace ChipSatApp
 
 // Where the sat is in its flight, from an altitude source and the IMU. A board is switched on
 // mounted on the drone, often long before it flies, so the phase sets how fast it transmits and how
-// much the flash log keeps: slow and a trickle on the ground, fast and everything in the air
+// much the flash log keeps: slow and a trickle on the ground, fast and everything in the air. Both
+// come from the settings block, a transmit rate and a log rate for each phase
 //
 //   Ground  switched on, and again once it has come to rest. Handling it doesn't move it out of
 //           here, only climbing does. The baseline it climbs from tracks slowly while quiet
