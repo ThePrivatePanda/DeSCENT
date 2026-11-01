@@ -72,6 +72,21 @@ function dashboard(o) {
     body: { dataset: {} },
   };
   class FakeBlob { constructor(parts, opt) { this.parts = parts; this.type = opt && opt.type; } }
+  // Every tone the page starts: [frequency it starts at, frequency it slides to or null, length s]
+  const sounds = [];
+  class FakeAudio {
+    constructor() { this.currentTime = 0; this.state = 'running'; this.destination = {}; }
+    createGain() { const g = { connect: () => g, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } }; return g; }
+    createOscillator() {
+      const o = { start: 0, to: null, at: 0, connect: () => o, frequency: { value: 0 } };
+      o.frequency.setValueAtTime = (hz, at) => { o.start = hz; o.at = at; };
+      o.frequency.exponentialRampToValueAtTime = (hz) => { o.to = hz; };
+      o.start = (at) => { o.at = at; };
+      o.stop = (at) => { sounds.push([o.frequency.value || o.hz, o.to, Math.round((at - o.at) * 100) / 100]); };
+      o.frequency.setValueAtTime = (hz, at) => { o.hz = hz; o.at = at; };
+      return o;
+    }
+  }
   const sandbox = {
     console, document, fetch, WebSocket: net.WebSocket, Blob: FakeBlob, URLSearchParams, Intl, Math, JSON, Date, Number,
     location: { protocol: 'http:', host: '127.0.0.1:8791', search: o.search },
@@ -89,6 +104,7 @@ function dashboard(o) {
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
     addEventListener() {},
     uPlot: class { constructor(opts, data) { this.data = data; this.width = 600; this.height = 190; this.cursor = { idx: null }; } setData(d) { this.data = d; } setSize() {} },
+    AudioContext: FakeAudio,
   };
   sandbox.window = sandbox;
   sandbox.self = sandbox;
@@ -101,7 +117,7 @@ function dashboard(o) {
   }
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    $, els, calls, net, downloads, stored, model, settle, sandbox, scripts, app: sandbox.DGApp,
+    $, els, calls, net, downloads, stored, model, settle, sandbox, scripts, sounds, app: sandbox.DGApp,
     posts: () => calls.filter((c) => c.method === 'POST'),
     // every timer of that period, once
     async every(ms) { for (const t of intervals.filter((x) => x.ms === ms)) await t.fn(); await settle(); },

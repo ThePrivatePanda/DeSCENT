@@ -25,17 +25,95 @@ test('live: the unit list is drawn from the stream, and a unit the app calls los
   const p = dashboard();
   await p.settle();
   const ws = p.net.last().open();
-  ws.send(numbered([unit(9), { kind: 'receiver', id: 'rx1', name: 'Mast', sf: 9, packets: 12, dups: 0, badCrc: 0, errors: 0, lastLine: Date.now() }, { kind: 'snapshot-end' }]));
+  const t0 = Date.now() - 5000;   // the run's first packet: the same on every row of the run, as the app sends it
+  ws.send(numbered([unit(9, { firstT: t0 }), { kind: 'receiver', id: 'rx1', name: 'Mast', sf: 9, packets: 12, dups: 0, badCrc: 0, errors: 0, lastLine: Date.now() }, { kind: 'snapshot-end' }]));
   await p.every(250);
   const cards = text(p.$('fleet').querySelector('tbody').innerHTML);
   assert.match(cards, /CSID 9 OK/);
   assert.match(cards, /12 pkts/);
   assert.match(text(p.$('summary').innerHTML), /1 unit · 12 packets/);
   assert.ok(p.calls.some((c) => c.url === '/api/history?label=9'), 'the selected unit\'s graph is asked for');
-  ws.send(Object.assign(unit(9, { state: 'LOST' }), { seq: 4 }));
+  ws.send(Object.assign(unit(9, { state: 'LOST', firstT: t0 }), { seq: 4 }));
   await p.every(250);
   assert.match(p.$('toast').textContent, /^CSID 9 lost after/);
   assert.match(text(p.$('fleet').querySelector('tbody').innerHTML), /CSID 9 Lost/);
+  assert.deepStrictEqual(p.sounds, [[660, null, 0.18], [660, null, 0.18], [660, null, 0.18]], 'three low notes, and nothing for the snapshot');
+});
+
+// The user, 2026-11-01: "beep every time it hears a chipsat. not on every transmission, but
+// basically every time it gets the 0 counter packet ... so I also know if a new 'run' started"
+test('a run starting is one short chirp: a board heard for the first time, or its counter starting again', async () => {
+  const p = dashboard();
+  await p.settle();
+  const ws = p.net.last().open();
+  const t0 = Date.now() - 60000;
+  ws.send(numbered([unit(9, { firstT: t0 }), unit(12, { firstT: t0 }), { kind: 'receiver', id: 'rx1', name: 'Mast', sf: 9, packets: 24, dups: 0, badCrc: 0, errors: 0, lastLine: Date.now() }, { kind: 'snapshot-end' }]));
+  await p.every(250);
+  assert.deepStrictEqual(p.sounds, [], 'the snapshot on load is not news');
+  let seq = 10;
+  const send = (m) => ws.send(Object.assign(m, { seq: seq++ }));
+  // packets and a repeat of the same run from a second receiver: nothing
+  send({ kind: 'packet', csid: 9, label: '9', rx: 'rx1', t: Date.now(), rssi: -80, snr: 9, crcOk: true, values: { csid: 9, counter: 13 }, valid: VALID });
+  send({ kind: 'packet', csid: 9, label: '9', rx: 'rx2', t: Date.now(), rssi: -85, snr: 7, crcOk: true, dup: true, values: { csid: 9, counter: 13 }, valid: VALID });
+  send(unit(9, { firstT: t0, packets: 13, receptions: [{ rx: 'rx1', rssi: -80, snr: 9 }, { rx: 'rx2', rssi: -85, snr: 7 }] }));
+  await p.every(250);
+  assert.deepStrictEqual(p.sounds, []);
+  // a board never heard before
+  send(unit(15, { firstT: Date.now() - 500, packets: 1 }));
+  await p.every(250);
+  assert.deepStrictEqual(p.sounds, [[880, 1320, 0.14]], 'one rising chirp, nothing like the lost alarm');
+  await p.every(250);
+  assert.equal(p.sounds.length, 1, 'said once');
+  // 9 restarts: the app retires its run and sends a new live row with a new first packet time.
+  // Its first packet was missed, so the counter seen is 1, and it still counts
+  p.sandbox.Date = Date;
+  send(unit(9, { label: '9@' + t0, live: false, firstT: t0, state: 'LOST' }));
+  send(unit(9, { firstT: Date.now() - 200, packets: 1 }));
+  await p.every(250);
+  assert.equal(p.sounds.length, 1, 'held off: a second sound within two seconds would be a burst');
+  // after the hold-off the restart is heard
+  const realNow = Date.now;
+  Date.now = () => realNow() + 2500;
+  try {
+    send(unit(9, { firstT: realNow() - 100, packets: 2 }));
+    await p.every(250);
+    assert.equal(p.sounds.length, 2, 'the restart chirps');
+    assert.deepStrictEqual(p.sounds[1], [880, 1320, 0.14]);
+    // two boards up in one pass: one sound
+    Date.now = () => realNow() + 6000;
+    send(unit(21, { firstT: realNow() + 5000, packets: 1 }));
+    send(unit(22, { firstT: realNow() + 5000, packets: 1 }));
+    await p.every(250);
+    assert.equal(p.sounds.length, 3, 'two new boards in one pass are one chirp');
+  } finally { Date.now = realNow; }
+});
+
+test('a reconnect\'s snapshot and a replay make no run sound', async () => {
+  const p = dashboard();
+  await p.settle();
+  let ws = p.net.last().open();
+  const t0 = Date.now() - 5000;
+  ws.send(numbered([unit(9, { firstT: t0 }), { kind: 'snapshot-end' }]));
+  await p.every(250);
+  // the socket drops; the next connection's snapshot has a board that came up meanwhile
+  ws.close();
+  await p.every(250);
+  ws = p.net.last().open();
+  ws.send(numbered([unit(9, { firstT: t0 }), unit(12), { kind: 'snapshot-end' }]));
+  await p.every(250);
+  assert.deepStrictEqual(p.sounds, [], 'a snapshot is never news, also after a reconnect');
+  ws.send(Object.assign(unit(15), { seq: 20 }));
+  await p.every(250);
+  assert.equal(p.sounds.length, 1);
+  // in a replay the live fleet is not listened to
+  await p.fire('file-open', 'change', { files: [{ name: 'drop.log', size: 4, text: async () => 'x' }], value: '' });
+  await p.settle();
+  ws.send(Object.assign(unit(33), { seq: 21 }));
+  p.app.view.mode = 'replay';
+  await p.every(250);
+  p.net.last().open().send(numbered([unit(9, { firstT: t0 }), unit(44), { kind: 'snapshot-end' }]));
+  await p.every(250);
+  assert.equal(p.sounds.length, 1, 'nothing while replaying');
 });
 
 test('the replay bar drives the replay in the app', async () => {
