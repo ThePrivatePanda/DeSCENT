@@ -535,6 +535,7 @@ mod tests {
         broken: Mutex<Vec<&'static str>>,
         // simulates a file saved mid-build
         edit: Mutex<Option<String>>,
+        old_layout: Mutex<bool>,
     }
 
     impl Builder for Arc<Fake> {
@@ -555,6 +556,9 @@ mod tests {
                 return Err(String::from("the flight software did not build.\nconfig.h:60:26: error: static assertion failed: an LE module has rows for 10, 14 and 15 dBm only"));
             }
             if part == "radio.json" {
+                if *self.old_layout.lock().unwrap() {
+                    return Ok(RADIO.replace("\"layoutVersion\": 4", "\"layoutVersion\": 3").into_bytes());
+                }
                 return Ok(RADIO.replace("\"min\": 5", "\"min\": 6").into_bytes());
             }
             Ok(format!("{} built from {}", part, &self.source.lock().unwrap()[..8]).into_bytes())
@@ -562,15 +566,14 @@ mod tests {
     }
 
     const RADIO: &str = r#"{
-  "layoutVersion": 3,
+  "layoutVersion": 4,
   "spreadingFactor": {"min": 5, "max": 12},
-  "phases": [
-    {"name": "waiting", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 1000},
-    {"name": "rising", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 50},
-    {"name": "falling", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 50},
-    {"name": "landed", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 1000}
+  "slots": [
+    {"name": "ground transmit", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000]},
+    {"name": "air transmit", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000]},
+    {"name": "ground log", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [1000, 1000, 1000, 1000, 1000]},
+    {"name": "air log", "fixedMs": 50, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [50, 50, 50, 50, 50]}
   ],
-  "logBlindMs": 200,
   "le": {"dbm": [{"dbm": 10}, {"dbm": 14}, {"dbm": 15}]},
   "hp": {"dbm": [{"dbm": 14}, {"dbm": 17}, {"dbm": 20}, {"dbm": 22}]}
 }"#;
@@ -608,9 +611,22 @@ mod tests {
             builds: AtomicUsize::new(0),
             broken: Mutex::new(Vec::new()),
             edit: Mutex::new(None),
+            old_layout: Mutex::new(false),
         });
         let l = Local::new(Some(data.join("fsw")), &data, Box::new(fake.clone()), carried());
         (Arc::new(l), fake, data)
+    }
+
+    #[test]
+    fn a_tree_at_another_layout_gets_the_carried_table_and_says_why() {
+        let (l, fake, data) = local("old-layout", &[]);
+        *fake.old_layout.lock().unwrap() = true;
+        let e = l.get("radio.json", &|_| {}).unwrap_err();
+        assert!(e.contains("it is for settings block layout 3, and this app writes layout 4"), "{}", e);
+        let (radio, note) = l.radio(true).unwrap();
+        assert_eq!(radio.sf_min, 5, "the carried table");
+        assert!(note.unwrap().contains("layout 3"));
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

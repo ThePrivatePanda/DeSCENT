@@ -97,6 +97,39 @@ GPS time, so a replayed dump cannot be mistaken for live reception. Records off 
 RSSI or SNR, so those columns stay blank and the weak
 RF warning never fires: an absence, not a fault.
 
+## Checking a pull or a log
+
+```
+descent-ground check <pull folder, dump.txt, ground log, or a folder of those>
+```
+
+Prints what happened, worst first, and exits. It only reads files: no port, no board, no server,
+no network, and it does not need the app running or care that one is, so it runs beside a live app
+and at home. Point it at a day folder after a drop and it gives one line per pull or log, then the
+detail. `--json` prints the same thing as JSON, and `/api/check/<name>` answers with that JSON for
+any name `/api/log` takes. It exits 1 only when a path cannot be read, not when a report has faults
+in it.
+
+For a pull it gives the board, the settings line, how much of the log was read, whether the log
+wrapped, and for each boot its reset cause, records, dropped count, gaps, and which of the
+firmware's own validity flags went clear, when and for how long. Each boot gets a one-line verdict
+built from those facts and nothing else. For a ground log it gives each board's packets, missed,
+restarts, RSSI and SNR range, last heard and which receivers heard it, then each receiver.
+
+Values are never judged, only the flags are read. Anything it could not read is counted and the
+first few lines are shown. Some things it cannot know, and it says so:
+
+- flash has no sensor recovery, BUS or phase lines, those only go to the console. A pull has none
+  of them unless a console was caught, and a ground log has them only if a ChipSat was on a port
+- no record says its phase, so a pull gives ground and air by spacing: records under 1.5 s apart
+  are the air rate, and three or more steady slower ones in a row are the ground rate. Picked, not
+  measured. A boot too short to have three shows them as gaps, and going to air writes the ring
+  first, so the fast spacing starts about 30 s before take-off
+- the settings and RST lines in a dump.txt are the board restarting for the pull. They say what
+  it was set to then, not what an older boot ran with, and the log gaps are not on that line
+- a dropped event is written at most every 10 s, so a boot can have lost more than its last count
+- a boot's reset cause is only there on firmware from 2026-10-22 on
+
 ## Log format
 
 ```

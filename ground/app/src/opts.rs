@@ -7,7 +7,10 @@ pub const HELP: &str = "\
 DeSCENT ChipSat: flashes and reads ChipSats and T-Beam receivers, and serves the dashboard.
 
   descent-ground [options]
+  descent-ground check [--json] <pull folder, dump.txt, ground log, or a folder of those>
 
+  check             read a pull or a log and print what happened, worst first, then exit.
+                    Opens no port and starts no server, so it runs beside a live app
   --port <n>        listen on this port only, and stop if it is taken
   --host <addr>     listen on this address instead of 127.0.0.1. 0.0.0.0 is every
                     interface. Anything that can reach it can flash a board, so this

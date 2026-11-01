@@ -126,6 +126,9 @@ pub struct Reception {
     pub rx: String,
     pub rssi: f64,
     pub snr: f64,
+    // What the receiver was on when this packet came in, which stays true after it is
+    // retuned. None until its first header line.
+    pub sf: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -215,6 +218,12 @@ pub struct Receiver {
     pub reported_ok: f64,
     pub reported_errors: f64,
     pub source: Option<Info>,   // not a radio: where its lines came from
+}
+
+impl Receiver {
+    pub fn sf(&self) -> Option<f64> {
+        self.info.iter().find(|(k, _)| k == "sf").map(|(_, v)| js_number(v)).filter(|x| x.is_finite())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -430,6 +439,7 @@ impl Fleet {
             Kind::Empty => return ("empty", None, None),
             Kind::Other => return ("other", None, None),
         };
+        let sf = r.sf();
         r.last_t = Some(t);
         r.packets += 1;
         if !decoded.crc_ok {
@@ -449,7 +459,7 @@ impl Fleet {
             self.duplicates += 1;
             let i = self.live_index(csid);
             if let Some(i) = i {
-                add_reception(&mut self.units[i], rx, rssi, snr, t);
+                add_reception(&mut self.units[i], rx, rssi, snr, sf, t);
             }
             return ("duplicate", i.map(|_| csid), None);
         }
@@ -520,7 +530,7 @@ impl Fleet {
         }
         push_history(&cfg, u, &d, t);
         u.latest = Some(d);
-        add_reception(u, rx, rssi, snr, t);
+        add_reception(u, rx, rssi, snr, sf, t);
         ("new", Some(csid), retired)
     }
 
@@ -880,8 +890,8 @@ fn is_reset_from(last: f64, counter: f64) -> bool {
     (counter < last && !wrapped) || (counter == 0.0 && last == 0.0)
 }
 
-fn add_reception(u: &mut Unit, rx: &str, rssi: f64, snr: f64, t: f64) {
-    u.receptions.push(Reception { rx: rx.to_string(), rssi, snr });
+fn add_reception(u: &mut Unit, rx: &str, rssi: f64, snr: f64, sf: Option<f64>, t: f64) {
+    u.receptions.push(Reception { rx: rx.to_string(), rssi, snr, sf });
     // NaN best: rssi <= NaN is false, so the first finite one goes in
     if rssi.is_finite() && !(rssi <= u.best_rssi) {
         u.best_rssi = rssi;
@@ -987,7 +997,7 @@ impl Row<'_> {
         let receptions: Vec<String> = u
             .receptions
             .iter()
-            .map(|r| format!("{{\"rx\":\"{}\",\"rssi\":{},\"snr\":{}}}", esc(&r.rx), js_num(r.rssi), js_num(r.snr)))
+            .map(|r| format!("{{\"rx\":\"{}\",\"rssi\":{},\"snr\":{},\"sf\":{}}}", esc(&r.rx), js_num(r.rssi), js_num(r.snr), opt_num(r.sf)))
             .collect();
         let last_valid: Vec<String> = u.last_valid.iter().map(|(k, v)| format!("\"{}\":{}", k, js_num(*v))).collect();
         let latest = match &u.latest {
@@ -1192,6 +1202,26 @@ mod tests {
     }
 
     #[test]
+    fn a_reception_keeps_the_sf_its_receiver_was_on_when_the_packet_came_in() {
+        let mut f = Fleet::new(Config::default());
+        let header = |sf: u8| format!("#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf={},cr=7,sync=0x12,pre=8", sf);
+        feed(&mut f, "rx1", &pkt(7, 1, "-90", "5", 127, 0.0), 0.0);
+        assert_eq!(f.unit("7").unwrap().receptions[0].sf, None, "no header yet, so the SF is not known");
+        feed(&mut f, "rx1", &header(12), 1000.0);
+        feed(&mut f, "rx1", &pkt(7, 2, "-90", "5", 127, 0.0), 2000.0);
+        assert_eq!(f.unit("7").unwrap().receptions[0].sf, Some(12.0));
+        // The board goes quiet and the receiver is retuned: the last packet was still SF12
+        feed(&mut f, "rx1", &header(7), 3000.0);
+        let u = f.unit("7").unwrap();
+        assert_eq!(u.receptions[0].sf, Some(12.0));
+        assert!(f.row(u, 3000.0).fields().contains("\"receptions\":[{\"rx\":\"rx1\",\"rssi\":-90,\"snr\":5,\"sf\":12}]"), "{}", f.row(u, 3000.0).fields());
+        // A second receiver that hears the same packet says its own
+        feed(&mut f, "rx2", &header(9), 3100.0);
+        feed(&mut f, "rx2", &pkt(7, 2, "-90", "5", 127, 0.0), 3200.0);
+        assert_eq!(f.unit("7").unwrap().receptions[1].sf, Some(9.0));
+    }
+
+    #[test]
     fn the_same_bytes_are_one_packet_up_to_dedupe_ms_and_a_new_one_after() {
         let mut f = Fleet::new(Config::default());
         let p = pkt(7, 1, "-90", "5", 127, 0.0);
@@ -1204,7 +1234,7 @@ mod tests {
         assert_eq!((f.duplicates, f.total), (1, 2));
         let u = f.unit("7").unwrap();
         assert_eq!((u.packets, u.repeats), (2, 1));
-        assert_eq!(u.receptions, [Reception { rx: "rx3".into(), rssi: -90.0, snr: 5.0 }]);
+        assert_eq!(u.receptions, [Reception { rx: "rx3".into(), rssi: -90.0, snr: 5.0, sf: None }]);
         // The first point keeps the best of both receivers
         assert_eq!(u.history.series[1], [-70.0, -90.0]);
         let rx: Vec<(&str, &[f64])> = u.rx_history.iter().map(|(k, h)| (k.as_str(), h.t.as_slice())).collect();

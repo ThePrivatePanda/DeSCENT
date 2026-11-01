@@ -268,13 +268,13 @@
       if (o.embedded === 'bench' && o.module) q.set('module', o.module);
       if (o.embedded === 'built' || o.embedded === 'flight') {
         const keys = [['module', o.module], ['csid', o.csid], ['sf', o.sf], ['dbm', o.dbm]];
-        // One rate per phase, waiting, rising, falling, landed: fixed0..3 in ms, follow0..3
-        // as 0 or 1, soc0..3 the thresholds and socms0..3 the intervals, comma separated,
-        // log0..3 the flash log gap in ms; logblind the gap with no altitude source.
+        // One rate per slot, ground transmit, air transmit, ground log, air log: fixed0..3 in
+        // ms, follow0..3 as 0 or 1, soc0..3 the thresholds and socms0..3 the intervals, comma
+        // separated. layout says which block they are for.
+        keys.push(['layout', o.layout]);
         for (let p = 0; p < 4; p++) {
-          for (const k of ['fixed', 'follow', 'soc', 'socms', 'log']) keys.push([k + p, o[k + p]]);
+          for (const k of ['fixed', 'follow', 'soc', 'socms']) keys.push([k + p, o[k + p]]);
         }
-        keys.push(['logblind', o.logblind]);
         for (const [key, value] of keys) {
           if (value !== null && value !== undefined && value !== '') q.set(key, String(value));
         }

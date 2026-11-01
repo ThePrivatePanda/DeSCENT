@@ -522,33 +522,23 @@ fn post_only(request: Request) -> Option<Request> {
 const MAX_UPLOAD: u64 = 512 * 1024;
 
 // The settings an image is to be given, when the request has them. They go together: an
-// image with some of them changed and the rest as built is nobody's intent. Per phase,
-// in the block's order (waiting, rising, falling, landed): fixed0..3 in ms, follow0..3 as
-// 0 or 1, soc0..3 as four thresholds and socms0..3 as five intervals, comma separated,
-// log0..3 as the flash log gap in ms, and logblind the gap with no altitude source.
+// image with some of them changed and the rest as built is nobody's intent. Per slot, in the
+// block's order (ground transmit, air transmit, ground log, air log): fixed0..3 in ms, follow0..3
+// as 0 or 1, soc0..3 as four thresholds and socms0..3 as five intervals, comma separated.
+// layout says which block the page means.
 fn settings_asked(q: &[(String, String)]) -> Result<Option<crate::radio::Request>, String> {
-    let mut keys: Vec<(String, String)> = vec![
-        ("csid".into(), "board id".into()),
-        ("sf".into(), "spreading factor".into()),
-        ("dbm".into(), "transmit power".into()),
-    ];
-    for (p, name) in crate::settings::PHASE_WORDS.iter().enumerate() {
-        keys.push((format!("fixed{}", p), format!("{} gap", name)));
-        keys.push((format!("follow{}", p), format!("{} battery flag", name)));
-        keys.push((format!("soc{}", p), format!("{} battery thresholds", name)));
-        keys.push((format!("socms{}", p), format!("{} battery intervals", name)));
-        keys.push((format!("log{}", p), format!("{} log gap", name)));
+    let mut keys: Vec<String> = ["layout", "csid", "sf", "dbm"].iter().map(|k| k.to_string()).collect();
+    for key in ["fixed", "follow", "soc", "socms"] {
+        keys.extend((0..crate::settings::SLOTS).map(|p| format!("{}{}", key, p)));
     }
-    keys.push(("logblind".into(), "log gap with no altitude source".into()));
-    if keys.iter().all(|(key, _)| asked(q, key).is_none()) {
+    if keys.iter().all(|key| asked(q, key).is_none()) {
         return Ok(None);
     }
-    // A page loaded before the log gaps existed sends everything but them. That is a stale
-    // tab, not a half-filled form, and the fix is a reload, so say that and not "no gap"
-    let log_keys = keys.iter().filter(|(key, _)| key.starts_with("log"));
-    if log_keys.clone().count() > 0 && log_keys.clone().all(|(key, _)| asked(q, key).is_none()) {
+    // The slot numbers changed meaning at layout 4: 2 and 3 were transmit gaps. A page loaded
+    // before that would have them written as log rates, so it is refused by what it is
+    if asked(q, "layout").and_then(|v| v.trim().parse::<u8>().ok()) != Some(crate::settings::LAYOUT) {
         return Err(String::from(
-            "the page in this tab is older than the app and sent no flash log gaps: reload the page (Ctrl+Shift+R) and try again",
+            "the page in this tab is older than the app and asks for a different settings block: reload the page (Ctrl+Shift+R) and try again",
         ));
     }
     let text = |key: &str, words: &str| asked(q, key).map(str::to_string).ok_or_else(|| format!("no {} given", words));
@@ -571,7 +561,7 @@ fn settings_asked(q: &[(String, String)]) -> Result<Option<crate::radio::Request
     };
     let (csid, sf, dbm) = (number("csid", "board id")?, number("sf", "spreading factor")?, number("dbm", "transmit power")?);
     let mut rates = Vec::new();
-    for (p, name) in crate::settings::PHASE_WORDS.iter().enumerate() {
+    for (p, name) in crate::settings::SLOT_NAMES.iter().enumerate() {
         rates.push(crate::radio::RateRequest {
             fixed_ms: number(&format!("fixed{}", p), &format!("{} gap", name))?,
             follow: flag(&format!("follow{}", p), &format!("{} battery flag", name))?,
@@ -579,49 +569,19 @@ fn settings_asked(q: &[(String, String)]) -> Result<Option<crate::radio::Request
             interval_ms: list(&format!("socms{}", p), &format!("{} battery intervals", name))?,
         });
     }
-    let mut logs = Vec::new();
-    for (p, name) in crate::settings::PHASE_WORDS.iter().enumerate() {
-        logs.push(number(&format!("log{}", p), &format!("{} log gap", name))?);
-    }
-    let log_blind_ms = number("logblind", "log gap with no altitude source")?;
-    Ok(Some(crate::radio::Request { csid, sf, dbm, rates, logs, log_blind_ms }))
+    Ok(Some(crate::radio::Request { csid, sf, dbm, rates }))
 }
 
-// "set for board 9, SF12 at 15 dBm; ground every 60 s, air every 10 s, air (falling slot)
-// back to back, ground (landed slot) by battery: ...; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s".
-// If the slots pair up as the page writes them (waiting = landed, rising = falling) it's
-// "ground every 60 s, air every 1 s; log ground every 10 s, air every 0.05 s, blind 0.2 s"
+// "set for board 9, SF12 at 15 dBm; ground transmit every 60 s, log every 10 s; air transmit
+// every 1 s, log by battery: ..."
 fn settings_words(asked: &crate::settings::Asked) -> String {
-    let secs = |ms: u32| format!("{} s", ms as f64 / 1000.0);
-    let (r, l) = (&asked.rates, &asked.logs);
-    if r[0] == r[3] && r[1] == r[2] && l[0] == l[3] && l[1] == l[2] {
-        return format!(
-            "set for board {}, SF{} at {} dBm; ground {}, air {}; log ground every {}, air every {}, blind {}",
-            asked.csid,
-            asked.sf,
-            asked.dbm,
-            r[0].words(),
-            r[1].words(),
-            secs(l[0]),
-            secs(l[1]),
-            secs(asked.log_blind_ms)
-        );
-    }
+    use crate::settings::{log_zero_words, TRANSMIT_ZERO_WORDS};
     let phases: Vec<String> = crate::settings::PHASE_WORDS
         .iter()
-        .zip(asked.rates.iter())
-        .map(|(name, r)| format!("{} {}", name, r.words()))
+        .enumerate()
+        .map(|(p, name)| format!("{} transmit {}, log {}", name, asked.transmit[p].words(TRANSMIT_ZERO_WORDS), asked.log[p].words(log_zero_words(p))))
         .collect();
-    let logs: Vec<String> = asked.logs.iter().map(|ms| secs(*ms)).collect();
-    format!(
-        "set for board {}, SF{} at {} dBm; {}; log every {}, blind {}",
-        asked.csid,
-        asked.sf,
-        asked.dbm,
-        phases.join(", "),
-        logs.join(", "),
-        secs(asked.log_blind_ms)
-    )
+    format!("set for board {}, SF{} at {} dBm; {}", asked.csid, asked.sf, asked.dbm, phases.join("; "))
 }
 
 // A carried flight image with a board's settings written into its block, and the words
@@ -738,7 +698,8 @@ fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
         let wanted = settings_asked(&q)?.ok_or_else(|| String::from("no settings given to build with"))?;
         let (radio, radio_note) = ctx.local.radio(true)?;
         let asked = radio.check(&wanted, module)?;
-        let words = format!("a flight image for board {} on the {} module, {}", asked.csid, module.to_uppercase(), settings_words(&asked).trim_start_matches(&format!("set for board {}, ", asked.csid)));
+        // the rates are not said here: the page's tables have them, and the step list cannot hold a paragraph
+        let words = format!("a flight image for board {} on the {} module, SF{} at {} dBm", asked.csid, module.to_uppercase(), asked.sf, asked.dbm);
         let part = crate::localfw::part_for("flight", module).ok_or_else(|| format!("{:?} is not a radio module", module))?;
         let label = words.clone();
         (Vec::new(), label, radio_note, Some(crate::chipflash::BuildPlan { make: from_tree(ctx, part.name), asked: Some(asked), words }))
@@ -989,6 +950,25 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
                 let lines = crate::replay::read_lines(&[(name.clone(), body)], crate::replay::local_midnight_ms());
                 let csv = crate::csv::to_csv(lines.iter().map(|l| (l.t, l.rx.as_str(), l.text.as_str())));
                 csv_answer(request, &name, csv);
+            }
+            Err(e) => {
+                let _ = request.respond(Response::from_string(failed(&format!("{}: {}", name, e))).with_status_code(404));
+            }
+        }
+        return;
+    }
+
+    // What `descent-ground check` prints, as JSON, by the name /api/log takes. Read-only.
+    if let Some(asked) = path.strip_prefix("/api/check/") {
+        let Some(name) = log_name(asked) else {
+            let _ = request.respond(Response::from_string("no").with_status_code(400));
+            return;
+        };
+        match crate::check::check_path(&ctx.data.join(&name)) {
+            Ok(check) => {
+                let _ = request.respond(
+                    Response::from_string(check.json()).with_header(header("Content-Type", "application/json")),
+                );
             }
             Err(e) => {
                 let _ = request.respond(Response::from_string(failed(&format!("{}: {}", name, e))).with_status_code(404));
@@ -1778,43 +1758,45 @@ mod tests {
     #[test]
     fn the_settings_for_a_carried_image_come_all_or_not_at_all() {
         assert_eq!(settings_asked(&pairs(&[("uid", "x"), ("embedded", "flight")])).unwrap(), None);
-        let mut all: Vec<(&str, &str)> = vec![("csid", "9"), ("sf", "12"), ("dbm", "15")];
+        let mut all: Vec<(&str, &str)> = vec![("layout", "4"), ("csid", "9"), ("sf", "12"), ("dbm", "15")];
         let per = [("fixed0", "60000"), ("follow0", "0"), ("soc0", "75,50,35,20"), ("socms0", "10000,30000,60000,120000,180000"),
-            ("fixed1", "10000"), ("follow1", "0"), ("soc1", "75,50,35,20"), ("socms1", "10000,30000,60000,120000,180000"),
-            ("fixed2", "0"), ("follow2", "1"), ("soc2", "90, 60,30,5"), ("socms2", "1,2,3,4,5"),
-            ("fixed3", "60000"), ("follow3", "0"), ("soc3", "75,50,35,20"), ("socms3", "10000,30000,60000,120000,180000"),
-            ("log0", "1000"), ("log1", "50"), ("log2", "50"), ("log3", "1000"), ("logblind", "200")];
+            ("fixed1", "0"), ("follow1", "1"), ("soc1", "90, 60,30,5"), ("socms1", "1,2,3,4,5"),
+            ("fixed2", "10000"), ("follow2", "0"), ("soc2", "75,50,35,20"), ("socms2", "10000,10000,10000,10000,10000"),
+            ("fixed3", "50"), ("follow3", "0"), ("soc3", "75,50,35,20"), ("socms3", "50,50,50,50,50")];
         all.extend_from_slice(&per);
         let got = settings_asked(&pairs(&all)).unwrap().unwrap();
         assert_eq!((got.csid, got.sf, got.dbm, got.rates.len()), (9, 12, 15, 4));
-        assert_eq!((got.logs.clone(), got.log_blind_ms), (vec![1000, 50, 50, 1000], 200));
-        let e = settings_asked(&pairs(&all[..all.len() - 1])).unwrap_err();
-        assert!(e.contains("no log gap with no altitude source"), "{}", e);
-        let e = settings_asked(&pairs(&all[..all.len() - 3])).unwrap_err();
-        assert!(e.contains("no air (falling slot) log gap"), "{}", e);
-        assert_eq!(got.rates[2], crate::radio::RateRequest { fixed_ms: 0, follow: true, percent: vec![90, 60, 30, 5], interval_ms: vec![1, 2, 3, 4, 5] });
+        assert_eq!(got.rates[1], crate::radio::RateRequest { fixed_ms: 0, follow: true, percent: vec![90, 60, 30, 5], interval_ms: vec![1, 2, 3, 4, 5] });
         assert_eq!(got.rates[0].fixed_ms, 60000);
-        let e = settings_asked(&pairs(&all[..3])).unwrap_err();
-        assert!(e.contains("older than the app") && e.contains("reload"), "{}", e);
-        // Half a form with the log gaps present is a missing field, named.
-        let mut half: Vec<(&str, &str)> = all[..7].to_vec();
-        half.extend_from_slice(&[("log0", "1000"), ("log1", "50"), ("log2", "50"), ("log3", "1000"), ("logblind", "200")]);
-        let e = settings_asked(&pairs(&half)).unwrap_err();
-        assert!(e.contains("no air gap"), "{}", e);
+        assert_eq!(got.rates[3].interval_ms, vec![50; 5]);
+        let e = settings_asked(&pairs(&all[..all.len() - 1])).unwrap_err();
+        assert!(e.contains("no air log battery intervals"), "{}", e);
+        // A tab from before layout 4 would have its transmit slots written as log rates. With
+        // no layout or an older one it is told to reload.
+        for stale in [&all[1..], &all[1..5]] {
+            let e = settings_asked(&pairs(stale)).unwrap_err();
+            assert!(e.contains("older than the app") && e.contains("reload"), "{}", e);
+        }
+        let mut old = all.clone();
+        old[0] = ("layout", "3");
+        assert!(settings_asked(&pairs(&old)).unwrap_err().contains("reload"));
+        // Half a form is a missing field, named.
+        let e = settings_asked(&pairs(&all[..8])).unwrap_err();
+        assert!(e.contains("no air transmit gap"), "{}", e);
         let mut bad = all.clone();
-        bad[0] = ("csid", "");
+        bad[1] = ("csid", "");
         let e = settings_asked(&pairs(&bad)).unwrap_err();
         assert!(e.contains("board id") && e.contains("whole number"), "{}", e);
         let mut bad = all.clone();
-        bad[12] = ("follow2", "yes");
-        assert!(settings_asked(&pairs(&bad)).unwrap_err().contains("air (falling slot) battery flag is 0 or 1"));
+        bad[9] = ("follow1", "yes");
+        assert!(settings_asked(&pairs(&bad)).unwrap_err().contains("air transmit battery flag is 0 or 1"));
         // the page's own words, not the slots' old ones
         let mut bad = all.clone();
-        bad[4] = ("follow0", "2");
+        bad[5] = ("follow0", "2");
         let e = settings_asked(&pairs(&bad)).unwrap_err();
-        assert!(e.contains("ground battery flag") && !e.contains("waiting"), "{}", e);
+        assert!(e.contains("ground transmit battery flag") && !e.contains("waiting"), "{}", e);
         let mut bad = all.clone();
-        bad[13] = ("soc2", "90,6x,30,5");
+        bad[10] = ("soc1", "90,6x,30,5");
         assert!(settings_asked(&pairs(&bad)).unwrap_err().contains("whole numbers"));
     }
 
@@ -1825,11 +1807,12 @@ mod tests {
         let Ok(radio) = crate::radio::carried() else { return };
         let known = crate::chipflash::Known::carried();
         let rr = |fixed_ms: i64| crate::radio::RateRequest { fixed_ms, follow: false, percent: vec![75, 50, 35, 20], interval_ms: vec![10_000, 30_000, 60_000, 120_000, 180_000] };
+        let flat = |ms: i64| crate::radio::RateRequest { interval_ms: vec![ms; 5], ..rr(ms) };
         for image in flight.usable() {
             let power = if image.module == "hp" { 22 } else { 15 };
-            let wanted = crate::radio::Request { csid: 9, sf: 12, dbm: power, rates: vec![rr(60_000), rr(500), rr(500), rr(60_000)], logs: vec![1000, 50, 50, 1000], log_blind_ms: 200 };
+            let wanted = crate::radio::Request { csid: 9, sf: 12, dbm: power, rates: vec![rr(60_000), rr(500), flat(1000), flat(50)] };
             let (bytes, words) = set_for(image.bytes, image.module, &radio, &wanted).unwrap();
-            assert_eq!(words, format!("set for board 9, SF12 at {} dBm; ground every 60 s, air every 0.5 s; log ground every 1 s, air every 0.05 s, blind 0.2 s", power));
+            assert_eq!(words, format!("set for board 9, SF12 at {} dBm; ground transmit every 60 s, log every 1 s; air transmit every 0.5 s, log every 0.05 s", power));
             assert_eq!(bytes.len(), image.bytes.len());
             match crate::settings::find_at(&bytes).unwrap() {
                 (crate::settings::Found::Block(s), Some(_)) => {
@@ -1839,10 +1822,11 @@ mod tests {
             }
             // With a phase on the battery, the words say what that phase will follow.
             let mut on = wanted.clone();
+            on.rates[0].follow = true;
             on.rates[3].follow = true;
             assert_eq!(
                 set_for(image.bytes, image.module, &radio, &on).unwrap().1,
-                format!("set for board 9, SF12 at {} dBm; ground every 60 s, air every 0.5 s, air (falling slot) every 0.5 s, ground (landed slot) by battery: 10 s above 75 %, 30 s to 50 %, 60 s to 35 %, 120 s to 20 %, then 180 s (60 s when the gauge cannot be read); log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power)
+                format!("set for board 9, SF12 at {} dBm; ground transmit by battery: 10 s above 75 %, 30 s to 50 %, 60 s to 35 %, 120 s to 20 %, then 180 s (60 s when the gauge cannot be read), log every 1 s; air transmit every 0.5 s, log by battery: 0.05 s above 75 %, 0.05 s to 50 %, 0.05 s to 35 %, 0.05 s to 20 %, then 0.05 s (0.05 s when the gauge cannot be read)", power)
             );
             // A read of the board still says which image it is and which module it is for.
             let seen = crate::chipflash::recognise(&bytes, &known);
@@ -1853,21 +1837,17 @@ mod tests {
             let e = set_for(image.bytes, image.module, &radio, &crate::radio::Request { dbm: other_modules, ..wanted.clone() }).unwrap_err();
             assert!(e.contains(&image.module.to_uppercase()) && e.contains("dBm"), "{}", e);
             assert!(set_for(image.bytes, image.module, &radio, &crate::radio::Request { csid: 0, ..wanted.clone() }).is_err());
-            let mut btb = wanted.clone();
-            btb.rates[2].fixed_ms = 0;
-            assert_eq!(set_for(image.bytes, image.module, &radio, &btb).unwrap().1,
-                format!("set for board 9, SF12 at {} dBm; ground every 60 s, air every 0.5 s, air (falling slot) back to back, ground (landed slot) every 60 s; log every 1 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s", power));
+            let mut fast = wanted.clone();
+            fast.rates[3].interval_ms[4] = 5;
+            let e = set_for(image.bytes, image.module, &radio, &fast).unwrap_err();
+            assert!(e.contains("air, below 20 %, log gap"), "{}", e);
+            let mut zeros = wanted.clone();
+            zeros.rates[1].fixed_ms = 0;
+            zeros.rates[2] = flat(0);
+            zeros.rates[3] = flat(0);
+            assert_eq!(set_for(image.bytes, image.module, &radio, &zeros).unwrap().1,
+                format!("set for board 9, SF12 at {} dBm; ground transmit every 60 s, log nothing written; air transmit back to back, log every reading", power));
         }
-    }
-
-    #[test]
-    fn the_settings_are_said_as_two_phases_only_when_the_slots_are_paired() {
-        let rate = |fixed_ms: u32| crate::settings::Rate { fixed_ms, follow: false, percent: [75, 50, 35, 20], interval_ms: [10_000, 30_000, 60_000, 120_000, 180_000] };
-        let asked = crate::settings::Asked { csid: 9, sf: 7, dbm: 14, rates: [rate(60_000), rate(1000), rate(1000), rate(60_000)], logs: [10_000, 50, 50, 10_000], log_blind_ms: 200 };
-        assert_eq!(settings_words(&asked), "set for board 9, SF7 at 14 dBm; ground every 60 s, air every 1 s; log ground every 10 s, air every 0.05 s, blind 0.2 s");
-        // landed log gap differs from waiting, so slot by slot
-        let apart = crate::settings::Asked { logs: [10_000, 50, 50, 1000], ..asked.clone() };
-        assert_eq!(settings_words(&apart), "set for board 9, SF7 at 14 dBm; ground every 60 s, air every 1 s, air (falling slot) every 1 s, ground (landed slot) every 60 s; log every 10 s, 0.05 s, 0.05 s, 1 s, blind 0.2 s");
     }
 
     #[test]
@@ -2329,6 +2309,41 @@ mod tests {
     fn call_text(port: u16, method: &str, path: &str, body: &str) -> (u16, String) {
         let (s, b) = call(port, method, path, body.as_bytes());
         (s, String::from_utf8(b).unwrap())
+    }
+
+    #[test]
+    fn check_answers_with_what_a_pull_says_and_stays_in_the_data_folder() {
+        let data = std::env::temp_dir().join(format!("dg-check-api-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let pull = data.join("2026-11-01").join("pulls").join("1945-board17");
+        std::fs::create_dir_all(&pull).unwrap();
+        let line = test_packet(17, 1, false);
+        let hex = line.split(',').nth(2).unwrap();
+        let mut slot = [0u8; 64];
+        slot[0] = 0xA5;
+        slot[3..7].copy_from_slice(&4122u32.to_le_bytes());
+        slot[7..62].copy_from_slice(&crate::decode::hex_to_bytes(hex).unwrap());
+        let crc = crate::dump::crc16(&slot[..62]);
+        slot[62..].copy_from_slice(&crc.to_le_bytes());
+        let dump = format!(
+            "I BOOT 1 c0: settings from=block csid=17 module=hp sf=12 dbm=14 fixedms=0,1000,1000,0 soc=0,0,0,0\nraw 0 000000 {}\nfound 1 records, 1 good (0 time anchors), 0 bad, from 1 boots, log ends at address 0x40\n",
+            crate::decode::bytes_to_hex(&slot)
+        );
+        std::fs::write(pull.join("dump.txt"), dump).unwrap();
+        let port = serving(quiet_ctx(&data));
+
+        let (s, body) = call_text(port, "GET", "/api/check/2026-11-01/pulls/1945-board17/dump.txt", "");
+        assert_eq!(s, 200, "{}", body);
+        assert!(body.contains("\"kind\":\"pull\""), "{}", body);
+        assert!(body.contains("\"firstMs\":4122"), "{}", body);
+        assert!(body.contains("from=block csid=17"), "{}", body);
+
+        let (s, body) = call_text(port, "GET", "/api/check/2026-11-01/pulls/1945-board17/nothing.txt", "");
+        assert_eq!(s, 404, "{}", body);
+        assert!(body.contains("\"ok\":false"), "{}", body);
+        let (s, _) = call_text(port, "GET", "/api/check/..%2F..%2Fetc%2Fpasswd", "");
+        assert_eq!(s, 400);
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     fn socket(port: u16, path: &str) -> WebSocket<std::net::TcpStream> {

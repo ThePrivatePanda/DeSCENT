@@ -169,23 +169,49 @@ fn open_how(probe: Option<&str>) -> Result<Opened, String> {
         attached[which]
             .info
             .open()
-            .map_err(|e| format!("could not open {}: {}", list[which].kind, e))
+            .map_err(|e| format!("could not open {}: {}", list[which].kind, why(&e)))
     };
     // A ChipSat asleep in Stop2 has its debug block powered down and does not answer a
     // plain attach; holding NRST while connecting is the usual way through that. NRST is
     // on J1.8 of the pogo header, so it depends on the clip carrying that pin — not tried
-    // yet, hence the first error is the one reported if both fail.
+    // yet, hence both errors are reported if both fail.
     let first = match selected()?.attach(CHIP, Permissions::default()) {
         Ok(session) => return Ok(Opened { session, probe: list[which].clone(), under_reset: false }),
         Err(e) => e,
     };
     match selected()?.attach_under_reset(CHIP, Permissions::default()) {
         Ok(session) => Ok(Opened { session, probe: list[which].clone(), under_reset: true }),
-        Err(_) => Err(format!(
-            "could not attach to the {} through {}: {}",
-            CHIP, list[which].kind, first
-        )),
+        Err(held) => {
+            let volts = selected().ok().and_then(|mut p| p.get_target_voltage().ok().flatten());
+            Err(attach_failed(&list[which].kind, &first, &held, volts))
+        }
     }
+}
+
+// A probe-rs error prints only its outer layer, "An error with the usage of the probe
+// occurred", and keeps what happened in its source.
+fn why(e: &dyn std::error::Error) -> String {
+    let mut words = vec![e.to_string()];
+    let mut under = e.source();
+    while let Some(cause) = under {
+        let said = cause.to_string();
+        if !words.contains(&said) {
+            words.push(said);
+        }
+        under = cause.source();
+    }
+    words.join(": ")
+}
+
+fn attach_failed(probe: &str, plain: &dyn std::error::Error, held: &dyn std::error::Error, volts: Option<f32>) -> String {
+    let seen = match volts {
+        Some(v) => format!("The probe reads {:.2} V on its target pin", v),
+        None => String::from("The probe gave no target voltage"),
+    };
+    format!(
+        "could not attach to the {} through {}. Plain attach: {}. With reset held: {}. {}.",
+        CHIP, probe, why(plain), why(held), seen
+    )
 }
 
 // Where the flight software lives, from the chip database rather than from 0x08000000 and
@@ -548,6 +574,18 @@ pub fn peek(probe: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
     use probe_rs::config::{NvmRegion, RamRegion};
+    use probe_rs::probe::DebugProbeError;
+
+    #[test]
+    fn a_failed_attach_says_what_happened_under_the_outer_error_on_both_tries() {
+        let plain = probe_rs::Error::Probe(DebugProbeError::TargetNotFound);
+        let held = probe_rs::Error::Probe(DebugProbeError::Timeout);
+        let said = attach_failed("STLink V2", &plain, &held, Some(3.291));
+        assert!(said.contains("Plain attach: An error with the usage of the probe occurred: Failed to find or attach to the target. Please check the wiring before retrying."), "{}", said);
+        assert!(said.contains("With reset held: An error with the usage of the probe occurred: A timeout occurred during probe operation."), "{}", said);
+        assert!(said.ends_with("The probe reads 3.29 V on its target pin."), "{}", said);
+        assert!(attach_failed("STLink V2", &plain, &held, None).ends_with("The probe gave no target voltage."));
+    }
 
     #[test]
     fn twelve_bytes_that_are_all_the_same_are_not_an_id() {

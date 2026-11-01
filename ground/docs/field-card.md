@@ -8,7 +8,7 @@ One page to print. The app needs no internet.
 - check every ChipSat on the **ChipSats** screen: module set, and none still running the dump
   firmware or the sensor bench
 - set each board's **Phases**: for the ground and the air, the gap between flash log records and
-  the gap between packets, and whether the packets follow the battery with that phase's own table.
+  the gap between packets, and whether both are set by battery level with that phase's own table.
   A board flashed before the phases has none and keeps its one fixed interval whatever is set
 - if the app builds from this laptop's flight software, check the write confirm names the commit
   you mean to fly

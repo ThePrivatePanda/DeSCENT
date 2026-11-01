@@ -56,6 +56,21 @@ test('a unit card has the words of the frame and no missed count', () => {
   assert.equal(count(html, /NOT valid/g), 2, '0x6F clears two bits');
 });
 
+test('a unit says the spreading factor its last packet came in on', () => {
+  const on = (...sf) => fleetFrom([rx('A', 1), rx('B', 1), unit({ staleAfterMs: 5000,
+    receptions: sf.map((n, i) => ({ rx: 'AB'[i], rssi: -80, snr: 10, sf: n })) })]).units.get(9);
+  const card = (u) => text(V.unitCardHtml(u, 'OK', 100, 2, { runs: 1, staleMs: 5000, cfg: { lowBatteryV: 3.5, weakRssiDbm: -115 } }));
+  const detail = (u) => text(V.detailHtml(u, { state: 'OK', t: 100, run: 1, runs: 1, rx: [], cfg: {} }));
+  assert.match(card(on(12)), /SF12/);
+  assert.match(detail(on(12)), /Spreading factor SF12/);
+  assert.match(detail(on(12, 12)), /Spreading factor SF12 /, 'two receivers on one SF say it once');
+  assert.match(detail(on(9, 12)), /Spreading factor SF9, SF12/);
+  // No header from the receiver yet, or a row from before the field
+  assert.doesNotMatch(card(on(null)), /SF/);
+  assert.match(detail(on(null)), /Spreading factor —/);
+  assert.match(detail(fleetFrom([unit({})]).units.get(9)), /Spreading factor —/);
+});
+
 test('a unit card and its runs pill keep keyboard focus across the 250 ms repaint', () => {
   const f = nine();
   const u = f.units.get(9);

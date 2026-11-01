@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use crate::decode::{bytes_to_hex, js_num, Decoded};
 use crate::fleet::{Fleet, Receiver, Unit, Update};
 use crate::json::{esc, num_field, str_field};
-use crate::lines::{info_json, js_number, parse_line, Kind};
+use crate::lines::{info_json, parse_line, Kind};
 use crate::serial::PortInfo;
 use crate::ws::{Broadcast, Socket};
 
@@ -284,7 +284,6 @@ impl Model {
         let info = |k: &str| r.info.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
         let port = self.ports.get(&r.key);
         let name = port.and_then(|p| p.0.clone()).or_else(|| info("name").filter(|n| !n.is_empty()).map(String::from));
-        let sf = info("sf").map(js_number).filter(|x| x.is_finite());
         let dups = r.packets.saturating_sub(r.unique + r.bad_crc);
         format!(
             concat!(
@@ -296,7 +295,7 @@ impl Model {
             esc(&r.key),
             opt_str(r.id.as_deref()),
             opt_str(name.as_deref()),
-            opt_num(sf),
+            opt_num(r.sf()),
             opt_str(port.map(|p| p.1.as_str())),
             opt_str(self.formats.get(&r.key).copied()),
             info_json(&r.info),

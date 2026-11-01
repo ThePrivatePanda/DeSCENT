@@ -77,6 +77,12 @@
   }
 
   const baseName = (p) => String(p || '').split(/[\\/]/).pop();
+  // The app reports the log it is writing as a full path; /api/log/ wants it from the data
+  // folder down. A log outside the day folders is just its file name.
+  const dataName = (p) => {
+    const day = /\d{4}-\d{2}-\d{2}\/logs\/[^/]+$/.exec(String(p || '').replace(/\\/g, '/'));
+    return day ? day[0] : baseName(p);
+  };
 
   // Which board a pull or a saved image came from, read off its name. The app has named
   // these with the date first and with the board first, and with a 13-digit number for
@@ -213,5 +219,5 @@
       value: 'yes', short: '' }] : []);
   }
 
-  return { duration, clockWords, bytes, day, dayTime, utcStamp, keptIn, builtWords, baseName, boardPart, rows, boardIdWords, idMismatch, bootRows, events, transferRows };
+  return { duration, clockWords, bytes, day, dayTime, utcStamp, keptIn, builtWords, baseName, dataName, boardPart, rows, boardIdWords, idMismatch, bootRows, events, transferRows };
 });
