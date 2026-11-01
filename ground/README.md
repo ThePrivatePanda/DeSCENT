@@ -31,14 +31,19 @@ has climbed 15 m (30 m on GPS altitude, which stands in when the barometer is de
 release and the fall. It is the ground again after 30 s at rest below half of what it climbed, or
 3 minutes with the IMU quiet at any height (a roof, a hill), and the next climb is the air again.
 A release is not detected, and a drone hovering dead still stays in the air. The Phases step
-has a card for each: how often it logs to the chip (a gap between records in seconds) and how often
-it transmits, a gap after each packet in seconds or **follow the battery** with that phase's own
-table, five bands for a charge above 75 %, down to 50 %, 35 %, 20 %, and below that. Thresholds
-have to fall from one band to the next, and the phase's gap then applies only while the gauge
-cannot be read. A fresh image transmits every 60 s on the ground and every second in the air, logs
+has a table for each: how often it logs to the chip (a gap between records in seconds) and how often
+it transmits (a gap after each packet in seconds). **Set by battery level** gives that table five
+rows, a charge above 75 %, down to 50 %, 35 %, 20 %, and below that, and changes both columns:
+one switch and one set of thresholds per phase. Thresholds have to fall from one band to the next.
+The Gauge unread row is what the board uses while the gauge cannot be read, and with the switch off
+it is the one row, Always. Log gaps are 0 or at least 20 ms, in every box. Ticking the switch doesn't
+change logging until a box is edited. A fresh image transmits every 60 s on the ground and every
+second in the air, logs
 every 50 ms in the air and keeps one record per 10 s on the ground, about two days of ground before
-the chip goes round. A ground log gap of 0 keeps nothing from the ground. The board holds the last
-30 s in RAM, so a take-off writes the 30 s before it too. Every setting goes into the image's
+the chip goes round. A ground log gap of 0 keeps nothing from the ground, time anchors included;
+an air log gap of 0 is every reading. The board holds the last 30 s in RAM, so a take-off writes the
+30 s before it too. That is why the air's battery bands only apply while the board logs as air: the
+rest of the time the RAM fills at the air's Gauge unread gap. Every setting goes into the image's
 settings block and the board reads it at boot.
 
 **Clear flash**, in the Flight logs row, erases the log chip. With **Save the flight software that is on it and put it
