@@ -184,6 +184,34 @@ test('Radio card: the board\'s own header read-only, with the shared-SF note', a
   assert.doesNotMatch(p.text('tb-sheet'), /is also on SF/);
 });
 
+// The user, 2026-11-01: "I need confirmation from the tbeam that it's listening to the new SF
+// and not just 'asked tbeam for x SF'". The asking and the listening are app.js's (app.test.js);
+// this screen only says what that tracker holds.
+test('Radio card: the spreading factor row hands the ask to the app and says what the board answered', async () => {
+  const { p, rx } = rig();
+  rx('rx1', 7);
+  p.parts.tbeams.show();
+  await p.settle();
+  assert.match(p.text('tb-sheet'), /Spreading factor .*The board's own report\. A change is asked of it and counts only when its header says so\. It hears only boards on this spreading factor\./);
+  await p.fire('screen-tbeams', 'change', { 'data-sf': 'rx1' }, { value: '9' });
+  assert.deepEqual(p.asks, [['rx1', 9]]);
+  p.sfAsks.set('rx1', { sf: 9, at: NOW, state: 'asked' });
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /asked for SF9 Asked for SF9 at \d\d:\d\d:\d\d\. Waiting for the board's header\./);
+  // the board's header said 9: the fleet's receiver now reports it too
+  p.sfAsks.set('rx1', { sf: 9, at: NOW, state: 'heard', heardAt: NOW + 400 });
+  rx('rx1', 9);
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /confirmed The board's header confirmed SF9 at \d\d:\d\d:\d\d\./);
+  p.sfAsks.set('rx1', { sf: 12, at: NOW, state: 'refused', said: 'Mast refused SF12 and stays on SF9' });
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /refused SF12 Mast refused SF12 and stays on SF9\. The board answered #DG,ERR,sf\./);
+  p.sfAsks.set('rx1', { sf: 10, at: NOW, state: 'silent', said: 'No header from Mast in 4 s, so SF10 is not confirmed' });
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /SF10 not confirmed No header from Mast in 4 s, so SF10 is not confirmed\./);
+  assert.doesNotMatch(p.text('tb-sheet'), /settles when its next header/);
+});
+
 test('a header that has not come yet is said, not guessed', async () => {
   const { p, rx } = rig();
   rx('rx1', 7, { info: {} });
@@ -239,22 +267,17 @@ test('Receiver firmware: both versions, "newer" only when the app has the newer 
   assert.match(p.text('tb-sheet'), /App carries 1\.4\.2/);
 });
 
-test('flashing: one button named for the board, a second click that says what is erased, then progress', async () => {
+// The user, 2026-11-01: "tbeams flashing should also be same, no confirmation required"
+test('flashing: one press of the button named for the board writes; the card says what is erased', async () => {
   const { o, p, rx } = rig();
   rx('rx1', 7);
   p.parts.tbeams.show();
   await p.settle();
   const fw = () => p.html('tb-sheet').split('Receiver firmware')[1];
-  assert.match(fw(), /class="primary[^"]*" data-ask="\/dev\/ttyUSB0"[^>]*>Flash Mast to 1\.5\.0</);
-  assert.match(p.text('tb-sheet'), /Writes receiver firmware 1\.5\.0 over the serial port, then opens it again on/);
+  assert.match(fw(), /class="primary[^"]*" data-flash="\/dev\/ttyUSB0"[^>]*>Flash Mast to 1\.5\.0</);
+  assert.match(p.text('tb-sheet'), /Erases what is on the board and writes receiver firmware 1\.5\.0 over the serial port, then opens it again on/);
   assert.match(p.text('tb-sheet'), /Save what is on the board first/);
-  await p.fire('screen-tbeams', 'click', { 'data-ask': '/dev/ttyUSB0' });
-  assert.equal(o.flashed.length, 0);
-  assert.match(p.text('tb-sheet'), /Erase Mast and write the receiver firmware\? Its current firmware is not saved\./);
-  assert.match(fw(), /data-flash="\/dev\/ttyUSB0" class="primary">Overwrite it</);
-  await p.fire('screen-tbeams', 'click', { 'data-cancel': '/dev/ttyUSB0' });
-  assert.doesNotMatch(p.text('tb-sheet'), /Erase Mast/);
-  await p.fire('screen-tbeams', 'click', { 'data-ask': '/dev/ttyUSB0' });
+  assert.doesNotMatch(fw(), /data-ask=|data-cancel=|Overwrite it|confirm/);
   await p.fire('screen-tbeams', 'click', { 'data-flash': '/dev/ttyUSB0' });
   assert.deepEqual(o.flashed, [['/dev/ttyUSB0', 9]]);
   assert.match(p.text('tb-sheet'), /Flashed, comes up on SF9\./);
@@ -267,11 +290,10 @@ test('while it flashes the progress replaces the button and the card says being 
   hub.flash = () => new Promise((r) => { done = r; });
   p.parts.tbeams.show();
   await p.settle();
-  await p.fire('screen-tbeams', 'click', { 'data-ask': '/dev/ttyUSB0' });
   const flashing = p.fire('screen-tbeams', 'click', { 'data-flash': '/dev/ttyUSB0' });
   await p.settle();
   assert.match(p.text('tb-list'), /Mast being flashed/);
-  assert.doesNotMatch(p.html('tb-sheet'), /data-ask=/);
+  assert.doesNotMatch(p.html('tb-sheet'), /data-flash=/);
   assert.match(p.text('tb-sheet'), /writing the firmware/);
   done({ backup: '' });
   await flashing;
@@ -284,7 +306,7 @@ test('a board that has not been claimed is not offered a flash', async () => {
   await p.settle();
   await pick(p, '/dev/ttyUSB1');
   assert.match(p.text('tb-sheet'), /Press Read this one first\./);
-  assert.doesNotMatch(p.html('tb-sheet'), /data-ask=/);
+  assert.doesNotMatch(p.html('tb-sheet'), /data-flash=/);
 });
 
 test('nothing plugged in', async () => {
