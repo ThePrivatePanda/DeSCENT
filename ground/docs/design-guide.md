@@ -155,3 +155,12 @@ The unit card's stale bar: a 4 px bar under the CSID that fills toward that unit
 ## Motion
 
 None, apart from the 120 ms hover tint on buttons, pills and cards and the 300 ms width change of a progress bar. A toggle changes at once. `prefers-reduced-motion` turns both off.
+
+## Sound
+
+Two sounds, both synthesised in `app.js` and both behind the one setting "Sound when a unit goes lost or a run starts" (`alarmSound`), never in a replay:
+
+- Lost: three low notes (660 Hz, 160 ms, 220 ms apart) when a unit the app was hearing goes to Lost, with a toast.
+- A run starting: one short rising chirp (880 to 1320 Hz, 120 ms) when a board is heard for the first time or its counter starts again, by the app's own rows (a csid new to the live list, or a live row whose first-packet time moved), not by a counter of 0, so a missed first packet still counts. Nothing for a packet, a repeat from a second receiver, or the rows a snapshot brings on load or after a reconnect. Several boards up in one pass or within two seconds are one chirp.
+
+Browser limits, said plainly: the browser plays nothing until the page has been clicked or typed on once (an audio context made before that is suspended; the page resumes it on the first click, so the first sound is the one after that click). In a background tab the redraw that listens for runs is throttled to once a second, and to once a minute after five minutes hidden, so a sound can come that late; it does play in the background once the context is running. A tab the browser has discarded plays nothing.

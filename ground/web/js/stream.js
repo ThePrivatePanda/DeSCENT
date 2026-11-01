@@ -111,6 +111,7 @@
       this.gone = new Set();        // run ids joined or deleted here; the app still sends them
       this.overlay = new Map();     // run id -> counts joined into it here
       this.rxBase = new Map();      // rx -> counts at the last Clear
+      this.adopts = 0;              // snapshots taken, so a watcher can tell a snapshot's rows from news
       this.clear();
     }
 
@@ -165,6 +166,7 @@
       }
       for (const k of ['cfg', 'appRows', 'units', 'retired', 'runs', 'labelRun', 'receivers', 'rawRx', 'sources', 'rxSource', 'lines', 'packetsSeen']) this[k] = next[k];
       for (const label of this.appRows.keys()) this.show(label);
+      this.adopts++;
     }
 
     // One message off the stream. Returns its kind, or null for one that is not ours.

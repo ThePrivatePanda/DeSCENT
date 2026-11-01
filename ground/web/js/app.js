@@ -664,23 +664,42 @@
   const heard = new Map();   // csid -> the state it was in when last drawn
   let audio = null;
 
+  // One tone at a time offset: freq in Hz, len in seconds, and to, a frequency it slides to.
+  // The browser will not start audio before the page has been clicked or typed on once: a
+  // context made before that is suspended, and the click handler below resumes it, so the
+  // first sound is the one after the first click. In a background tab the 250 ms redraw is
+  // throttled to once a second (once a minute after five minutes hidden), so a sound can
+  // come that late; it does play in the background once the context is running.
+  function tone(at, freq, len, to) {
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    osc.frequency.setValueAtTime(freq, at);
+    if (to) osc.frequency.exponentialRampToValueAtTime(to, at + len);
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(0.2, at + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + len);
+    osc.connect(gain).connect(audio.destination);
+    osc.start(at); osc.stop(at + len + 0.02);
+  }
+  function sound() {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === 'suspended' && audio.resume) audio.resume().catch(() => {});
+    return audio;
+  }
+  // Lost: three low notes
   function beep(times) {
     if (!settings.alarmSound) return;
     try {
-      audio = audio || new (window.AudioContext || window.webkitAudioContext)();
-      for (let i = 0; i < times; i++) {
-        const at = audio.currentTime + i * 0.22;
-        const osc = audio.createOscillator();
-        const gain = audio.createGain();
-        osc.frequency.value = 660;
-        gain.gain.setValueAtTime(0.0001, at);
-        gain.gain.exponentialRampToValueAtTime(0.2, at + 0.01);
-        gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.16);
-        osc.connect(gain).connect(audio.destination);
-        osc.start(at); osc.stop(at + 0.18);
-      }
+      sound();
+      for (let i = 0; i < times; i++) tone(audio.currentTime + i * 0.22, 660, 0.16);
     } catch (e) { /* no audio device, or the browser wants a click first */ }
   }
+  // A run starting: one short rising chirp, nothing like the lost alarm
+  function chirp() {
+    if (!settings.alarmSound) return;
+    try { sound(); tone(audio.currentTime, 880, 0.12, 1320); } catch (e) { /* as above */ }
+  }
+  for (const ev of ['click', 'keydown']) document.addEventListener(ev, () => { if (audio && audio.state === 'suspended' && audio.resume) audio.resume().catch(() => {}); });
 
   // A replay is a recording of something that already happened, so it never alarms.
   // The state is the app's; the page only notices it change.
@@ -695,6 +714,34 @@
       }
       heard.set(u.csid, st);
     }
+  }
+
+  // A run starting makes one short sound, so nobody has to watch the table to know a board
+  // came up (the user, 2026-11-01: "every time it hears a chipsat ... not on every
+  // transmission"). A run is the app's: a csid heard for the first time, or a live row
+  // whose first packet time moved, which is the app's own restart (a missed packet 0 still
+  // counts). Nothing sounds for the rows a snapshot brings, on load or after a reconnect:
+  // the watcher starts over silently whenever the fleet takes a snapshot. Packets, repeats
+  // from a second receiver and replays change nothing here. Several boards up in one pass
+  // or within two seconds are one sound, not a burst.
+  const runsSeen = new Map();   // csid -> firstT of the live run last seen
+  let runsAdopt = -1;
+  let lastChirp = 0;
+  function watchForRuns() {
+    const silent = runsAdopt !== live.adopts || view.mode === 'replay';
+    runsAdopt = live.adopts;
+    let fresh = 0;
+    for (const u of live.units.values()) {
+      const was = runsSeen.get(u.csid);
+      if (was === undefined || (u.firstT !== null && was !== null && u.firstT !== was)) fresh++;
+      if (was === undefined || u.firstT !== null) runsSeen.set(u.csid, u.firstT);
+    }
+    for (const csid of runsSeen.keys()) if (!live.units.has(csid)) runsSeen.delete(csid);
+    if (!fresh || silent) return;
+    const t = Date.now();
+    if (t - lastChirp < 2000) return;
+    lastChirp = t;
+    chirp();
   }
 
   function renderLatest(f, t) {
@@ -867,6 +914,7 @@
     // and is drawn in full when it comes back.
     if ($('dash').hidden) {
       watchForLost(Date.now());
+      watchForRuns();
       renderReceivers();
       return;
     }
@@ -876,6 +924,7 @@
     client().wantHistory(view.sel);
     renderLatest(f, t);
     watchForLost(Date.now());
+    watchForRuns();
     renderReceivers();
     if (view.mode === 'replay') renderReplayProgress();
     if (force || Date.now() - lastChart > 500) {
