@@ -244,7 +244,6 @@ static void onGps()
 static void blind()
 {
   // Neither altitude source: the IMU alone. A running drone is the air, 30 s still is the ground.
-  // The controller logs at the blind gap whatever this says; this only sets the transmit gap
   FlightPhase f;
   Sim s{f, 0};
   s.baro = false;

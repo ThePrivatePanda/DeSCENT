@@ -84,12 +84,13 @@ constexpr uint32_t kUtcAnchorIntervalMs = 10000;
 // Flash log. Every record is 64 bytes, so 20 Hz fills the 2 MB chip in about 27 minutes, which is
 // why only the air is logged at that rate. Records are made at the air's gap in every phase and go
 // into a RAM ring first; on the ground only one per ground gap reaches the chip, so a take-off still
-// writes the 30 s before it. The gaps are in the settings block, these are what a fresh image carries.
-// Only slots 0 (ground) and 1 (air) are read, the rest stay so old blocks still parse
-// ms. A ground gap of 0 writes nothing on the ground (before 2026-10-22 it meant every IMU reading),
-// an air gap of 0 still means every IMU reading
-constexpr uint32_t kLogIntervalMsDefault[4] = {10000, 50, 50, 10000};   // ground, air, then two unused
-constexpr uint32_t kLogBlindIntervalMs = 200;    // unused since 2026-10-22, kept in the block
+// writes the 30 s before it. The ring only moves at 580 pending on the ground, so while the board
+// doesn't log as air the records keep coming at the air's FIXED gap, whatever its bands say.
+// The gaps are in the settings block, these are what a fresh image carries, flat: the bands equal
+// the fixed gap, so a fresh image never moves with the battery. ms, ground then air. A ground gap of
+// 0 writes nothing on the ground, not even time anchors (before 2026-10-22 it meant every IMU
+// reading), an air gap of 0 still means every IMU reading
+constexpr uint32_t kLogFixedMsDefault[2] = {10000, 50};
 
 // 30 s at 50 ms, 38.4 KB of static RAM. A full chip overwrites its oldest sector, so a board nobody
 // cleared still logs (decided 2026-10-19, was stop-when-full)
@@ -128,14 +129,14 @@ constexpr uint32_t kBootAirMaxMs = 300000;      // ms of uptime, boot-air loggin
 // board running down spends its last charge on fewer packets. Off by default in every phase. A
 // phase that follows the battery still uses its fixed gap while the gauge cannot be read.
 // Battery data is read and sent every packet either way.
-// Order: ground, air, then two unused slots (were falling and landed).
+// Order: ground, air.
 // The air is the whole flight and its gap is the flight rate; CHIPSAT_TX_INTERVAL_MS sets it on the
 // build line, 0 sends back to back
 #ifndef CHIPSAT_TX_INTERVAL_MS
 #define CHIPSAT_TX_INTERVAL_MS 1000
 #endif
-constexpr uint32_t kRateFixedMsDefault[4] = {60000, CHIPSAT_TX_INTERVAL_MS, CHIPSAT_TX_INTERVAL_MS, 60000};
-constexpr bool     kRateFromSocDefault[4] = {false, false, false, false};
+constexpr uint32_t kTransmitFixedMsDefault[2] = {60000, CHIPSAT_TX_INTERVAL_MS};
+constexpr bool     kRateFromSocDefault[2] = {false, false};
 constexpr uint8_t  kSocPercentDefault[4] = {75, 50, 35, 20};
 constexpr uint32_t kSocIntervalMsDefault[5] = {10000, 30000, 60000, 120000, 180000};
 // The flight gap on its own, for the parts of the build that only know that one

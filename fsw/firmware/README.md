@@ -9,8 +9,8 @@ flight image on a board without a compiler.
 * flight-le.bin, flight-hp.bin, and their .elf - the flight software for each radio module, built with
   the defaults: id 255 meaning nobody configured it, SF7, +14 dBm. A board flashed with one announces
   itself as unconfigured rather than impersonating a real one. Each image carries a settings block,
-  which the ground software rewrites with the board's own id, spreading factor, power and gaps per
-  phase before flashing. The block names the module but a tool never changes it: the other module
+  which the ground software rewrites with the board's own id, spreading factor, power and transmit
+  and log rates before flashing. It only rewrites an image at the block layout it writes itself. The block names the module but a tool never changes it: the other module
   means the other image
 * bench-le.bin, bench-hp.bin, and their .elf - bench/sensor_bench for each radio module: every sensor
   read and printed on the console, the flight packet back to back as CSID 254 at the module's lowest

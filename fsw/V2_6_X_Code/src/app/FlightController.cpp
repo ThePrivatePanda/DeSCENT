@@ -2,7 +2,7 @@
 #include <math.h>
 #include "FlightController.h"
 #include "ImuValidity.h"
-#include "TxInterval.h"
+#include "RateGap.h"
 #include "../Settings.h"
 #include "../config.h"
 #include "../constants.h"
@@ -63,15 +63,21 @@ void FlightController::setup()
     line.field("module", s.module == ChipSatSettings::kModuleHp ? "hp" : "le");
     line.field("sf", s.spreadingFactor);
     line.field("dbm", s.targetDbm);
-    // one gap per phase: the fixed one, or 'soc' for one that follows the battery
+    // ground then air, each the fixed gap and whether it follows the battery instead
     uint32_t fixed[ChipSatSettings::kPhases];
     uint32_t soc[ChipSatSettings::kPhases];
+    uint32_t logFixed[ChipSatSettings::kPhases];
+    uint32_t logSoc[ChipSatSettings::kPhases];
     for (size_t p = 0; p < ChipSatSettings::kPhases; p++) {
-      fixed[p] = s.rate[p].fixedMs;
-      soc[p] = s.rate[p].fromSoc ? 1 : 0;
+      fixed[p] = s.transmit[p].fixedMs;
+      soc[p] = s.transmit[p].fromSoc ? 1 : 0;
+      logFixed[p] = s.log[p].fixedMs;
+      logSoc[p] = s.log[p].fromSoc ? 1 : 0;
     }
     line.fieldList("fixedms", fixed, ChipSatSettings::kPhases);
     line.fieldList("soc", soc, ChipSatSettings::kPhases);
+    line.fieldList("logms", logFixed, ChipSatSettings::kPhases);
+    line.fieldList("logsoc", logSoc, ChipSatSettings::kPhases);
     // only when something was wrong with a block that was actually written, so a plain image is quiet
     if (ChipSatSettings::rejectReason() != nullptr) {
       line.field("refused", ChipSatSettings::rejectReason());
@@ -83,7 +89,8 @@ void FlightController::setup()
   // Radio before the sensors, so a sensor that hangs at boot still leaves one packet on air.
   // Never halts, a missing sensor just goes out invalid
   radioReady_ = configRadio();
-  txIntervalMs_ = ChipSatSettings::active().rate[static_cast<size_t>(phase_.phase())].fixedMs;   // the boot phase's
+  txIntervalMs_ = ChipSatSettings::active().transmit[static_cast<size_t>(phase_.phase())].fixedMs;   // the boot phase's
+  updateLogGaps(false);   // the gauge isn't up yet
   sendStatusPacket();
 
   beginSensors();
@@ -121,7 +128,6 @@ void FlightController::beginSensors()
 
   if (flash_.begin() == Status::Ok) {
     flashLog_.begin();
-    flashLog_.setGroundGapMs(ChipSatSettings::active().logMs[static_cast<size_t>(Phase::Ground)]);
     flashLog_.setAir(phase_.logsAir());   // boot-air, whatever the radio does
     const uint8_t csr[4] = {static_cast<uint8_t>(resetCsr_), static_cast<uint8_t>(resetCsr_ >> 8),
                             static_cast<uint8_t>(resetCsr_ >> 16), static_cast<uint8_t>(resetCsr_ >> 24)};
@@ -302,6 +308,7 @@ void FlightController::followPhase()
       line.field("above", phase_.aboveGroundM(), 1);
     }
     txIntervalMs_ = phaseTxIntervalMs(gauge_.data().valid);
+    updateLogGaps(gauge_.data().valid);
     phaseDue_ = true;   // not the clock, runCycle resets that after a TX this may be inside
   }
   // boot-air can end without a phase change
@@ -315,11 +322,18 @@ void FlightController::followPhase()
 // battery and the gauge reads
 uint32_t FlightController::phaseTxIntervalMs(bool socOkay)
 {
-  const ChipSatSettings::Rate &rate = ChipSatSettings::active().rate[static_cast<size_t>(phase_.phase())];
-  if (rate.fromSoc && socOkay) {
-    return txIntervalFromSoc(rate, gauge_.data().cellPercentage);
+  return gapFromRate(ChipSatSettings::active().transmit[static_cast<size_t>(phase_.phase())], socOkay,
+                     gauge_.data().cellPercentage);
+}
+
+// Both log gaps for the charge now. Whether the air's one is used is logIfDue's call, each record
+void FlightController::updateLogGaps(bool socOkay)
+{
+  const ChipSatSettings::Settings &s = ChipSatSettings::active();
+  for (size_t p = 0; p < ChipSatSettings::kPhases; p++) {
+    logGapMs_[p] = gapFromRate(s.log[p], socOkay, gauge_.data().cellPercentage);
   }
-  return rate.fixedMs;
+  flashLog_.setGroundGapMs(logGapMs_[static_cast<size_t>(Phase::Ground)]);
 }
 
 // The newest reading each sensor has, with anything too old marked invalid
@@ -350,7 +364,10 @@ void FlightController::buildPacket(ChipSatTelemetry::TelemetryPacket &into, bool
 }
 
 // A record per air gap in every phase, the flash log's ring decides what gets written (FlashLog.h).
-// The writer runs every call so the ring keeps emptying between records
+// That's the air's battery band only while the board logs as air. Otherwise it's the air's fixed gap
+// whatever the bands say: the ground only writes at 580 pending, so the ring has to keep filling at
+// the rate a take-off expects. Asked here and not in updateLogGaps, because boot-air can end between
+// two cycles. The writer runs every call so the ring keeps emptying between records
 void FlightController::logIfDue()
 {
   // A stuck erase or failed writes end the log for this boot, a full chip never does (it's a ring).
@@ -367,7 +384,8 @@ void FlightController::logIfDue()
   }
 
   const uint32_t now = system_.nowMs();
-  const uint32_t interval = ChipSatSettings::active().logMs[static_cast<size_t>(Phase::Air)];
+  const uint32_t interval = phase_.logsAir() ? logGapMs_[static_cast<size_t>(Phase::Air)]
+                                             : ChipSatSettings::active().log[static_cast<size_t>(Phase::Air)].fixedMs;
   bool due;
   if (interval == 0) {
     // every reading: a record each time the IMU delivers a new one, or at its rate with it dead
@@ -494,13 +512,15 @@ void FlightController::runCycle()
   }
 
   txIntervalMs_ = phaseTxIntervalMs(reads.socOkay);
+  updateLogGaps(reads.socOkay);
 
   previousReadMs_ = system_.nowMs();
 
   LOG_I(Cyc, "end") {
     line.field("nextms", txIntervalMs_);
+    line.field("logms", logGapMs_[static_cast<size_t>(phase_.logsAir() ? Phase::Air : Phase::Ground)]);
     line.field("phase", static_cast<unsigned int>(phase_.phase()));
-    line.field("battery", ChipSatSettings::active().rate[static_cast<size_t>(phase_.phase())].fromSoc && reads.socOkay);
+    line.field("battery", ChipSatSettings::active().transmit[static_cast<size_t>(phase_.phase())].fromSoc && reads.socOkay);
     line.field("durms", previousReadMs_ - reads.gateMs);
     line.field("stackfree", system_.stackUntouchedBytes());   // the least ever free between heap and stack
   }

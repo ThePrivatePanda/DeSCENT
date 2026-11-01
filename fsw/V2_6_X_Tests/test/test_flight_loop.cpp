@@ -1,6 +1,6 @@
 // FlightController's loop on the laptop: the real phase, watchdogs, flash log and settings, fake
 // drivers and a chip kept in RAM. Once per module, HP pauses the flash and sleeps the IMU during TX
-//   for m in 1 2; do g++ -std=gnu++17 -Wall -Wextra -Itest/mock -I../V2_6_X_Code/src -DCHIPSAT_RADIO_MODULE=$m test/test_flight_loop.cpp ../V2_6_X_Code/src/app/{FlightController,FlashLog,Phase,Health,SensorWatch,Telemetry,TxInterval,ImuValidity}.cpp ../V2_6_X_Code/src/Settings.cpp ../V2_6_X_Code/src/log/Log.cpp -o /tmp/flightloop$m && /tmp/flightloop$m; done
+//   for m in 1 2; do g++ -std=gnu++17 -Wall -Wextra -Itest/mock -I../V2_6_X_Code/src -DCHIPSAT_RADIO_MODULE=$m test/test_flight_loop.cpp ../V2_6_X_Code/src/app/{FlightController,FlashLog,Phase,Health,SensorWatch,Telemetry,RateGap,ImuValidity}.cpp ../V2_6_X_Code/src/Settings.cpp ../V2_6_X_Code/src/log/Log.cpp -o /tmp/flightloop$m && /tmp/flightloop$m; done
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
@@ -27,6 +27,9 @@ struct World
   std::vector<uint32_t> txStart;
   std::vector<uint32_t> txEnd;
   uint32_t txStartedMs = 0;
+  float imuAccel = 0.1f;     // above 2 m/s2 is moving
+  float gaugePercent = 80.0f;
+  bool gaugeValid = true;
 };
 static World world;
 
@@ -76,7 +79,7 @@ void Imu::service()
   }
   data_.linearAccelerationValid = data_.gyroscopeValid = data_.magnetometerValid = data_.orientationValid = true;
   data_.linearAccelerationUpdatedMs = data_.gyroscopeUpdatedMs = data_.magnetometerUpdatedMs = data_.orientationUpdatedMs = at;
-  data_.linearAccelerationMps2.x = 0.1f;
+  data_.linearAccelerationMps2.x = world.imuAccel;
   for (uint8_t i = 0; i < 4; ++i) {
     ++events_[i];
   }
@@ -110,9 +113,9 @@ FuelGauge::FuelGauge(ChipSatPlatform::I2cBus &bus, ChipSatPlatform::System &syst
 Status FuelGauge::begin() { ready_ = true; return Status::Ok; }
 Status FuelGauge::read()
 {
-  data_.valid = true;
+  data_.valid = world.gaugeValid;
   data_.updatedMs = fakeNow;
-  data_.cellPercentage = 80.0f;
+  data_.cellPercentage = world.gaugePercent;
   data_.cellVoltage = 3.9f;
   return Status::Ok;
 }
@@ -318,6 +321,119 @@ static void testRingOnTakeoff()
   check(groundKept == 0, "the ground before the ring's 30 s is only the trickle");
 }
 
+// The block is flashed before boot on a real board. Here the board has booted on the defaults and
+// the rate is changed under it, which active() would not allow outside a test
+static ChipSatSettings::Rate &logRate(ChipSatApp::Phase phase)
+{
+  auto &settings = const_cast<ChipSatSettings::Settings &>(ChipSatSettings::active());
+  return settings.log[static_cast<size_t>(phase)];
+}
+
+// at or above 20 % one gap, below it another
+static void followBattery(ChipSatSettings::Rate &rate, uint32_t chargedMs, uint32_t lowMs)
+{
+  rate.fromSoc = true;
+  for (size_t i = 0; i < ChipSatSettings::kSocBands - 1; ++i) {
+    rate.socIntervalMs[i] = chargedMs;
+  }
+  rate.socIntervalMs[ChipSatSettings::kSocBands - 1] = lowMs;
+}
+
+// gaps between packet records with uptimes in [fromMs, toMs]
+static void gapsBetween(uint32_t fromMs, uint32_t toMs, uint32_t &least, uint32_t &most, uint32_t &count)
+{
+  const std::vector<uint32_t> ups = packetUptimes();
+  least = 0xFFFFFFFF;
+  most = 0;
+  count = 0;
+  for (size_t i = 1; i < ups.size(); ++i) {
+    if (ups[i - 1] >= fromMs && ups[i] <= toMs) {
+      least = std::min(least, ups[i] - ups[i - 1]);
+      most = std::max(most, ups[i] - ups[i - 1]);
+      ++count;
+    }
+  }
+  printf("     %u to %u ms: %u gaps, %u to %u ms\n", static_cast<unsigned int>(fromMs), static_cast<unsigned int>(toMs),
+         static_cast<unsigned int>(count), static_cast<unsigned int>(least), static_cast<unsigned int>(most));
+}
+
+// In the air the band for the charge is the gap, and it moves at the next cycle
+static void testAirLogBands()
+{
+  std::unique_ptr<Board> board = boot(60100);
+  followBattery(logRate(ChipSatApp::Phase::Air), 200, 500);
+  runUntil(*board, 64000);
+  uint32_t least, most, count;
+  gapsBetween(61000, 64000, least, most, count);
+  check(count > 10 && least >= 195 && most <= 260, "air log follows the battery: 200 ms at 80 %");
+  check(countOf(" logms=200") > 0, "the Cyc line says the log gap");
+  world.gaugePercent = 10.0f;
+  runUntil(*board, 72000);
+  gapsBetween(67000, 72000, least, most, count);
+  check(count > 5 && least >= 495 && most <= 560, "and 500 ms once the charge is under 20 %");
+  check(countOf(" logms=500") > 0, "the Cyc line follows it");
+}
+
+// On the ground the ground slot sets what reaches the chip
+static void testGroundLogBands()
+{
+  std::unique_ptr<Board> board = boot(0xFFFFFFFF);
+  followBattery(logRate(ChipSatApp::Phase::Ground), 2000, 500);
+  runUntil(*board, 115000);   // the first cycle is at 60 s, and the ring holds 29 s back
+  uint32_t least, most, count;
+  gapsBetween(62000, 85000, least, most, count);
+  check(count > 8 && least >= 2000 && most <= 2100, "ground log follows the battery: one kept per 2 s");
+  check(countOf(" logms=2000") > 0, "the Cyc line says the ground gap on the ground");
+}
+
+// The same rule as transmit: no gauge, the fixed gap
+static void testLogGaugeUnread()
+{
+  std::unique_ptr<Board> board = boot(60100);
+  world.gaugeValid = false;
+  followBattery(logRate(ChipSatApp::Phase::Air), 200, 500);
+  runUntil(*board, 66000);   // HP pauses the flash through each TX, so give the ring time
+  uint32_t least, most, count;
+  gapsBetween(61000, 64000, least, most, count);
+  check(count > 50 && most <= 60, "with the gauge unread the air logs at its fixed gap");
+}
+
+// The generator keeps the air's fixed gap on the ground whatever the air's bands say. The ring only
+// reaches the chip at 580 pending, so a slow gap here would hold the wrong 30 s at take-off
+static void testRingKeepsFixedGapOnGround()
+{
+  std::unique_ptr<Board> board = boot(100000);
+  followBattery(logRate(ChipSatApp::Phase::Air), 2000, 2000);
+  runUntil(*board, 102000);
+  uint32_t least, most, count;
+  gapsBetween(100000 - 27000, 100000, least, most, count);
+  check(count > 500 && most <= 60, "the ring on the ground ignores the air's bands");
+}
+
+// Boot-air is the ground to the radio and the air to the log, so its bands apply. It can end between
+// two cycles, and the ring needs the fixed gap from that moment and not from the next cycle
+static void testBootAirLogBands()
+{
+  std::unique_ptr<Board> board = boot(115000);
+  world.imuAccel = 5.0f;   // handled, so boot-air doesn't end at rest
+  followBattery(logRate(ChipSatApp::Phase::Air), 400, 400);
+  runUntil(*board, 70000);
+  check(board->log.air(), "still boot-air at 70 s");
+  uint32_t least, most, count;
+  gapsBetween(62000, 70000, least, most, count);
+  check(count > 10 && least >= 395 && most <= 460, "boot-air logs at the air's band, the phase being ground");
+  world.imuAccel = 0.1f;
+  while (board->log.air() && fakeNow < 113000) {
+    board->flight.loop();
+    ++fakeNow;
+  }
+  const uint32_t endedMs = fakeNow;
+  check(!board->log.air() && endedMs < 110000, "boot-air ended at rest, between two cycles");
+  runUntil(*board, 118000);
+  gapsBetween(endedMs + 100, 115000, least, most, count);
+  check(count > 20 && most <= 60, "the fixed gap is back as soon as boot-air ends");
+}
+
 // an erase that never finishes stops logging for the boot, said once
 static void testStuckErase()
 {
@@ -338,6 +454,11 @@ int main()
   testChangeDuringTx();
   testChangeBetweenTx();
   testRingOnTakeoff();
+  testAirLogBands();
+  testGroundLogBands();
+  testLogGaugeUnread();
+  testRingKeepsFixedGapOnGround();
+  testBootAirLogBands();
   testStuckErase();
   printf("%s: %d checks, %d failed\n", failures == 0 ? "PASSED" : "FAILED", checks, failures);
   return failures == 0 ? 0 : 1;

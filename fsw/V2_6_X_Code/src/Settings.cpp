@@ -39,6 +39,44 @@ constexpr uint32_t get32(const uint8_t* at)
          static_cast<uint32_t>(at[2]) << 16 | static_cast<uint32_t>(at[3]) << 24;
 }
 
+// What a fresh image carries in one slot. A log rate is flat, its bands the fixed gap, so it is the
+// same with the table on or off
+constexpr Rate defaultRate(uint32_t fixedMs, bool fromSoc, bool flat)
+{
+  Rate out = {};
+  out.fixedMs = fixedMs;
+  out.fromSoc = fromSoc;
+  for (size_t i = 0; i < kSocBands - 1; i++) {
+    out.socPercent[i] = kSocPercentDefault[i];
+  }
+  for (size_t i = 0; i < kSocBands; i++) {
+    out.socIntervalMs[i] = flat ? fixedMs : kSocIntervalMsDefault[i];
+  }
+  return out;
+}
+
+constexpr Rate defaultTransmit(size_t phase)
+{
+  return defaultRate(kTransmitFixedMsDefault[phase], kRateFromSocDefault[phase], false);
+}
+
+constexpr Rate defaultLog(size_t phase)
+{
+  return defaultRate(kLogFixedMsDefault[phase], kRateFromSocDefault[phase], true);
+}
+
+constexpr void putRate(uint8_t* r, const Rate& rate)
+{
+  put32(r + kRateFixed, rate.fixedMs);
+  r[kRateFromSoc] = rate.fromSoc ? 1 : 0;
+  for (size_t i = 0; i < kSocBands - 1; i++) {
+    r[kRatePercent + i] = rate.socPercent[i];
+  }
+  for (size_t i = 0; i < kSocBands; i++) {
+    put32(r + kRateInterval + 4 * i, rate.socIntervalMs[i]);
+  }
+}
+
 constexpr BlockBytes buildBlock()
 {
   BlockBytes out = {};
@@ -52,20 +90,9 @@ constexpr BlockBytes buildBlock()
   out.b[kOffDbm] = static_cast<uint8_t>(CHIPSAT_TARGET_DBM);
   out.b[kOffSetBy] = kSetByBuild;
   for (size_t p = 0; p < kPhases; p++) {
-    uint8_t* r = out.b + kOffRates + kRateBytes * p;
-    put32(r + kRateFixed, kRateFixedMsDefault[p]);
-    r[kRateFromSoc] = kRateFromSocDefault[p] ? 1 : 0;
-    for (size_t i = 0; i < kSocBands - 1; i++) {
-      r[kRatePercent + i] = kSocPercentDefault[i];
-    }
-    for (size_t i = 0; i < kSocBands; i++) {
-      put32(r + kRateInterval + 4 * i, kSocIntervalMsDefault[i]);
-    }
+    putRate(out.b + kOffRates + kRateBytes * p, defaultTransmit(p));
+    putRate(out.b + kOffRates + kRateBytes * (kPhases + p), defaultLog(p));
   }
-  for (size_t p = 0; p < kPhases; p++) {
-    put32(out.b + kOffLogs + 4 * p, kLogIntervalMsDefault[p]);
-  }
-  put32(out.b + kOffLogBlind, kLogBlindIntervalMs);
   const uint16_t crc = calculateCRC16(out.b, kOffCrc);
   out.b[kOffCrc] = crc & 0xFF;
   out.b[kOffCrc + 1] = (crc >> 8) & 0xFF;
@@ -87,17 +114,9 @@ Settings compiledDefaults()
   out.targetDbm = kRadioTargetDbm;
   out.setBy = kSetByBuild;
   for (size_t p = 0; p < kPhases; p++) {
-    out.rate[p].fixedMs = kRateFixedMsDefault[p];
-    out.rate[p].fromSoc = kRateFromSocDefault[p];
-    for (size_t i = 0; i < kSocBands - 1; i++) {
-      out.rate[p].socPercent[i] = kSocPercentDefault[i];
-    }
-    for (size_t i = 0; i < kSocBands; i++) {
-      out.rate[p].socIntervalMs[i] = kSocIntervalMsDefault[i];
-    }
-    out.logMs[p] = kLogIntervalMsDefault[p];
+    out.transmit[p] = defaultTransmit(p);
+    out.log[p] = defaultLog(p);
   }
-  out.logBlindMs = kLogBlindIntervalMs;
   return out;
 }
 
@@ -106,6 +125,11 @@ Source source_ = Source::kDefaults;
 const char* reject_ = nullptr;
 
 }  // namespace
+
+static bool logGapTooFast(uint32_t ms)
+{
+  return ms != 0 && ms < kLogMinMs;
+}
 
 bool usable(const Settings& settings, const char** whyNot)
 {
@@ -136,31 +160,33 @@ bool usable(const Settings& settings, const char** whyNot)
   }
   // Each table is read top down and the first threshold the charge reaches wins, so the thresholds
   // have to fall. 0 and 100 are refused because a band nothing can reach is a number somebody got
-  // wrong. Checked whether or not the phase follows the battery, so a table that is off is still one
+  // wrong. Checked whether or not the slot follows the battery, so a table that is off is still one
   // that could be switched on
-  for (size_t p = 0; p < kPhases; p++) {
+  const Rate* const rates[kRateSlots] = {&settings.transmit[0], &settings.transmit[1], &settings.log[0], &settings.log[1]};
+  for (const Rate* rate : rates) {
     for (size_t i = 0; i < kSocBands - 1; i++) {
-      if (settings.rate[p].socPercent[i] < 1 || settings.rate[p].socPercent[i] > 99) {
+      if (rate->socPercent[i] < 1 || rate->socPercent[i] > 99) {
         *whyNot = "a battery threshold outside 1 to 99 percent";
         return false;
       }
-      if (i > 0 && settings.rate[p].socPercent[i] >= settings.rate[p].socPercent[i - 1]) {
+      if (i > 0 && rate->socPercent[i] >= rate->socPercent[i - 1]) {
         *whyNot = "battery thresholds that do not fall from one band to the next";
         return false;
       }
     }
   }
   // The flash log cannot take a record faster than the sensors make one: 0 is a record per IMU
-  // reading, and anything between that and the floor is a number somebody got wrong
+  // reading, and anything between that and the floor is a number somebody got wrong. Every value,
+  // because a band that is off today gets switched on by a flag
   for (size_t p = 0; p < kPhases; p++) {
-    if (settings.logMs[p] != 0 && settings.logMs[p] < kLogMinMs) {
+    bool tooFast = logGapTooFast(settings.log[p].fixedMs);
+    for (size_t i = 0; i < kSocBands; i++) {
+      tooFast = tooFast || logGapTooFast(settings.log[p].socIntervalMs[i]);
+    }
+    if (tooFast) {
       *whyNot = "a flash log gap of 1 to 19 ms: 0 is every reading";
       return false;
     }
-  }
-  if (settings.logBlindMs != 0 && settings.logBlindMs < kLogMinMs) {
-    *whyNot = "a flash log gap of 1 to 19 ms: 0 is every reading";
-    return false;
   }
   *whyNot = nullptr;
   return true;
@@ -186,23 +212,22 @@ Parse parse(const uint8_t block[kBlockBytes], Settings* out, const char** whyNot
   wanted.spreadingFactor = block[kOffSf];
   wanted.targetDbm = static_cast<int8_t>(block[kOffDbm]);
   wanted.setBy = block[kOffSetBy];
-  for (size_t p = 0; p < kPhases; p++) {
-    const uint8_t* r = block + kOffRates + kRateBytes * p;
-    wanted.rate[p].fixedMs = get32(r + kRateFixed);
+  for (size_t slot = 0; slot < kRateSlots; slot++) {
+    const uint8_t* r = block + kOffRates + kRateBytes * slot;
+    Rate& rate = slot < kPhases ? wanted.transmit[slot] : wanted.log[slot - kPhases];
+    rate.fixedMs = get32(r + kRateFixed);
     if (r[kRateFromSoc] > 1) {
       *whyNot = "a battery flag that is neither 0 nor 1";
       return Parse::kRejected;
     }
-    wanted.rate[p].fromSoc = r[kRateFromSoc] == 1;
+    rate.fromSoc = r[kRateFromSoc] == 1;
     for (size_t i = 0; i < kSocBands - 1; i++) {
-      wanted.rate[p].socPercent[i] = r[kRatePercent + i];
+      rate.socPercent[i] = r[kRatePercent + i];
     }
     for (size_t i = 0; i < kSocBands; i++) {
-      wanted.rate[p].socIntervalMs[i] = get32(r + kRateInterval + 4 * i);
+      rate.socIntervalMs[i] = get32(r + kRateInterval + 4 * i);
     }
-    wanted.logMs[p] = get32(block + kOffLogs + 4 * p);
   }
-  wanted.logBlindMs = get32(block + kOffLogBlind);
 
   if (!usable(wanted, whyNot)) {
     return Parse::kRejected;

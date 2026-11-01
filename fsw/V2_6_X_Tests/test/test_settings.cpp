@@ -34,8 +34,8 @@ static uint8_t* rateAt(uint8_t block[kBlockBytes], size_t phase)
   return block + kOffRates + kRateBytes * phase;
 }
 
-// A block holding the given values, with a CRC that is right unless told otherwise. The falling
-// phase gets intervalMs as its fixed gap; every phase gets the table the build ships, off
+// A block holding the given values, with a CRC that is right unless told otherwise. The air
+// transmits at intervalMs; the log slots are flat like the build's, every table off
 static void build(uint8_t out[kBlockBytes], uint8_t csid, uint8_t module, uint8_t sf, int8_t dbm,
                   uint32_t intervalMs = 1000, uint8_t layout = kLayoutVersion, bool goodCrc = true)
 {
@@ -47,19 +47,16 @@ static void build(uint8_t out[kBlockBytes], uint8_t csid, uint8_t module, uint8_
   out[kOffSf] = sf;
   out[kOffDbm] = static_cast<uint8_t>(dbm);
   out[kOffSetBy] = kSetByTool;
-  static const uint32_t fixed[4] = {60000, 10000, 0, 60000};
+  const uint32_t fixed[kRateSlots] = {60000, intervalMs, 1000, 50};
   static const uint8_t pct[4] = {75, 50, 35, 20};
   static const uint32_t ms[5] = {10000, 30000, 60000, 120000, 180000};
-  for (size_t p = 0; p < kPhases; p++) {
+  for (size_t p = 0; p < kRateSlots; p++) {
     uint8_t* r = rateAt(out, p);
-    put32(r + kRateFixed, p == 2 ? intervalMs : fixed[p]);
+    put32(r + kRateFixed, fixed[p]);
     r[kRateFromSoc] = 0;
     for (size_t i = 0; i < 4; i++) r[kRatePercent + i] = pct[i];
-    for (size_t i = 0; i < 5; i++) put32(r + kRateInterval + 4 * i, ms[i]);
+    for (size_t i = 0; i < 5; i++) put32(r + kRateInterval + 4 * i, p < kPhases ? ms[i] : fixed[p]);
   }
-  static const uint32_t logs[4] = {1000, 50, 50, 1000};
-  for (size_t p = 0; p < kPhases; p++) put32(out + kOffLogs + 4 * p, logs[p]);
-  put32(out + kOffLogBlind, 200);
   sign(out, goodCrc);
 }
 
@@ -96,11 +93,11 @@ int main()
   build(block, 9, kModuleLe, 12, 15, 500);
   check(run(block, &got, &why) == Parse::kGood, "a written block is accepted");
   check(got.csid == 9 && got.module == kModuleLe && got.spreadingFactor == 12 &&
-        got.targetDbm == 15 && got.setBy == kSetByTool && got.rate[2].fixedMs == 500,
+        got.targetDbm == 15 && got.setBy == kSetByTool && got.transmit[1].fixedMs == 500,
         "every field comes back, interval little endian");
 
   build(block, 12, kModuleHp, 9, 20, 0);
-  check(run(block, &got, &why) == Parse::kGood && got.rate[2].fixedMs == 0,
+  check(run(block, &got, &why) == Parse::kGood && got.transmit[1].fixedMs == 0,
         "an interval of zero is allowed and means back to back");
 
   // a damaged block is never half-believed
@@ -125,33 +122,83 @@ int main()
         "a tool-written block says a tool put it there");
 
   // things that are written but cannot be transmitted with
-  build(block, 9, kModuleLe, 12, 15, 1000, 4);
+  build(block, 9, kModuleLe, 12, 15, 1000, 5);
   check(run(block, &got, &why) == Parse::kRejected && why != nullptr,
         "a layout this firmware does not know is refused, with a reason");
-  build(block, 9, kModuleLe, 12, 15, 1000, 2);
-  check(run(block, &got, &why) == Parse::kRejected && why != nullptr,
-        "layout 2, from before the log gaps, is refused too: its reserved bytes are fields now");
+  for (uint8_t old : {uint8_t(1), uint8_t(2), uint8_t(3)}) {
+    build(block, 9, kModuleLe, 12, 15, 1000, old);
+    if (run(block, &got, &why) != Parse::kRejected || why == nullptr) {
+      printf("FAILED layout %u was accepted\n", old);
+      failures++;
+    }
+  }
+  check(true, "an older layout is refused too: slots 2 and 3 held transmit gaps there");
 
-  // layout 3: the flash log gaps
+  // layout 4: the log has rates of its own
   build(block, 9, kModuleLe, 12, 15);
-  check(run(block, &got, &why) == Parse::kGood && got.logMs[0] == 1000 && got.logMs[1] == 50 &&
-        got.logMs[3] == 1000 && got.logBlindMs == 200,
-        "the log gap of every phase and the blind one are read");
+  check(run(block, &got, &why) == Parse::kGood && got.log[0].fixedMs == 1000 && got.log[1].fixedMs == 50 &&
+        !got.log[0].fromSoc && !got.log[1].fromSoc && got.log[1].socIntervalMs[4] == 50 &&
+        got.log[0].socPercent[3] == 20,
+        "both log rates are read");
+
+  // 1 to 19 ms is refused in every log value, band or fixed, used or not
+  int refused = 0, asked = 0;
+  for (size_t slot : {size_t(2), size_t(3)}) {
+    for (int cell = -1; cell < 5; cell++) {
+      for (bool follows : {false, true}) {
+        for (uint32_t bad : {uint32_t(1), uint32_t(19)}) {
+          build(block, 9, kModuleLe, 12, 15);
+          uint8_t* r = rateAt(block, slot);
+          r[kRateFromSoc] = follows ? 1 : 0;
+          put32(r + (cell < 0 ? kRateFixed : kRateInterval + 4 * cell), bad);
+          sign(block);
+          asked++;
+          refused += run(block, &got, &why) == Parse::kRejected && why != nullptr ? 1 : 0;
+        }
+      }
+    }
+  }
+  check(refused == asked, "1 and 19 ms are refused in every log cell, with or without the battery");
   build(block, 9, kModuleLe, 12, 15);
-  put32(block + kOffLogs + 4, 10);
+  { uint8_t* r = rateAt(block, 3);
+    put32(r + kRateFixed, 0);
+    put32(r + kRateInterval, 0);
+    put32(r + kRateInterval + 4, 20);
+    put32(rateAt(block, 2) + kRateInterval + 16, 0); }
   sign(block);
-  check(run(block, &got, &why) == Parse::kRejected && why != nullptr,
-        "a log gap under 20 ms is refused: the sensors make nothing that fast");
+  check(run(block, &got, &why) == Parse::kGood && got.log[1].fixedMs == 0 && got.log[1].socIntervalMs[0] == 0 &&
+        got.log[1].socIntervalMs[1] == 20 && got.log[0].socIntervalMs[4] == 0,
+        "0 and 20 ms are allowed in a log cell");
   build(block, 9, kModuleLe, 12, 15);
-  put32(block + kOffLogBlind, 0);
-  put32(block + kOffLogs + 4, 0);
+  put32(rateAt(block, 0) + kRateInterval, 7);
+  put32(rateAt(block, 1) + kRateFixed, 19);
   sign(block);
-  check(run(block, &got, &why) == Parse::kGood && got.logMs[1] == 0 && got.logBlindMs == 0,
-        "0 is allowed and means a record per IMU reading");
+  check(run(block, &got, &why) == Parse::kGood, "1 to 19 ms is still fine for transmit: it never was refused");
+
+  // The bytes layout 3 kept log gaps in mean nothing now
   build(block, 9, kModuleLe, 12, 15);
-  put32(block + kOffLogBlind, 19);
-  sign(block);
-  check(run(block, &got, &why) == Parse::kRejected, "19 ms is refused: between 0 and the floor is a mistake");
+  check(block[kOffReserved] == 0 && block[kOffCrc - 1] == 0 && kOffReserved + 20 == kOffCrc, "138 to 157 are reserved zero");
+
+  // the same block settings.rs reads, offsets copied by hand between the two
+  static const uint8_t golden[kBlockBytes] = {
+#include "data/settings_layout4.inc"
+  };
+  check(run(golden, &got, &why) == Parse::kGood, "the golden layout 4 block is accepted");
+  const Rate& gt = got.transmit[0];
+  const Rate& at = got.transmit[1];
+  const Rate& gl = got.log[0];
+  const Rate& al = got.log[1];
+  check(got.csid == 7 && got.module == kModuleHp && got.spreadingFactor == 9 && got.targetDbm == 20 && got.setBy == kSetByTool,
+        "golden: the head");
+  check(gt.fixedMs == 60000 && gt.fromSoc && gt.socPercent[0] == 80 && gt.socPercent[3] == 20 &&
+        gt.socIntervalMs[0] == 11000 && gt.socIntervalMs[4] == 51000, "golden: ground transmit");
+  check(at.fixedMs == 1000 && !at.fromSoc && at.socPercent[0] == 75 && at.socPercent[3] == 20 &&
+        at.socIntervalMs[0] == 1100 && at.socIntervalMs[4] == 5100, "golden: air transmit");
+  check(gl.fixedMs == 10000 && gl.fromSoc && gl.socPercent[1] == 60 && gl.socIntervalMs[0] == 12000 &&
+        gl.socIntervalMs[3] == 42000 && gl.socIntervalMs[4] == 0, "golden: ground log");
+  check(al.fixedMs == 50 && !al.fromSoc && al.socPercent[0] == 70 && al.socPercent[3] == 10 && al.socIntervalMs[0] == 50 &&
+        al.socIntervalMs[1] == 100 && al.socIntervalMs[2] == 0 && al.socIntervalMs[3] == 20 && al.socIntervalMs[4] == 5000,
+        "golden: air log");
 
   build(block, 0, kModuleLe, 12, 15);
   check(run(block, &got, &why) == Parse::kRejected, "board id 0 is refused");
@@ -183,30 +230,28 @@ int main()
 
   // the magic has to be exactly the agreed bytes, or a tool and the firmware disagree about where
   // the block is
-  check(kMagic[2] == 'C' && kMagic[11] == 'G' && kBlockBytes == 160 && kOffCrc == 158 && kLayoutVersion == 3 &&
-        kOffRates + kRateBytes * kPhases == kOffLogs && kOffLogs + 4 * kPhases == kOffLogBlind &&
-        kOffLogBlind + 4 == kOffCrc,
+  check(kMagic[2] == 'C' && kMagic[11] == 'G' && kBlockBytes == 160 && kOffCrc == 158 && kLayoutVersion == 4 &&
+        kRateSlots == 4 && kOffRates + kRateBytes * kRateSlots == kOffReserved,
         "the layout is the one the dashboard was given");
 
-  // layout 2: a rate per phase
+  // a rate per slot
   build(block, 9, kModuleLe, 12, 15);
-  check(run(block, &got, &why) == Parse::kGood && got.rate[0].fixedMs == 60000 && got.rate[1].fixedMs == 10000 &&
-        got.rate[2].fixedMs == 1000 && got.rate[3].fixedMs == 60000 &&
-        !got.rate[0].fromSoc && !got.rate[3].fromSoc && got.rate[1].socPercent[0] == 75 &&
-        got.rate[3].socPercent[3] == 20 && got.rate[2].socIntervalMs[4] == 180000,
-        "every phase comes back with its fixed gap, off, and the build's table");
+  check(run(block, &got, &why) == Parse::kGood && got.transmit[0].fixedMs == 60000 && got.transmit[1].fixedMs == 1000 &&
+        !got.transmit[0].fromSoc && !got.transmit[1].fromSoc && got.transmit[1].socPercent[0] == 75 &&
+        got.transmit[0].socIntervalMs[4] == 180000,
+        "both transmit rates come back with their fixed gap, off, and the build's table");
 
   build(block, 9, kModuleLe, 12, 15);
-  { uint8_t* r = rateAt(block, 3);   // landed follows its own table
+  { uint8_t* r = rateAt(block, 3);   // the air log follows its own table
     r[kRateFromSoc] = 1;
     r[kRatePercent + 0] = 90; r[kRatePercent + 1] = 60; r[kRatePercent + 2] = 30; r[kRatePercent + 3] = 5;
     put32(r + kRateInterval + 4 * 4, 200000);
     put32(rateAt(block, 0) + kRateFixed, 300000); }
   sign(block);
-  check(run(block, &got, &why) == Parse::kGood && got.rate[3].fromSoc && !got.rate[2].fromSoc &&
-        got.rate[3].socPercent[0] == 90 && got.rate[3].socPercent[3] == 5 && got.rate[3].socIntervalMs[4] == 200000 &&
-        got.rate[2].socIntervalMs[4] == 180000 && got.rate[0].fixedMs == 300000,
-        "one phase's table is its own: the others keep theirs");
+  check(run(block, &got, &why) == Parse::kGood && got.log[1].fromSoc && !got.transmit[1].fromSoc &&
+        got.log[1].socPercent[0] == 90 && got.log[1].socPercent[3] == 5 && got.log[1].socIntervalMs[4] == 200000 &&
+        got.transmit[1].socIntervalMs[4] == 180000 && got.log[0].socPercent[0] == 75 && got.transmit[0].fixedMs == 300000,
+        "one slot's table is its own: the others keep theirs, and transmit and log are independent");
 
   build(block, 9, kModuleLe, 12, 15);
   rateAt(block, 1)[kRateFromSoc] = 2;
@@ -214,7 +259,7 @@ int main()
   check(run(block, &got, &why) == Parse::kRejected, "a battery flag that is not 0 or 1 is refused");
 
   build(block, 9, kModuleLe, 12, 15);
-  rateAt(block, 2)[kRatePercent + 1] = 75;   // equal to the one above it
+  rateAt(block, 2)[kRatePercent + 1] = 75;   // equal to the one above it, a log slot
   sign(block);
   check(run(block, &got, &why) == Parse::kRejected && why != nullptr,
         "thresholds that do not fall are refused, even with the table off");
@@ -222,7 +267,7 @@ int main()
   build(block, 9, kModuleLe, 12, 15);
   rateAt(block, 0)[kRatePercent + 2] = 55;   // rises above the one before it
   sign(block);
-  check(run(block, &got, &why) == Parse::kRejected, "a threshold that rises is refused, in any phase");
+  check(run(block, &got, &why) == Parse::kRejected, "a threshold that rises is refused, in any slot");
 
   for (uint8_t bad : {uint8_t(0), uint8_t(100), uint8_t(255)}) {
     build(block, 9, kModuleLe, 12, 15);
@@ -237,9 +282,9 @@ int main()
   check(true, "thresholds outside 1 to 99 are refused");
 
   build(block, 9, kModuleLe, 12, 15);
-  for (size_t i = 0; i < 5; i++) put32(rateAt(block, 2) + kRateInterval + 4 * i, 0);
+  for (size_t i = 0; i < 5; i++) put32(rateAt(block, 1) + kRateInterval + 4 * i, 0);
   sign(block);
-  check(run(block, &got, &why) == Parse::kGood && got.rate[2].socIntervalMs[2] == 0,
+  check(run(block, &got, &why) == Parse::kGood && got.transmit[1].socIntervalMs[2] == 0,
         "an interval of zero in a table is allowed, as it is for a fixed gap");
 
   printf("\n%s: %d failed\n", failures == 0 ? "all ok" : "FAILURES", failures);

@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 // The things that differ between one board and the next: which board it is, which radio module is
-// on it, the spreading factor and transmit power it should use, how often it transmits, and whether
-// that follows the battery. They were compile-time constants, which meant a per-board image per
+// on it, the spreading factor and transmit power it should use, how often it transmits and logs, and
+// whether those follow the battery. They were compile-time constants, which meant a per-board image per
 // board, and the dashboard has no compiler.
 //
 // So the image carries a 160-byte block at a fixed place, holding those values and a CRC. A tool
@@ -31,13 +31,13 @@ constexpr uint8_t kMagic[16] = {
 
 // Layout 2 (2026-10) grew the block from 32 to 160 bytes: a transmit rate per flight phase, each
 // with its own battery table. Layout 3 (2026-10-16) put the flash log gaps in what layout 2 kept
-// reserved: one per phase and one for when no altitude source is live. A reader has to take the
-// layout byte first and only then knows where the CRC is: layout 1 had it at byte 30
-constexpr uint8_t kLayoutVersion = 3;
+// reserved. Layout 4 (2026-10-31) makes the log a rate like transmit: ground and air transmit, then
+// ground and air log, and the bytes that held the log gaps are reserved again. A reader has to take
+// the layout byte first and only then knows where the CRC is: layout 1 had it at byte 30
+constexpr uint8_t kLayoutVersion = 4;
 
-// Slots per phase in the block. Only 0 (ground) and 1 (air) are used since 2026-10-22, but 2 and 3
-// (were falling and landed) and the blind log gap are still checked, so they need sane values
-constexpr size_t kPhases = 4;      // ground, air, then two unused
+constexpr size_t kPhases = 2;                 // ground, air, as in app/Phase.h
+constexpr size_t kRateSlots = 2 * kPhases;    // ground transmit, air transmit, ground log, air log
 constexpr size_t kSocBands = 5;    // one interval per state-of-charge band: four thresholds between
 
 // byte offsets inside the block, after the magic
@@ -48,21 +48,20 @@ constexpr size_t kOffModule      = 18;
 constexpr size_t kOffSf          = 19;
 constexpr size_t kOffDbm         = 20;
 constexpr size_t kOffSetBy       = 21;
-// One rate per phase, 29 bytes each, ground first: a fixed gap in ms (uint32), then whether the
-// gap follows the battery instead (0/1), four thresholds in percent (falling, each 1 to 99) and five
-// gaps in ms (uint32), one per band. The fixed gap is what a phase uses when it does not follow the
-// battery, and what it uses while the gauge cannot be read when it does
+// Four rates, 29 bytes each: a fixed gap in ms (uint32), then whether the gap follows the battery
+// instead (0/1), four thresholds in percent (falling, each 1 to 99) and five gaps in ms (uint32), one
+// per band. The fixed gap is what a rate uses when it does not follow the battery, and what it uses
+// while the gauge cannot be read when it does. Each slot stands alone: the dashboard writes the same
+// flag and thresholds to a phase's transmit and log slots, this firmware does not care.
+// Transmit: 0 sends back to back. Air log: 0 is a record per IMU reading (every 50 ms). Ground log:
+// what's kept on the ground, 0 keeps nothing. 1 to 19 is refused in every log value, used or not
 constexpr size_t kOffRates       = 22;
 constexpr size_t kRateBytes      = 29;
 constexpr size_t kRateFixed      = 0;
 constexpr size_t kRateFromSoc    = 4;
 constexpr size_t kRatePercent    = 5;
 constexpr size_t kRateInterval   = 9;
-// The gap between flash log records, ms (uint32), one per slot in the same order, then the old
-// blind gap (unused). Air: 0 is a record per IMU reading (every 50 ms). Ground: what's kept on the
-// ground, 0 keeps nothing. 1 to 19 is refused
-constexpr size_t kOffLogs        = 138;
-constexpr size_t kOffLogBlind    = 154;
+constexpr size_t kOffReserved    = 138;  // zero to the CRC
 constexpr uint32_t kLogMinMs     = 20;
 constexpr size_t kOffCrc         = 158;  // uint16 over bytes 0 to 157, low byte first
 
@@ -72,7 +71,7 @@ constexpr uint8_t kModuleHp = 2;
 constexpr uint8_t kSetByBuild = 1;   // nobody has written it; the values are whatever was compiled
 constexpr uint8_t kSetByTool  = 2;   // a tool wrote it
 
-// How often a phase transmits: the gap after each packet
+// How often something happens: the gap after each packet, or between flash log records
 struct Rate
 {
   uint32_t fixedMs;
@@ -88,9 +87,8 @@ struct Settings
   uint8_t  spreadingFactor;
   int8_t   targetDbm;
   uint8_t  setBy;
-  Rate     rate[kPhases];   // ground, air, then two unused
-  uint32_t logMs[kPhases];  // the flash log gap in each, same order
-  uint32_t logBlindMs;      // the old blind gap, unused but still checked
+  Rate     transmit[kPhases];   // ground, air
+  Rate     log[kPhases];        // ground, air
 };
 
 enum class Source : uint8_t

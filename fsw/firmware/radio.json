@@ -1,13 +1,12 @@
 {
-  "layoutVersion": 3,
   "spreadingFactor": {"min": 5, "max": 12},
-  "phases": [
-    {"name": "waiting", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 10000},
-    {"name": "rising", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 50},
-    {"name": "falling", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 50},
-    {"name": "landed", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000], "logMs": 10000}
+  "layoutVersion": 4,
+  "slots": [
+    {"name": "ground transmit", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000]},
+    {"name": "air transmit", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000]},
+    {"name": "ground log", "fixedMs": 10000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 10000, 10000, 10000, 10000]},
+    {"name": "air log", "fixedMs": 50, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [50, 50, 50, 50, 50]}
   ],
-  "logBlindMs": 200,
   "le": {
     "sleepsDuringTx": false,
     "dbm": [
