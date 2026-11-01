@@ -26,7 +26,7 @@
     firmware: null,     // name of the receiver firmware the app carries
     firmwareVersion: null,
     asked: '',          // boards the candidates were last asked for
-    opts: new Map(),    // port -> {sf, backup, confirm}
+    opts: new Map(),    // port -> {sf, backup}: how it is flashed
     heard: new Map(),   // port -> what Listen said
     looks: new Map(),   // port -> what Listen took it for, see LOOKS
     done: new Map(),    // port -> {bad, text}: how the last flash of it ended
@@ -37,13 +37,14 @@
     timer: null,
   };
   const optsFor = (port) => {
-    if (!state.opts.has(port)) state.opts.set(port, { sf: 9, backup: false, confirm: false });
+    if (!state.opts.has(port)) state.opts.set(port, { sf: 9, backup: false });
     return state.opts.get(port);
   };
   const boards = () => hub.boards || [];
   const grouped = new Intl.NumberFormat('en-US');
   const count = (n) => grouped.format(n);
   const clock = (t) => String(new Date(t).getHours()).padStart(2, '0') + ':' + String(new Date(t).getMinutes()).padStart(2, '0');
+  const clockS = (t) => clock(t) + ':' + String(new Date(t).getSeconds()).padStart(2, '0');
   const upFor = (ms) => {
     const m = Math.floor(ms / 60000);
     if (m < 1) return Math.floor(ms / 1000) + ' s';
@@ -194,6 +195,22 @@
       (others.length === 1 ? ' For an LE and HP test, put one receiver on SF9 and the other on SF12.' : '') + '</p>';
   }
 
+  // Under the spreading factor select: what the board has said about the last ask, as
+  // app.js tracks it (A.sfAsks). Only its header is proof; the select shows what it reports.
+  function sfSaid(key, info) {
+    const ask = A.sfAsks ? A.sfAsks.get(key) : null;
+    const hears = ' It hears only boards on this spreading factor.';
+    const hint = (words) => '<span class="hint">' + words + hears + '</span>';
+    if (!ask) return hint("The board's own report. A change is asked of it and counts only when its header says so.");
+    if (ask.state === 'asked') return mark('warn', 'asked for SF' + ask.sf) + hint('Asked for SF' + ask.sf + ' at ' + clockS(ask.at) + ". Waiting for the board's header.");
+    if (ask.state === 'heard') {
+      if (Number(info.sf) !== ask.sf) return hint("The board's own report. A change is asked of it and counts only when its header says so.");
+      return mark('good', 'confirmed') + hint("The board's header confirmed SF" + ask.sf + ' at ' + clockS(ask.heardAt || ask.at) + '.');
+    }
+    const word = ask.state === 'refused' ? 'refused SF' + ask.sf : ask.state === 'failed' ? 'SF' + ask.sf + ' not sent' : 'SF' + ask.sf + ' not confirmed';
+    return mark('bad', word) + hint(esc(ask.said) + '.' + (ask.state === 'refused' ? ' The board answered #DG,ERR,sf.' : ''));
+  }
+
   function radioCard(b) {
     const rx = reading(b);
     if (!rx) return '';
@@ -204,8 +221,7 @@
     return '<div class="pane tb-card2"><h3>Radio</h3>' +
       (open ? '' : row('Port', mark('bad', rx.port.status) + (rx.port.error ? ' ' + esc(rx.port.error) : ''))) +
       // The select is the board's own report of what it is on, so it stays plain ink.
-      row('Spreading factor', info.sf ? sfSelect(rx.key, info.sf) +
-        '<span class="hint">Asked of the board; settles when its next header arrives. It hears only boards on this spreading factor.</span>'
+      row('Spreading factor', info.sf ? sfSelect(rx.key, info.sf) + sfSaid(rx.key, info)
         : '<span class="note">not reported yet</span>', 'tb-sfrow') +
       row('Frequency', info.f ? val(esc(info.f) + ' MHz') : unsaid) +
       row('Bandwidth · CR', pair(info.bw ? String(Number(info.bw)) + ' kHz' : '', info.cr ? '4/' + info.cr : '')) +
@@ -258,14 +274,11 @@
       const sf = '<select data-flashsf="' + esc(b.port) + '" aria-label="Spreading factor it comes up on">' +
         [6, 7, 8, 9, 10, 11, 12].map((n) => '<option value="' + n + '"' + (n === o.sf ? ' selected' : '') + '>SF' + n + '</option>').join('') +
         '</select>';
-      const go = o.confirm
-        ? '<div class="confirm"><span class="grow">Erase <b>' + esc(name) + '</b> and write the receiver firmware?' +
-            (o.backup ? '' : ' Its current firmware is not saved.') + '</span>' +
-          '<button data-flash="' + esc(b.port) + '" class="primary">Overwrite it</button>' +
-          '<button data-cancel="' + esc(b.port) + '">Cancel</button></div>'
-        : '<button class="primary block" data-ask="' + esc(b.port) + '"' + (state.busy ? ' disabled' : '') + '>Flash ' + esc(name) +
+      // One press writes (the user, 2026-11-01, as for the ChipSat flight write); what stands
+      // in the way is said above: the board must have been claimed, and no job may be running.
+      const go = '<button class="primary block" data-flash="' + esc(b.port) + '"' + (state.busy ? ' disabled' : '') + '>Flash ' + esc(name) +
           (state.firmwareVersion ? ' to ' + esc(state.firmwareVersion) : '') + '</button>';
-      body = '<p>Writes ' + (state.firmwareVersion ? 'receiver firmware ' + esc(state.firmwareVersion) : esc(state.firmware)) +
+      body = '<p>Erases what is on the board and writes ' + (state.firmwareVersion ? 'receiver firmware ' + esc(state.firmwareVersion) : esc(state.firmware)) +
           ' over the serial port, then opens it again on ' + sf + '. Reading stops until the board is back.</p>' +
         '<div class="tb-save"><label class="check"><input type="checkbox" data-backup="' + esc(b.port) + '"' + (o.backup ? ' checked' : '') +
           '> Save what is on the board first</label><span class="note">Takes a few minutes.</span></div>' + go;
@@ -385,10 +398,9 @@
     const key = t.getAttribute('data-sf');
     if (key) {
       const sf = Number(t.value);
-      // Back to whatever the board last reported; the select settles when its next header arrives.
+      // Back to whatever the board last reported; the row under it follows the ask, see sfSaid
       t.blur();
-      hub.setSf(key, sf).then(() => toast('Asked ' + A.rxName(key) + ' for SF' + sf))
-        .catch((err) => toast('Could not set SF: ' + (err.message || err)));
+      A.askSf(key, sf);
     }
   });
 
@@ -446,16 +458,11 @@
       return;
     }
 
-    const ask = at('data-ask');
-    const cancel = at('data-cancel');
-    if (ask || cancel) { optsFor(ask || cancel).confirm = !!ask; render(); return; }
-
     const go = at('data-flash');
     if (!go || state.busy) return;
     const o = optsFor(go);
     const b = boards().find((x) => x.port === go);
     const name = b ? nameOf(b) : go;
-    o.confirm = false;
     state.busy = go; state.pct = 0;
     state.done.delete(go);
     // The whole chip is read before anything is erased. It is minutes, not seconds, so

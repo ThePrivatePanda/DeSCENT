@@ -116,6 +116,49 @@ test('a reconnect\'s snapshot and a replay make no run sound', async () => {
   assert.equal(p.sounds.length, 1, 'nothing while replaying');
 });
 
+// The user, 2026-11-01: "I need confirmation from the tbeam that it's listening to the new SF
+// and not just 'asked tbeam for x SF'". The firmware answers #SET,sf with its header, or #DG,ERR,sf.
+test('a spreading factor counts only when the board\'s own header says so', async () => {
+  const p = dashboard();
+  await p.settle();
+  const ws = p.net.last().open();
+  const rxRow = (sf) => ({ kind: 'receiver', id: 'rx1', name: 'Mast', sf, packets: 12, dups: 0, badCrc: 0, errors: 0, lastLine: Date.now() });
+  const header = (sf) => '#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf=' + sf + ',cr=7,sync=0x12,pre=8,name=Mast,fw=1.5.0';
+  ws.send(numbered([rxRow(7), { kind: 'snapshot-end' }]));
+  await p.every(250);
+  let seq = 10;
+  const send = (m) => ws.send(Object.assign(m, { seq: seq++ }));
+  const rows = () => text(p.$('receivers').innerHTML);
+  await p.fire('receivers', 'change', { dataset: { sf: 'rx1' }, value: '9' });
+  assert.deepStrictEqual(p.posts().map((c) => c.url + ' ' + c.body), ['/api/receiver/rx1/config {"sf":9}']);
+  assert.strictEqual(p.$('toast').textContent, 'Asked Mast for SF9, waiting for its header');
+  assert.match(rows(), /Mast SF7 .*asked for SF9/, 'the row keeps what the board last said, and says the ask is pending');
+  // a header still saying 7, printed before the command landed, decides nothing
+  send({ kind: 'line', rx: 'rx1', t: Date.now(), text: header(7) });
+  await p.settle();
+  assert.match(rows(), /asked for SF9/);
+  // the board's answer: its header with the new value, and the app's row following it
+  send({ kind: 'line', rx: 'rx1', t: Date.now(), text: header(9) });
+  send(rxRow(9));
+  await p.every(250);
+  assert.strictEqual(p.$('toast').textContent, 'Mast is listening on SF9');
+  assert.match(rows(), /Mast SF9 .*SF9 confirmed/);
+  // refused outright
+  await p.fire('receivers', 'change', { dataset: { sf: 'rx1' }, value: '12' });
+  send({ kind: 'line', rx: 'rx1', t: Date.now(), text: '#DG,ERR,sf' });
+  await p.every(250);
+  assert.strictEqual(p.$('toast').textContent, 'Mast refused SF12 and stays on SF9');
+  assert.match(rows(), /Mast SF9 .*refused SF12/);
+  assert.doesNotMatch(rows(), /confirmed/);
+  // nothing back within the wait
+  await p.fire('receivers', 'change', { dataset: { sf: 'rx1' }, value: '10' });
+  assert.match(rows(), /asked for SF10/);
+  p.net.runTimers();
+  await p.every(250);
+  assert.strictEqual(p.$('toast').textContent, 'No header from Mast in 4 s, so SF10 is not confirmed');
+  assert.match(rows(), /Mast SF9 .*SF10 not confirmed/);
+});
+
 test('the replay bar drives the replay in the app', async () => {
   const p = dashboard();
   await p.settle();

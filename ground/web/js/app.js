@@ -45,6 +45,61 @@
   });
   const live = hub.stream.fleet;
 
+  // A receiver's spreading factor is the board's own word, never the page's. The firmware
+  // answers a #SET,sf with its header line (#DG,RX,… sf=) or with #DG,ERR,sf; until a header
+  // says the new value the ask is only an ask, and the rows say so (the user, 2026-11-01:
+  // "I need confirmation from the tbeam that it's listening to the new SF").
+  const sfAsks = new Map();   // rx key -> {sf, at, state: asked | heard | refused | silent | failed, was, said, heardSf, heardAt}
+  const SF_WAIT_MS = 4000;    // the firmware answers at once; its 30 s header is not waited for
+  function askSf(k, sf) {
+    const r = live.receivers.get(k);
+    const ask = { sf, at: Date.now(), state: 'asked', was: r && r.info.sf ? Number(r.info.sf) : NaN, said: '', heardSf: NaN, heardAt: 0 };
+    sfAsks.set(k, ask);
+    renderReceivers();
+    return hub.setSf(k, sf).then(() => {
+      if (ask.state === 'asked') toast('Asked ' + rxName(k) + ' for SF' + sf + ', waiting for its header');
+      setTimeout(() => {
+        if (ask.state !== 'asked') return;
+        ask.state = 'silent';
+        ask.said = Number.isFinite(ask.heardSf) ? rxName(k) + ' answered with SF' + ask.heardSf + ', not SF' + sf
+          : 'No header from ' + rxName(k) + ' in ' + (SF_WAIT_MS / 1000) + ' s, so SF' + sf + ' is not confirmed';
+        toast(ask.said);
+        renderReceivers();
+      }, SF_WAIT_MS);
+    }).catch((err) => {
+      ask.state = 'failed';
+      ask.said = 'Could not ask ' + rxName(k) + ' for SF' + sf + ': ' + (err.message || err);
+      toast(ask.said);
+      renderReceivers();
+    });
+  }
+  taps.push((rx, text, t) => {
+    const ask = sfAsks.get(rx);
+    if (!ask || ask.state !== 'asked') return;
+    if (text.startsWith('#DG,ERR,sf')) {
+      ask.state = 'refused';
+      ask.said = rxName(rx) + ' refused SF' + ask.sf + (Number.isFinite(ask.was) ? ' and stays on SF' + ask.was : '');
+    } else if (text.startsWith('#DG,RX,')) {
+      const m = /,sf=(\d+)/.exec(text);
+      const sf = m ? Number(m[1]) : NaN;
+      // A header printed before the command landed still says the old value; the answer
+      // itself follows at once, so a header that disagrees is left to the wait to judge.
+      if (sf !== ask.sf) { ask.heardSf = sf; return; }
+      ask.state = 'heard'; ask.heardAt = t;
+      ask.said = rxName(rx) + ' is listening on SF' + sf;
+    } else return;
+    toast(ask.said);
+    renderReceivers();
+  });
+  // The mark a receiver row carries for its last ask; none once the board has said the same
+  function sfMark(k, r) {
+    const ask = sfAsks.get(k);
+    if (!ask) return '';
+    if (ask.state === 'asked') return V.mark('warn', 'asked for SF' + ask.sf);
+    if (ask.state === 'heard') return r && Number(r.info.sf) === ask.sf ? V.mark('good', 'SF' + ask.sf + ' confirmed') : '';
+    return V.mark('bad', ask.state === 'refused' ? 'refused SF' + ask.sf : ask.state === 'failed' ? 'SF' + ask.sf + ' not sent' : 'SF' + ask.sf + ' not confirmed');
+  }
+
   const fleet = () => (view.mode === 'replay' && view.replay ? view.replay.r.fleet : live);
   const client = () => (view.mode === 'replay' && view.replay ? view.replay.r.stream : hub.stream);
   // The replay's own clock only while the replay is what is on screen: with a log open
@@ -824,7 +879,7 @@
       const controls = replaying ? '' : (r && r.info.sf ? sfSelect(k, r.info.sf) : '') +
         (port && port.status === 'open' ? '<button data-close="' + esc(k) + '" title="Disconnect" aria-label="Disconnect ' + esc(rxName(k)) + '">✕</button>' : '');
       return V.receiverRowHtml({ key: k, name: rxName(k), id: r && r.id, sf: r && r.info.sf, packets: r ? r.unique : 0,
-        word: st.word, cls: st.cls, index: m.index, detail, controls, sel: view.rxSel === k });
+        word: st.word, cls: st.cls, index: m.index, detail, controls, extra: sfMark(k, r), sel: view.rxSel === k });
     });
     // Lines that did not come off a radio. Said plainly, because an absent RSSI is an
     // absence and not a fault, and a screenshot of a replay should not read as live.
@@ -871,11 +926,9 @@
     const k = e.target.dataset.sf;
     if (!k) return;
     const sf = Number(e.target.value);
-    // Back to whatever the board last reported; the select settles when its next header arrives.
+    // Back to whatever the board last reported; the row says "asked for SFn" until the board's header says SFn
     e.target.blur();
-    renderReceivers();
-    hub.setSf(k, sf).then(() => toast('Asked ' + rxName(k) + ' for SF' + sf))
-      .catch((err) => toast('Could not set SF: ' + (err.message || err)));
+    askSf(k, sf);
   });
 
   const charts = new DG.Charts($('charts'), $('tabs'), (k) => ({ label: rxName(k), index: meta(k).index }));
@@ -959,7 +1012,7 @@
 
   window.DGApp = Object.assign(api, {
     live, view, hub, model, openReplay, closeReplay, settings: () => settings, taps, packetTaps,
-    showView, openServerLog, rxName,
+    showView, openServerLog, rxName, askSf, sfAsks,
     // The plots were sized for a hidden box while another screen was up.
     redraw: () => { render(true); charts.resize(); },
     ui: { $, esc, toast, download, logUrl, flatName, served, age, sfSelect },
