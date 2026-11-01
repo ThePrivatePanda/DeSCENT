@@ -37,12 +37,12 @@ test('live: the unit list is drawn from the stream, and a unit the app calls los
   await p.every(250);
   assert.match(p.$('toast').textContent, /^CSID 9 lost after/);
   assert.match(text(p.$('fleet').querySelector('tbody').innerHTML), /CSID 9 Lost/);
-  assert.deepStrictEqual(p.sounds, [[660, null, 0.18], [660, null, 0.18], [660, null, 0.18]], 'three low notes, and nothing for the snapshot');
+  assert.deepStrictEqual(p.sounds, [[660, 'sine', 0.18, 'eased'], [660, 'sine', 0.18, 'eased'], [660, 'sine', 0.18, 'eased']], 'three low notes, and nothing for the snapshot');
 });
 
 // The user, 2026-11-01: "beep every time it hears a chipsat. not on every transmission, but
 // basically every time it gets the 0 counter packet ... so I also know if a new 'run' started"
-test('a run starting is one short chirp: a board heard for the first time, or its counter starting again', async () => {
+test('a run starting is one plain beep: a board heard for the first time, or its counter starting again', async () => {
   const p = dashboard();
   await p.settle();
   const ws = p.net.last().open();
@@ -61,7 +61,7 @@ test('a run starting is one short chirp: a board heard for the first time, or it
   // a board never heard before
   send(unit(15, { firstT: Date.now() - 500, packets: 1 }));
   await p.every(250);
-  assert.deepStrictEqual(p.sounds, [[880, 1320, 0.14]], 'one rising chirp, nothing like the lost alarm');
+  assert.deepStrictEqual(p.sounds, [[1000, 'square', 0.15, 'hard']], 'one 1 kHz square beep, switched on and off, no slide, nothing like the lost alarm');
   await p.every(250);
   assert.equal(p.sounds.length, 1, 'said once');
   // 9 restarts: the app retires its run and sends a new live row with a new first packet time.
@@ -77,14 +77,14 @@ test('a run starting is one short chirp: a board heard for the first time, or it
   try {
     send(unit(9, { firstT: realNow() - 100, packets: 2 }));
     await p.every(250);
-    assert.equal(p.sounds.length, 2, 'the restart chirps');
-    assert.deepStrictEqual(p.sounds[1], [880, 1320, 0.14]);
+    assert.equal(p.sounds.length, 2, 'the restart beeps');
+    assert.deepStrictEqual(p.sounds[1], [1000, 'square', 0.15, 'hard']);
     // two boards up in one pass: one sound
     Date.now = () => realNow() + 6000;
     send(unit(21, { firstT: realNow() + 5000, packets: 1 }));
     send(unit(22, { firstT: realNow() + 5000, packets: 1 }));
     await p.every(250);
-    assert.equal(p.sounds.length, 3, 'two new boards in one pass are one chirp');
+    assert.equal(p.sounds.length, 3, 'two new boards in one pass are one beep');
   } finally { Date.now = realNow; }
 });
 

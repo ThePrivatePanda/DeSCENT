@@ -72,18 +72,22 @@ function dashboard(o) {
     body: { dataset: {} },
   };
   class FakeBlob { constructor(parts, opt) { this.parts = parts; this.type = opt && opt.type; } }
-  // Every tone the page starts: [frequency it starts at, frequency it slides to or null, length s]
+  // Every tone the page starts: [frequency Hz, wave, length s, how the level moves: 'eased' or 'hard']
   const sounds = [];
   class FakeAudio {
     constructor() { this.currentTime = 0; this.state = 'running'; this.destination = {}; }
-    createGain() { const g = { connect: () => g, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } }; return g; }
+    createGain() {
+      const g = { ramps: 0, connect: () => g, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() { g.ramps++; } } };
+      this.lastGain = g;
+      return g;
+    }
     createOscillator() {
-      const o = { start: 0, to: null, at: 0, connect: () => o, frequency: { value: 0 } };
-      o.frequency.setValueAtTime = (hz, at) => { o.start = hz; o.at = at; };
-      o.frequency.exponentialRampToValueAtTime = (hz) => { o.to = hz; };
-      o.start = (at) => { o.at = at; };
-      o.stop = (at) => { sounds.push([o.frequency.value || o.hz, o.to, Math.round((at - o.at) * 100) / 100]); };
+      const ctx = this;
+      const o = { hz: 0, at: 0, type: 'sine', connect: () => o, frequency: { value: 0 } };
       o.frequency.setValueAtTime = (hz, at) => { o.hz = hz; o.at = at; };
+      o.frequency.exponentialRampToValueAtTime = () => { throw new Error('a tone does not slide'); };
+      o.start = (at) => { o.at = at; };
+      o.stop = (at) => { sounds.push([o.hz, o.type, Math.round((at - o.at) * 100) / 100, ctx.lastGain && ctx.lastGain.ramps ? 'eased' : 'hard']); };
       return o;
     }
   }

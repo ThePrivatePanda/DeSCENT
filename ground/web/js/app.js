@@ -664,22 +664,28 @@
   const heard = new Map();   // csid -> the state it was in when last drawn
   let audio = null;
 
-  // One tone at a time offset: freq in Hz, len in seconds, and to, a frequency it slides to.
   // The browser will not start audio before the page has been clicked or typed on once: a
   // context made before that is suspended, and the click handler below resumes it, so the
   // first sound is the one after the first click. In a background tab the 250 ms redraw is
   // throttled to once a second (once a minute after five minutes hidden), so a sound can
   // come that late; it does play in the background once the context is running.
-  function tone(at, freq, len, to) {
+  // One tone: freq in Hz, len in seconds. A sine eases in and out; hard is a square wave
+  // switched on and off, which is what reads as a beep.
+  function tone(at, freq, len, hard) {
     const osc = audio.createOscillator();
     const gain = audio.createGain();
+    osc.type = hard ? 'square' : 'sine';
     osc.frequency.setValueAtTime(freq, at);
-    if (to) osc.frequency.exponentialRampToValueAtTime(to, at + len);
-    gain.gain.setValueAtTime(0.0001, at);
-    gain.gain.exponentialRampToValueAtTime(0.2, at + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, at + len);
+    if (hard) {
+      gain.gain.setValueAtTime(0.08, at);
+      gain.gain.setValueAtTime(0.0001, at + len);
+    } else {
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.2, at + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + len);
+    }
     osc.connect(gain).connect(audio.destination);
-    osc.start(at); osc.stop(at + len + 0.02);
+    osc.start(at); osc.stop(at + len + (hard ? 0 : 0.02));
   }
   function sound() {
     audio = audio || new (window.AudioContext || window.webkitAudioContext)();
@@ -694,10 +700,11 @@
       for (let i = 0; i < times; i++) tone(audio.currentTime + i * 0.22, 660, 0.16);
     } catch (e) { /* no audio device, or the browser wants a click first */ }
   }
-  // A run starting: one short rising chirp, nothing like the lost alarm
-  function chirp() {
+  // A run starting: one plain beep, a 1 kHz square for 150 ms, nothing like the lost alarm
+  // (2026-11-01: the user wanted a beep, not a rising chirp)
+  function runBeep() {
     if (!settings.alarmSound) return;
-    try { sound(); tone(audio.currentTime, 880, 0.12, 1320); } catch (e) { /* as above */ }
+    try { sound(); tone(audio.currentTime, 1000, 0.15, true); } catch (e) { /* as above */ }
   }
   for (const ev of ['click', 'keydown']) document.addEventListener(ev, () => { if (audio && audio.state === 'suspended' && audio.resume) audio.resume().catch(() => {}); });
 
@@ -726,7 +733,7 @@
   // or within two seconds are one sound, not a burst.
   const runsSeen = new Map();   // csid -> firstT of the live run last seen
   let runsAdopt = -1;
-  let lastChirp = 0;
+  let lastRunBeep = 0;
   function watchForRuns() {
     const silent = runsAdopt !== live.adopts || view.mode === 'replay';
     runsAdopt = live.adopts;
@@ -739,9 +746,9 @@
     for (const csid of runsSeen.keys()) if (!live.units.has(csid)) runsSeen.delete(csid);
     if (!fresh || silent) return;
     const t = Date.now();
-    if (t - lastChirp < 2000) return;
-    lastChirp = t;
-    chirp();
+    if (t - lastRunBeep < 2000) return;
+    lastRunBeep = t;
+    runBeep();
   }
 
   function renderLatest(f, t) {
