@@ -9,7 +9,7 @@ const CS9 = { uid: UID9, name: 'CS9', module: 'le', lastSeen: 1, firmware: 'benc
 const FLIGHT9 = Object.assign({}, CS9, { firmware: 'flight' });
 const CONSOLE = { port: '/dev/ttyUSB0', key: 'usb-console-1', usb: '10c4:ea60', state: 'receiver', name: '' };
 const TBEAM = { port: '/dev/ttyACM0', key: 'usb-tbeam-1', usb: '303a:1001', state: 'receiver', name: 'rx A' };
-const BLOCK = { layoutVersion: 3, csid: 9, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, logBlindMs: 200, reservedClear: true };
+const BLOCK = { layoutVersion: 4, csid: 9, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, reservedClear: true };
 const readOf = (kind) => ({ ok: true, uid: UID9, flashBytes: 262144, firmware: { kind, module: 'le', id: 'c4fb204d8f79e725' },
   settings: kind === 'flight' ? BLOCK : null, settingsError: null, probe: PROBE });
 
@@ -204,8 +204,8 @@ test('a bench board has the bench first, then Other images, then the flight pane
   const at = (re) => h.search(re);
   assert.ok(at(/data-radio=/) > 0);
   assert.ok(at(/data-radio=/) < at(/id="cs-bench"/));
-  assert.ok(at(/id="cs-bench"/) < at(/data-images=/));
-  assert.ok(at(/data-images=/) < at(/<details class="fold" data-fold="radio">/));
+  assert.ok(at(/id="cs-bench"/) < at(/<h3>Other images</));
+  assert.ok(at(/<h3>Other images</) < at(/<details class="fold" data-fold="radio">/));
   assert.ok(at(/data-fold="radio"/) < at(/<details class="fold" data-fold="log">/));
   assert.match(p.headWords(), /Identity and radio, phases Not on the board: the sensor bench has no settings block/);
   assert.match(h, /data-fold="log"/);
@@ -242,18 +242,17 @@ test('a flight board whose console says test=bench gets a line naming both, and 
   assert.doesNotMatch(p.head(), /id="cs-bench"/);
 });
 
-test('flight software can be written from the bench pane, saying what it writes', async () => {
-  const p = await bench({ probes: [PROBE], read: readOf('bench') });
+test('flight software can be written from the bench pane on one press, saying what it writes', async () => {
+  const p = await bench({ probes: [PROBE], read: readOf('bench'), storage: { ['dg-draft-' + UID9]: JSON.stringify({ csid: '9', sf: 7, dbm: 14, p0s: '60', p0l: '1', p1s: '10', p1l: '0.05' }) } });
   assert.match(p.headWords(), /Sensor bench running it, read off the board now/);
-  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1', 'data-where': 'bench' });
   const h = p.head();
-  assert.equal((h.match(/data-buildgo="1"/g) || []).length, 1, 'one confirm, in the bench pane');
-  assert.ok(h.indexOf('data-buildgo') < h.indexOf('id="cs-bench"'));
-  assert.match(p.headWords(), /LE module.*board 255, LE, SF7, 14 dBm/);
-  await p.fire('screen-chipsats', 'click', { 'data-buildgo': '1' });
+  assert.ok(h.indexOf('data-buildembed="1"') < h.indexOf('id="cs-bench"'), 'the button is in the bench pane');
+  assert.match(p.headWords(), /Write flight software board 9, LE, SF7, 14 dBm\. Change it in Identity and radio below\./);
+  assert.doesNotMatch(h, /data-buildgo/);
+  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   assert.match(p.o.flashed.embedded, /^(built|flight)$/);
   assert.strictEqual(p.o.flashed.uid, UID9);
-  assert.strictEqual(p.o.flashed.csid, '255');
+  assert.strictEqual(p.o.flashed.csid, '9', 'what this browser remembers of the board: the bench image has no block');
 });
 
 test('the bench timer redraws only its own pane', async () => {

@@ -232,32 +232,105 @@
     return ms === 0 ? 'back to back' : String(Number((ms / 1000).toFixed(2))) + ' s';
   }
 
-  // Slot names from the firmware before 2026-10-22. Ground fills waiting and landed, air fills
-  // rising and falling, so older firmware still gets sensible gaps
-  const PHASE_NAMES = ['waiting', 'rising', 'falling', 'landed'];
+  // The block's layout this page writes. The app refuses a page asking for any other.
+  const LAYOUT = 4;
   const PHASES = [
-    { key: 'ground', label: 'Ground', slots: [0, 3] },
-    { key: 'air', label: 'Air', slots: [1, 2] },
+    { key: 'ground', label: 'Ground' },
+    { key: 'air', label: 'Air' },
   ];
+  const BANDS = 5;
+  // The thresholds the firmware is compiled with. Written only behind a battery switch that is
+  // off, where the firmware never reads them; a switch that is on needs every box typed.
+  const INERT_PERCENT = [75, 50, 35, 20];
+  const FIXED = 'fixed';   // the row of a table that is no band: Always, or Gauge unread
   // A block from before the phases (layout 1) has one gap, used from switch-on to the end.
   const NO_PHASES = 'no phases in this firmware';
 
   // 0 means every IMU reading in the air, nothing written on the ground
+  function logZero(phase) { return phase === 'ground' ? 'nothing written' : 'every reading'; }
   function logWords(ms, phase) {
-    if (Number(ms) === 0) return phase === 'ground' ? 'nothing written' : 'every reading';
-    return 'every ' + intervalWords(ms);
+    return Number(ms) === 0 ? logZero(phase) : 'every ' + intervalWords(ms);
   }
 
-  // One phase's rate as the "On the board" column says it: "every 60 s", or what the phase
-  // follows on the battery and what it falls back to.
-  function rateWords(r) {
+  // One rate as the page says it: "every 60 s", or what it follows on the battery and what it
+  // falls back to. zero is what a gap of 0 means for this rate, back to back unless told.
+  function rateWords(r, zero) {
     if (!r) return NO_PHASES;
-    if (!r.follow) return r.fixedMs === 0 ? 'back to back' : 'every ' + intervalWords(r.fixedMs);
+    const gap = (ms) => (Number(ms) === 0 ? zero || 'back to back' : intervalWords(ms));
+    if (!r.follow) return Number(r.fixedMs) === 0 ? gap(0) : 'every ' + intervalWords(r.fixedMs);
     const p = r.percent, ms = r.intervalMs;
-    const parts = [intervalWords(ms[0]) + ' above ' + p[0] + ' %'];
-    for (let i = 1; i < p.length; i++) parts.push(intervalWords(ms[i]) + ' to ' + p[i] + ' %');
-    parts.push('then ' + intervalWords(ms[ms.length - 1]));
-    return 'by battery: ' + parts.join(', ') + ' (' + intervalWords(r.fixedMs) + ' when the gauge cannot be read)';
+    const parts = [gap(ms[0]) + ' above ' + p[0] + ' %'];
+    for (let i = 1; i < p.length; i++) parts.push(gap(ms[i]) + ' to ' + p[i] + ' %');
+    parts.push('then ' + gap(ms[ms.length - 1]));
+    return 'by battery: ' + parts.join(', ') + ' (' + gap(r.fixedMs) + ' when the gauge cannot be read)';
+  }
+
+  // A row of the table as it reads: Above 75 %, To 50 %, To 35 %, To 20 %, Below 20 %.
+  function bandLabel(percent, k) {
+    return k === 0 ? 'Above ' + percent[0] + ' %'
+      : k === BANDS - 1 ? 'Below ' + percent[BANDS - 2] + ' %'
+        : 'To ' + percent[k] + ' %';
+  }
+
+  // What one cell holds: the gap the rate gives in that row.
+  const gapIn = (r, k) => (k === FIXED || !r.follow ? r.fixedMs : r.intervalMs[k]);
+  const secsOr = (ms, zero) => (Number(ms) === 0 ? zero : intervalWords(ms));
+  const zeroOf = (column, phase) => (column === 'log' ? logZero(phase) : 'back to back');
+  const typed = (v) => (/^\s*-?\d+(\.\d+)?\s*$/.test(String(v)) ? Number(v) : NaN);
+  const toMs = (v) => Math.round(typed(v) * 1000);
+
+  // The draft's rate for a phase's column. p<n>s and p<n>ms<k> are the transmit boxes, p<n>l and
+  // p<n>lms<k> the log ones, in seconds. The switch and the thresholds are the phase's, one set
+  // for both columns. A box that is empty or half typed is NaN, never 0.
+  function draftRate(d, n, column) {
+    const log = column === 'log';
+    return {
+      fixedMs: toMs(d['p' + n + (log ? 'l' : 's')]), follow: !!d['p' + n + 'f'],
+      percent: [0, 1, 2, 3].map((k) => typed(d['p' + n + 'soc' + k])),
+      intervalMs: [0, 1, 2, 3, 4].map((k) => toMs(d['p' + n + (log ? 'lms' : 'ms') + k])),
+    };
+  }
+
+  // Why the draft cannot be written yet: a box that is empty or half typed, or the id 255 that
+  // every board is built with. The draft has no defaults (2026-10-31, the user's call, after a
+  // one-press write put 255, SF7 and 14 dBm on a real board): a board read without a block
+  // starts blank, and a blank must never become 0 or a default on the way to the board.
+  function draftStop(d) {
+    const bad = (v) => Number.isNaN(typed(v));
+    const missing = [];
+    if (bad(d.csid)) missing.push('the board id');
+    if (bad(d.sf)) missing.push('the spreading factor');
+    if (bad(d.dbm)) missing.push('the transmit power');
+    let boxes = 0;
+    PHASES.forEach((ph, n) => {
+      if (d['p' + n + 'f']) {
+        for (let k = 0; k < BANDS - 1; k++) if (bad(d['p' + n + 'soc' + k])) boxes++;
+        for (let k = 0; k < BANDS; k++) { if (bad(d['p' + n + 'ms' + k])) boxes++; if (bad(d['p' + n + 'lms' + k])) boxes++; }
+      } else {
+        if (bad(d['p' + n + 'l'])) boxes++;
+        if (bad(d['p' + n + 's'])) boxes++;
+      }
+    });
+    if (boxes) missing.push(boxes + (boxes === 1 ? ' box' : ' boxes') + ' in Phases');
+    if (missing.length) {
+      const list = missing.length === 1 ? missing[0] : missing.slice(0, -1).join(', ') + ' and ' + missing[missing.length - 1];
+      return 'Fill in ' + list + ' first.';
+    }
+    if (typed(d.csid) === CSID_UNSET) return 'Set a board id first.';
+    return '';
+  }
+
+  // A board's phase whose two columns don't share a switch or thresholds. The firmware doesn't
+  // mind, the page writes them the same, so this is only said.
+  function columnsApart(tx, log) {
+    if (!tx || !log) return '';
+    if (!!tx.follow !== !!log.follow) {
+      return 'On the board ' + (tx.follow ? 'transmit follows the battery and the log does not.' : 'the log follows the battery and transmit does not.');
+    }
+    if (tx.percent.join() !== log.percent.join()) {
+      return 'On the board the thresholds differ: log ' + log.percent.join(', ') + ' %, transmit ' + tx.percent.join(', ') + ' %.';
+    }
+    return '';
   }
 
   // What a read with no block in it is told. The dump firmware never has one; any other image
@@ -276,15 +349,17 @@
       { key: 'sf', label: 'Spreading factor', onBoard: s ? 'SF' + s.sf : '—' },
       { key: 'dbm', label: 'Transmit power', onBoard: s ? dbmWords(s.dbm) : '—' },
     ];
-    // A second slot that differs (set by older firmware) is shown too. Layout 1 has one gap,
-    // shown under air since it was the old falling gap. Layout 2 has no log gaps
-    PHASES.forEach((ph) => {
-      const words = (i) => rateWords(s.rates[i]) + (s.logMs ? ', log ' + logWords(s.logMs[i], ph.key) : '');
-      const [first, second] = ph.slots;
-      const same = (a, b) => JSON.stringify(s.rates[a]) === JSON.stringify(s.rates[b]) && (!s.logMs || Number(s.logMs[a]) === Number(s.logMs[b]));
-      const onBoard = !s ? '—' : s.rates ? words(first) + (same(first, second) ? '' : '; ' + PHASE_NAMES[second] + ' slot ' + words(second))
+    // A spare slot that differs (older firmware) is shown too. Layout 1 has one gap, shown
+    // under air since it was the old falling gap. Layout 2 has no log gaps
+    PHASES.forEach((ph, n) => {
+      const tx = s && s.transmit ? s.transmit[n] : null;
+      const log = s && s.log ? s.log[n] : null;
+      const words = (rate, logMs) => rateWords(rate) + (logMs == null ? '' : ', log ' + logMs);
+      const older = (s && s.olderSlots || []).filter((o) => o.phase === n)
+        .map((o) => o.name + ' slot ' + words(o.rate, o.logMs == null ? null : logWords(o.logMs, ph.key)));
+      const onBoard = !s ? '—' : tx ? [words(tx, log ? rateWords(log, logZero(ph.key)) : null)].concat(older).join('; ')
         : ph.key === 'air' ? 'every ' + intervalWords(s.txIntervalMs) + ' (' + NO_PHASES + ')' : NO_PHASES;
-      rows.push({ key: ph.key, label: ph.label, onBoard });
+      rows.push({ key: ph.key, label: ph.label, onBoard, older, apart: columnsApart(tx, log) });
     });
     if (!s) {
       // What the app said about the block it could not give, as it said it.
@@ -305,33 +380,92 @@
     };
   }
 
-  // Which rows of the Build with column would replace what the board holds. Compared as
-  // numbers: the board's column reads "+14 dBm" and "every 1 s" where the controls hold 14
-  // and 1 (seconds). A box that is empty or half typed is not what is on the board. With no
-  // block read there is nothing known to be replaced, so nothing differs. A board with no
-  // phases is always replaced in every phase: flashing gives it them.
+  // What a write changes in one phase, row by row, as [what, was, now]. Compared as numbers: the
+  // board's column reads "every 1 s" where the controls hold 1 (seconds). A box that is empty or
+  // half typed is not what is on the board. A board with no phases, no log gaps or a spare slot
+  // has that replaced whatever the boxes say: flashing gives it the block as it is now.
+  function phaseChanges(settings, draft, n) {
+    const s = settings;
+    const ph = PHASES[n];
+    const out = [];
+    const want = { transmit: draftRate(draft, n, 'transmit'), log: draftRate(draft, n, 'log') };
+    const sayRate = (column) => rateWords(want[column], zeroOf(column, ph.key));
+    if (!s.transmit) {
+      return [[ph.label, ph.key === 'air' ? 'every ' + intervalWords(s.txIntervalMs) + ' (' + NO_PHASES + ')' : NO_PHASES,
+        sayRate('transmit') + ', log ' + sayRate('log')]];
+    }
+    (s.olderSlots || []).filter((o) => o.phase === n).forEach((o) => {
+      out.push([ph.label + ', ' + o.name + ' slot', rateWords(o.rate), 'gone: the block has one slot a phase']);
+    });
+    const board = { transmit: s.transmit[n], log: s.log ? s.log[n] : null };
+    const columns = ['log', 'transmit'];
+    columns.forEach((c) => {
+      const was = board[c];
+      if (!was) { out.push([ph.label + ', ' + c, 'no log gaps', sayRate(c)]); return; }
+      if (!!was.follow !== want[c].follow) {
+        out.push([ph.label + ', ' + c + ' by battery level', was.follow ? 'on' : 'off', want[c].follow ? 'on' : 'off']);
+      }
+    });
+    for (let k = 0; k < BANDS - 1; k++) {
+      const off = columns.filter((c) => board[c] && Number(board[c].percent[k]) !== want[c].percent[k]);
+      const was = off.map((c) => board[c].percent[k]);
+      if (off.length === 2 && was[0] === was[1]) off.pop();
+      off.forEach((c, i) => {
+        out.push([ph.label + ', ' + (off.length === 1 && columns.every((x) => board[x]) && was[0] === board[columns[1 - columns.indexOf(c)]].percent[k] ? '' : c + ' ') + 'threshold ' + (k + 1),
+          was[i] + ' %', (Number.isNaN(want[c].percent[k]) ? '—' : want[c].percent[k]) + ' %']);
+      });
+    }
+    const showing = want.log.follow ? want.log.percent : (board.log || board.transmit).percent;
+    columns.forEach((c) => {
+      const was = board[c];
+      if (!was) return;
+      const zero = zeroOf(c, ph.key);
+      const row = (what, a, b) => { if (Number(a) !== b) out.push([ph.label + ', ' + what + ', ' + c, secsOr(a, zero), secsOr(b, zero)]); };
+      row(want[c].follow ? 'gauge unread' : 'always', was.fixedMs, want[c].fixedMs);
+      for (let k = 0; k < BANDS; k++) {
+        const label = bandLabel(showing, k).toLowerCase();
+        // What it gives there, or when neither side uses the table, what the table holds.
+        if (want[c].follow || was.follow) row(label, gapIn(was, k), gapIn(want[c], k));
+        else row(label + ' (not in use)', was.intervalMs[k], want[c].intervalMs[k]);
+      }
+    });
+    return out;
+  }
+
+  // The rows the page draws for a phase, top down: each band and the gauge unread with the switch
+  // on, one Always row with it off. For each, what the board holds and whether the box replaces
+  // it. With no block read there is nothing known to be replaced.
+  function phaseRows(settings, draft, n) {
+    const follow = !!draft['p' + n + 'f'];
+    const keys = follow ? [0, 1, 2, 3, 4, FIXED] : [FIXED];
+    const phase = PHASES[n].key;
+    const board = settings && settings.transmit
+      ? { transmit: settings.transmit[n], log: settings.log ? settings.log[n] : null } : null;
+    return keys.map((k) => {
+      const cell = (column) => {
+        const was = board && board[column];
+        if (!was) return { was: '', changed: !!settings };
+        const want = draftRate(draft, n, column);
+        if (!follow && was.follow) return { was: 'by battery', changed: true };
+        return { was: secsOr(gapIn(was, k), zeroOf(column, phase)), changed: Number(gapIn(was, k)) !== gapIn(want, k) };
+      };
+      return { key: k, log: cell('log'), transmit: cell('transmit') };
+    });
+  }
+
+  // Which controls would replace what the board holds. With no block read there is nothing known
+  // to be replaced, so nothing differs.
   function buildDiffers(settings, remembered, draft) {
     const s = settings;
     const none = { module: false, csid: false, sf: false, dbm: false, ground: false, air: false };
     if (!s || !draft) return none;
-    const typed = (v) => (/^\s*-?\d+(\.\d+)?\s*$/.test(String(v)) ? Number(v) : NaN);
     const out = {
       module: !!remembered && !!s.module && remembered !== s.module,
       csid: typed(draft.csid) !== Number(s.csid),
       sf: typed(draft.sf) !== Number(s.sf),
       dbm: typed(draft.dbm) !== Number(s.dbm),
     };
-    // boxes go into both slots, so either slot differing counts. No log gaps on the board counts too
-    PHASES.forEach((ph, n) => {
-      const same = ph.slots.every((i) => {
-        const r = s.rates ? s.rates[i] : null;
-        return !!r && Math.round(typed(draft['p' + n + 's']) * 1000) === Number(r.fixedMs) && !!draft['p' + n + 'f'] === !!r.follow &&
-          r.percent.every((p, k) => typed(draft['p' + n + 'soc' + k]) === Number(p)) &&
-          r.intervalMs.every((ms, k) => Math.round(typed(draft['p' + n + 'ms' + k]) * 1000) === Number(ms)) &&
-          !!s.logMs && Math.round(typed(draft['p' + n + 'l']) * 1000) === Number(s.logMs[i]);
-      });
-      out[ph.key] = !same;
-    });
+    PHASES.forEach((ph, n) => { out[ph.key] = phaseChanges(s, draft, n).length > 0; });
     return out;
   }
 
@@ -415,6 +549,6 @@
 
   return {
     MODULE, uidWords, sameBoard, chipName, firmwareWords, stillOnProbe, probesChanged, probeToRead, probeToAutoRead, swapSeen, readButton, readToast, dropChoice, chipList, stepList, powerOptions, sfOptions, dbmWords,
-    flashWay, settingsTable, buildDiffers, rateWords, logWords, PHASE_NAMES, PHASES, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal,
+    flashWay, settingsTable, buildDiffers, phaseChanges, phaseRows, draftRate, draftStop, INERT_PERCENT, bandLabel, rateWords, logWords, logZero, LAYOUT, PHASES, BANDS, FIXED, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal,
   };
 });

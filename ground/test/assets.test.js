@@ -93,6 +93,15 @@ test('the names the js reads through getComputedStyle are plain values', () => {
 });
 
 // The ids of the 1.2.2 page, and which of them started hidden or disabled.
+// 2026-10-31: the user wants the boards first and the tabs plain, no kicker under them
+test('the bar names the screens plainly, ChipSats and T-Beams first', () => {
+  const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
+  const nav = html.match(/<nav class="views"[\s\S]*?<\/nav>/)[0];
+  const tabs = [...nav.matchAll(/<button id="view-([a-z]+)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2].trim()]);
+  assert.deepStrictEqual(tabs, [['chipsats', 'ChipSats'], ['tbeams', 'T-Beams'], ['live', 'Live'], ['replay', 'Replay'], ['data', 'Data']]);
+  assert.doesNotMatch(nav, /<small/);
+});
+
 const IDS_122 = ('view-chipsats view-tbeams view-live view-data view-replay btn-connect receivers strip strip-rx ' +
   'strip-log strip-log-name strip-log-save strip-log-new strip-job strip-build strip-release strip-release-version ' +
   'strip-release-link file-open btn-settings btn-theme ' +

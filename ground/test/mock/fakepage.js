@@ -19,14 +19,18 @@ function page(scripts, hub, o) {
   const toasts = [];
   const el = (id) => (els[id] = els[id] || {
     id, html: '', dataset: {}, style: {},
+    focus() {},
     addEventListener(type, fn) { (handlers[id + ':' + type] = handlers[id + ':' + type] || []).push(fn); },
   });
   const jobs = { pull: null, chip: null, tbeam: null, heard };
+  const storage = (o && o.storage) || {};
   const sandbox = {
     console,
     setInterval: (fn, ms) => { fn.ms = ms; timers.push(fn); return timers.length; },
     clearInterval() {},
-    localStorage: { getItem: () => null, setItem() {} },
+    // What the page keeps in the browser. o.storage seeds it, and handing it to the next
+    // page() stands for a reload.
+    localStorage: { getItem: (k) => (k in storage ? storage[k] : null), setItem(k, v) { storage[k] = String(v); } },
     DG: {},
   };
   sandbox.window = sandbox;
@@ -51,8 +55,8 @@ function page(scripts, hub, o) {
     { getAttribute: (n) => (n in attrs ? attrs[n] : null), closest: () => null, blur() {}, tagName: 'BUTTON' }, more || {});
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    parts, jobs, toasts, settle, target, taps: sandbox.DGApp.taps, packetTaps: sandbox.DGApp.packetTaps, shell: sandbox.DGApp.shell,
-    html: (id) => el(id).html,
+    parts, jobs, toasts, settle, target, storage, taps: sandbox.DGApp.taps, packetTaps: sandbox.DGApp.packetTaps, shell: sandbox.DGApp.shell,
+    el, html: (id) => el(id).html,
     // What a person reads: tags out, entities back, runs of space as one
     text: (id) => el(id).html.replace(/<[^>]*>/g, ' ')
       .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&')

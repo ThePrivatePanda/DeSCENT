@@ -7,7 +7,7 @@
 // as with a downloaded release, the block in the image this app carries is rewritten
 // here before that image is flashed (patch, below).
 //
-// Layout 3, 160 bytes, what every image built since 2026-10-16 carries:
+// Layout 4, 160 bytes, what every image built since 2026-10-31 carries:
 //   0..16   magic
 //   16      layout version
 //   17      ChipSat id, 1..253, 254 = the sensor bench (refused for a flight board), 255 = unconfigured
@@ -15,26 +15,31 @@
 //   19      spreading factor, 5..12
 //   20      target dBm, signed
 //   21      set by, 1 = the build, 2 = a tool
-//   22..138 one rate per slot, 29 bytes each, waiting, rising, falling, landed:
-//             +0  fixed gap after a packet, ms
+//   22..138 one rate per slot, 29 bytes each: ground transmit, air transmit, ground log, air log
+//             +0  fixed gap in ms
 //             +4  1 = the gap follows the battery table below, 0 = the fixed gap always
 //             +5  four state-of-charge thresholds in percent, falling, each 1..99
 //             +9  five gaps in ms, one per band: at or above each threshold, then below them all
-//           A phase that follows the battery uses its fixed gap while the gauge cannot be read.
-//   138..154 the gap between flash log records in ms, one per slot in the same order.
-//            0 is a record per IMU reading in the air and nothing at all on the ground;
-//            1 to 19 ms the firmware refuses
-//   154..158 the gap while no altitude source is live. Unused since 2026-10-22, but the
-//            firmware still turns a block down over it, so it is still checked here
+//           A slot that follows the battery uses its fixed gap while the gauge cannot be read.
+//           Transmit 0 is back to back. Air log 0 is every IMU reading, ground log 0 keeps
+//           nothing. 1 to 19 ms the firmware refuses in every log value, fixed or band, whether
+//           or not the slot follows the battery. The page writes one flag and one set of
+//           thresholds per phase to both slots; the firmware treats the slots independently.
+//   138..158 reserved, zero
 //   158..160 CRC16 over 0..158, low byte first, the same way dump.rs reads a slot's
-// Since 2026-10-22 the board only has ground and air, slots 0 and 1. The page writes ground
-// into waiting and landed and air into rising and falling, so older firmware still works.
-// Layout 2 (2026-10) was the same with 138..158 reserved and zero: read, shown as a block
-// with no log gaps, and rewritten as layout 3 when patched.
+//
+// Older layouts are read forever and never written: firmware takes only its own exact layout,
+// so a block rewritten as another one would boot on compiled defaults while the read-back
+// still passed. They are normalised here so the page sees one shape.
+// Layout 3 (2026-10-16) had the same 160 bytes, but its four slots were all transmit gaps
+// (waiting, rising, falling, landed), then four log gaps at 138, a gap at 154 for no altitude
+// source, and the CRC at 158. Its log table here is the board's fixed log gap for that phase,
+// follow off, bands equal to it. Slots 2 and 3 are never log tables: they hold transmit gaps.
+// Since 2026-10-22 that firmware only read slots 0 and 1, and older firmware read all four.
+// Layout 2 (2026-10) was the same with 138..158 reserved and zero: no log gaps at all.
 // Layout 1 was 32 bytes: the same through byte 22, one gap in ms at 22, reserved to 30,
-// CRC at 30. Boards flashed before the phases still carry it, so it is read, and shown
-// as a block with no rates. It is never written: the images this app patches are its
-// own, and they are layout 3.
+// CRC at 30. Boards flashed before the phases still carry it, so it is shown as a block with
+// no rates.
 //
 // The layout byte is read before the CRC, because it says where the CRC is. A layout
 // nobody knows is reported as that and never decoded: there is no telling where its
@@ -46,28 +51,32 @@ pub const MAGIC: [u8; 16] = [
 ];
 pub const SIZE: usize = 160;
 const CRC_AT: usize = 158;
-const LAYOUT: u8 = 3;
+pub const LAYOUT: u8 = 4;
 const V1_SIZE: usize = 32;
 const V1_CRC_AT: usize = 30;
-pub const PHASES: usize = 4;
+pub const PHASES: usize = 2;
+pub const SLOTS: usize = 2 * PHASES;
 pub const BANDS: usize = 5;
 const RATES_AT: usize = 22;
 const RATE_BYTES: usize = 29;
-const LOGS_AT: usize = 138;
-const LOG_BLIND_AT: usize = 154;
+const RESERVED_AT: usize = RATES_AT + RATE_BYTES * SLOTS;
+// Layouts 2 and 3 had four transmit slots; layout 3's log gaps sat after them.
+const OLD_SLOTS: usize = 4;
+const OLD_LOGS_AT: usize = 138;
+const OLD_LOG_BLIND_AT: usize = 154;
+const OLD_SLOT_WORDS: [&str; OLD_SLOTS] = ["ground", "air", "air (falling slot)", "ground (landed slot)"];
 // The firmware refuses a log gap under this: the sensors make nothing faster.
 pub const LOG_MIN_MS: u32 = 20;
-pub const PHASE_NAMES: [&str; PHASES] = ["waiting", "rising", "falling", "landed"];
-// What messages call them. The firmware reads slot 0 on the ground and 1 in the air since
-// 2026-10-22, and the page fills 3 like 0 and 2 like 1 for older firmware; PHASE_NAMES is
-// only what radio.json still calls them
-pub const PHASE_WORDS: [&str; PHASES] = ["ground", "air", "air (falling slot)", "ground (landed slot)"];
+// What messages call the phases, as the page does.
+pub const PHASE_WORDS: [&str; PHASES] = ["ground", "air"];
+// radio.json's names for the slots, in the block's order.
+pub const SLOT_NAMES: [&str; SLOTS] = ["ground transmit", "air transmit", "ground log", "air log"];
 
 // Said to the operator as it is. The second half is the part that matters at a bench:
 // the board still transmits, with what its build gave it and not with what was asked.
 pub const DAMAGED: &str = "the settings block is damaged; the board is running the values it was built with";
 
-// How often one phase transmits: the gap after each packet. With `follow`, the gap is
+// One slot: the gap after each packet, or between log records. With `follow`, the gap is
 // interval_ms[i] for the first threshold percent[i] the charge is at or above, and the last
 // one below them all; the fixed gap then only applies while the gauge cannot be read.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +87,16 @@ pub struct Rate {
     pub interval_ms: [u32; BANDS],
 }
 
+// A slot of layout 2 or 3 that is not its phase's slot 0 or 1 and differs from it. Those were
+// real phases on the firmware of the day, so a board still carrying one is told as it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OlderSlot {
+    pub phase: usize,
+    pub name: &'static str,
+    pub rate: Rate,
+    pub log_ms: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub layout: u8,
@@ -86,14 +105,14 @@ pub struct Settings {
     pub sf: u8,
     pub dbm: i8,
     pub set_by: &'static str,
-    // The flight rate: layout 1's one gap, layout 2's falling gap, layout 3's rising gap.
+    // The flight rate: layout 1's one gap, layout 2's falling gap, the air gap from layout 3.
     pub tx_interval_ms: u32,
     // None on a layout-1 block: that firmware has one gap from switch-on to the end.
-    pub rates: Option<[Rate; PHASES]>,
-    // The flash log gap per phase, and the one with no altitude source. None on a block
-    // from before layout 3: that firmware logs at 20 Hz in the air and 1 Hz on the ground.
-    pub logs: Option<[u32; PHASES]>,
-    pub log_blind_ms: Option<u32>,
+    pub transmit: Option<[Rate; PHASES]>,
+    // None on a block from before layout 3: that firmware logs at 20 Hz in the air and 1 Hz
+    // on the ground.
+    pub log: Option<[Rate; PHASES]>,
+    pub older: Vec<OlderSlot>,
     // False means something this layout calls reserved is in use, and a writer that
     // patched the block would be overwriting it without knowing what it is.
     pub reserved_clear: bool,
@@ -119,9 +138,71 @@ pub struct Asked {
     pub csid: u8,
     pub sf: u8,
     pub dbm: i8,
-    pub rates: [Rate; PHASES],
-    pub logs: [u32; PHASES],
-    pub log_blind_ms: u32,
+    pub transmit: [Rate; PHASES],
+    pub log: [Rate; PHASES],
+}
+
+// A band as the page's row says it: above 75 %, to 50 %, to 35 %, to 20 %, below 20 %.
+fn band_words(percent: &[u8; BANDS - 1], band: usize) -> String {
+    match band {
+        0 => format!("above {} %", percent[0]),
+        b if b == BANDS - 1 => format!("below {} %", percent[BANDS - 2]),
+        b => format!("to {} %", percent[b]),
+    }
+}
+
+// The row of a rate's fixed gap: with the battery it is the one for an unread gauge.
+fn fixed_words(r: &Rate) -> &'static str {
+    if r.follow { "gauge unread" } else { "always" }
+}
+
+// What differs in one rate, each value named the way a refusal names it.
+fn rate_differences(phase: &str, column: &str, wanted: &Rate, on_board: &Rate, out: &mut Vec<String>) {
+    if wanted.follow != on_board.follow {
+        out.push(format!("{}, {} battery switch", phase, column));
+    }
+    if wanted.fixed_ms != on_board.fixed_ms {
+        out.push(format!("{}, {}, {} gap", phase, fixed_words(wanted), column));
+    }
+    for i in 0..BANDS - 1 {
+        if wanted.percent[i] != on_board.percent[i] {
+            out.push(format!("{}, {} battery threshold {}", phase, column, i + 1));
+        }
+    }
+    for i in 0..BANDS {
+        if wanted.interval_ms[i] != on_board.interval_ms[i] {
+            out.push(format!("{}, {}, {} gap", phase, band_words(&wanted.percent, i), column));
+        }
+    }
+}
+
+fn table_differences(column: &str, wanted: &Option<[Rate; PHASES]>, on_board: &Option<[Rate; PHASES]>, out: &mut Vec<String>) {
+    match (wanted, on_board) {
+        (Some(w), Some(b)) => {
+            for p in 0..PHASES {
+                rate_differences(PHASE_WORDS[p], column, &w[p], &b[p], out);
+            }
+        }
+        (None, None) => {}
+        _ => out.push(format!("{} gaps", column)),
+    }
+}
+
+// What differs between two blocks, in the words the page uses for them. Every value is
+// looked at, because a value left out here is one a read-back would call right.
+pub fn differences(wanted: &Settings, on_board: &Settings) -> Vec<String> {
+    let checks = [
+        (wanted.layout != on_board.layout, "block layout"),
+        (wanted.csid != on_board.csid, "board id"),
+        (wanted.module != on_board.module, "module"),
+        (wanted.sf != on_board.sf, "spreading factor"),
+        (wanted.dbm != on_board.dbm, "transmit power"),
+        (wanted.tx_interval_ms != on_board.tx_interval_ms && wanted.transmit.is_none(), "transmit gaps"),
+    ];
+    let mut out: Vec<String> = checks.iter().filter(|(off, _)| *off).map(|(_, word)| word.to_string()).collect();
+    table_differences("transmit", &wanted.transmit, &on_board.transmit, &mut out);
+    table_differences("log", &wanted.log, &on_board.log, &mut out);
+    out
 }
 
 // Where the block is, by its magic alone, which is how the firmware finds it. Its build
@@ -178,9 +259,9 @@ fn decode_v1(b: &[u8]) -> Result<Found, String> {
         dbm,
         set_by,
         tx_interval_ms: u32::from_le_bytes([b[22], b[23], b[24], b[25]]),
-        rates: None,
-        logs: None,
-        log_blind_ms: None,
+        transmit: None,
+        log: None,
+        older: Vec::new(),
         reserved_clear: b[26..V1_CRC_AT].iter().all(|v| *v == 0),
     }))
 }
@@ -203,17 +284,17 @@ fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
-fn decode_rate(b: &[u8], layout: u8, phase: usize) -> Result<Rate, String> {
-    let r = &b[RATES_AT + RATE_BYTES * phase..RATES_AT + RATE_BYTES * (phase + 1)];
+fn decode_rate(b: &[u8], layout: u8, slot: usize, words: &str) -> Result<Rate, String> {
+    let r = &b[RATES_AT + RATE_BYTES * slot..RATES_AT + RATE_BYTES * (slot + 1)];
     let follow = match r[4] {
         0 => false,
         1 => true,
-        v => return Err(odd(layout, &format!("{} battery flag", PHASE_WORDS[phase]), v)),
+        v => return Err(odd(layout, &format!("{} battery flag", words), v)),
     };
     let mut percent = [0u8; BANDS - 1];
     percent.copy_from_slice(&r[5..9]);
     if let Some(t) = table_trouble(&percent) {
-        return Err(odd(layout, &format!("for {}", PHASE_WORDS[phase]), t));
+        return Err(odd(layout, &format!("for {}", words), t));
     }
     let mut interval_ms = [0u32; BANDS];
     for (i, v) in interval_ms.iter_mut().enumerate() {
@@ -226,31 +307,86 @@ fn decode_rate(b: &[u8], layout: u8, phase: usize) -> Result<Rate, String> {
 pub fn log_trouble(ms: u32) -> Option<String> {
     // 0 is fine in any phase (every IMU reading in the air, nothing on the ground)
     if ms != 0 && ms < LOG_MIN_MS {
-        return Some(format!("a flash log gap of {} ms, which has to be 0 or at least {}", ms, LOG_MIN_MS));
+        return Some(format!("{} ms, which has to be 0 or at least {}", ms, LOG_MIN_MS));
     }
     None
 }
 
-// Layouts 2 and 3: the same rates, and layout 3 has the log gaps where 2 kept zeros.
+// The same rule on every value of a log rate, fixed or band, whether or not it follows the
+// battery: the flag is one byte away from putting a band to use. Names the row and the column,
+// "air, below 20 %, log gap: 5 ms, ...". The firmware refusing a block silently runs what it
+// was built with, so anything that gets past this must pass usable().
+pub fn log_rate_trouble(phase: usize, r: &Rate) -> Option<String> {
+    if let Some(t) = log_trouble(r.fixed_ms) {
+        return Some(format!("{}, {}, log gap: {}", PHASE_WORDS[phase], fixed_words(r), t));
+    }
+    for (i, ms) in r.interval_ms.iter().enumerate() {
+        if let Some(t) = log_trouble(*ms) {
+            return Some(format!("{}, {}, log gap: {}", PHASE_WORDS[phase], band_words(&r.percent, i), t));
+        }
+    }
+    None
+}
+
+// Layout 4.
+fn decode_v4(b: &[u8]) -> Result<Found, String> {
+    let (csid, module, sf, dbm, set_by) = decode_head(b, LAYOUT)?;
+    let slot = |n: usize| decode_rate(b, LAYOUT, n, SLOT_NAMES[n]);
+    let transmit = [slot(0)?, slot(1)?];
+    let log = [slot(2)?, slot(3)?];
+    for (p, r) in log.iter().enumerate() {
+        if let Some(t) = log_rate_trouble(p, r) {
+            return Err(odd(LAYOUT, "for", t));
+        }
+    }
+    Ok(Found::Block(Settings {
+        layout: LAYOUT,
+        csid,
+        module,
+        sf,
+        dbm,
+        set_by,
+        tx_interval_ms: transmit[1].fixed_ms,
+        transmit: Some(transmit),
+        log: Some(log),
+        older: Vec::new(),
+        reserved_clear: b[RESERVED_AT..CRC_AT].iter().all(|v| *v == 0),
+    }))
+}
+
+// A phase's log table on a block that only held one gap for it.
+fn flat_log(ms: u32, thresholds: &Rate) -> Rate {
+    Rate { fixed_ms: ms, follow: false, percent: thresholds.percent, interval_ms: [ms; BANDS] }
+}
+
+// Layouts 2 and 3: four transmit slots, and layout 3 has log gaps where 2 kept zeros. The page
+// is given the same shape as layout 4, with the two spare slots kept apart when they differ.
 fn decode_v2(b: &[u8], layout: u8) -> Result<Found, String> {
     let (csid, module, sf, dbm, set_by) = decode_head(b, layout)?;
-    let rates = [decode_rate(b, layout, 0)?, decode_rate(b, layout, 1)?, decode_rate(b, layout, 2)?, decode_rate(b, layout, 3)?];
-    let (logs, log_blind_ms, reserved_clear) = if layout == 3 {
-        let mut logs = [0u32; PHASES];
+    let slot = |n: usize| decode_rate(b, layout, n, OLD_SLOT_WORDS[n]);
+    let rates = [slot(0)?, slot(1)?, slot(2)?, slot(3)?];
+    let (logs, reserved_clear) = if layout == 3 {
+        let mut logs = [0u32; OLD_SLOTS];
         for (p, v) in logs.iter_mut().enumerate() {
-            *v = u32_at(b, LOGS_AT + 4 * p);
+            *v = u32_at(b, OLD_LOGS_AT + 4 * p);
             if let Some(t) = log_trouble(*v) {
-                return Err(odd(3, &format!("for {}", PHASE_WORDS[p]), t));
+                return Err(odd(3, &format!("for {} a flash log gap of", OLD_SLOT_WORDS[p]), t));
             }
         }
-        let blind = u32_at(b, LOG_BLIND_AT);
-        if let Some(t) = log_trouble(blind) {
-            return Err(odd(3, "with no altitude source", t));
+        if let Some(t) = log_trouble(u32_at(b, OLD_LOG_BLIND_AT)) {
+            return Err(odd(3, "with no altitude source a flash log gap of", t));
         }
-        (Some(logs), Some(blind), true)
+        (Some(logs), true)
     } else {
-        (None, None, b[RATES_AT + RATE_BYTES * PHASES..CRC_AT].iter().all(|v| *v == 0))
+        (None, b[RATES_AT + RATE_BYTES * OLD_SLOTS..CRC_AT].iter().all(|v| *v == 0))
     };
+    let mut older = Vec::new();
+    for (phase, spare, name, first) in [(1usize, 2usize, "falling", 1usize), (0, 3, "landed", 0)] {
+        let log_differs = logs.map(|l| l[spare] != l[first]).unwrap_or(false);
+        if rates[spare] != rates[first] || log_differs {
+            older.push(OlderSlot { phase, name, rate: rates[spare].clone(), log_ms: logs.map(|l| l[spare]) });
+        }
+    }
     Ok(Found::Block(Settings {
         layout,
         csid,
@@ -261,9 +397,9 @@ fn decode_v2(b: &[u8], layout: u8) -> Result<Found, String> {
         // The flight gap: layout 2 flew on the falling phase; from layout 3 rising is the
         // whole flight, climb through fall, and falling is never entered
         tx_interval_ms: if layout == 3 { rates[1].fixed_ms } else { rates[2].fixed_ms },
-        rates: Some(rates),
-        logs,
-        log_blind_ms,
+        log: logs.map(|l| [flat_log(l[0], &rates[0]), flat_log(l[1], &rates[1])]),
+        transmit: Some([rates[0].clone(), rates[1].clone()]),
+        older,
         reserved_clear,
     }))
 }
@@ -275,14 +411,18 @@ pub fn find_at(image: &[u8]) -> Result<(Found, Option<usize>), String> {
     let Some(&layout) = image.get(at + 16) else { return Ok((Found::Damaged, Some(at))) };
     let (size, crc_at) = match layout {
         1 => (V1_SIZE, V1_CRC_AT),
-        2 | 3 => (SIZE, CRC_AT),
+        2..=LAYOUT => (SIZE, CRC_AT),
         v => return Ok((Found::Layout(v), Some(at))),
     };
     let Some(b) = image.get(at..at + size) else { return Ok((Found::Damaged, Some(at))) };
     if u16::from_le_bytes([b[crc_at], b[crc_at + 1]]) != crc16(&b[..crc_at]) {
         return Ok((Found::Damaged, Some(at)));
     }
-    let found = if layout == 1 { decode_v1(b)? } else { decode_v2(b, layout)? };
+    let found = match layout {
+        1 => decode_v1(b)?,
+        LAYOUT => decode_v4(b)?,
+        _ => decode_v2(b, layout)?,
+    };
     Ok((found, Some(at)))
 }
 
@@ -295,11 +435,16 @@ pub fn find(image: &[u8]) -> Result<Found, String> {
 // asked.
 pub fn writable(image: &[u8]) -> Result<(usize, Settings), String> {
     match find_at(image)? {
-        // Layout 2 is patched too: it becomes layout 3, the log gaps going where its zeros were.
-        (Found::Block(s), Some(at)) if (s.layout == LAYOUT || s.layout == 2) && s.reserved_clear => Ok((at, s)),
+        // Only an image already at this layout. Firmware needs its exact layout, so a block
+        // stamped newer than the code around it boots on compiled defaults and reads back fine.
+        (Found::Block(s), Some(at)) if s.layout == LAYOUT && s.reserved_clear => Ok((at, s)),
         (Found::Block(s), _) if s.layout == 1 => Err(format!(
             "the settings block is layout {}, from before the flight phases, so it is not patched: flash the flight image this app carries instead",
             s.layout
+        )),
+        (Found::Block(s), _) if s.layout < LAYOUT => Err(format!(
+            "the settings block is layout {} and this app writes layout {}. The firmware only reads its own layout, so a patched image would run what it was built with. It is not patched: flash the flight image this app carries, or update the flight software on this computer",
+            s.layout, LAYOUT
         )),
         (Found::Block(_), _) => Err(String::from(
             "the settings block uses bytes this build calls reserved, so it is left alone: something newer than this keeps a value there",
@@ -315,22 +460,24 @@ pub fn writable(image: &[u8]) -> Result<(usize, Settings), String> {
     }
 }
 
-// The image with its block rewritten as layout 3: what was asked for, set by a tool, CRC
-// to match. The module byte is left as it is, and so is every byte outside the block.
+// The image with its block rewritten: what was asked for, set by a tool, CRC to match. The
+// module byte is left as it is, and so is every byte outside the block.
 pub fn patch(image: &[u8], at: usize, asked: &Asked) -> Result<Vec<u8>, String> {
     if image.get(at..at + MAGIC.len()) != Some(&MAGIC[..]) || image.len() < at + SIZE {
         return Err(format!("there is no settings block at {:#x} to patch", at));
     }
-    for (p, rate) in asked.rates.iter().enumerate() {
-        if let Some(t) = table_trouble(&rate.percent) {
-            return Err(format!("not written: for {}, {}", PHASE_WORDS[p], t));
-        }
-        if let Some(t) = log_trouble(asked.logs[p]) {
-            return Err(format!("not written: for {}, {}", PHASE_WORDS[p], t));
+    for (p, r) in asked.transmit.iter().enumerate() {
+        if let Some(t) = table_trouble(&r.percent) {
+            return Err(format!("not written: for {}, {}", SLOT_NAMES[p], t));
         }
     }
-    if let Some(t) = log_trouble(asked.log_blind_ms) {
-        return Err(format!("not written: with no altitude source, {}", t));
+    for (p, r) in asked.log.iter().enumerate() {
+        if let Some(t) = table_trouble(&r.percent) {
+            return Err(format!("not written: for {}, {}", SLOT_NAMES[PHASES + p], t));
+        }
+        if let Some(t) = log_rate_trouble(p, r) {
+            return Err(format!("not written: {}", t));
+        }
     }
     let mut out = image.to_vec();
     let b = &mut out[at..at + SIZE];
@@ -339,8 +486,8 @@ pub fn patch(image: &[u8], at: usize, asked: &Asked) -> Result<Vec<u8>, String> 
     b[19] = asked.sf;
     b[20] = asked.dbm as u8;
     b[21] = 2;   // a tool wrote it
-    for (p, rate) in asked.rates.iter().enumerate() {
-        let r = &mut b[RATES_AT + RATE_BYTES * p..RATES_AT + RATE_BYTES * (p + 1)];
+    for (slot, rate) in asked.transmit.iter().chain(asked.log.iter()).enumerate() {
+        let r = &mut b[RATES_AT + RATE_BYTES * slot..RATES_AT + RATE_BYTES * (slot + 1)];
         r[0..4].copy_from_slice(&rate.fixed_ms.to_le_bytes());
         r[4] = rate.follow as u8;
         r[5..9].copy_from_slice(&rate.percent);
@@ -348,10 +495,7 @@ pub fn patch(image: &[u8], at: usize, asked: &Asked) -> Result<Vec<u8>, String> 
             r[9 + 4 * i..13 + 4 * i].copy_from_slice(&ms.to_le_bytes());
         }
     }
-    for (p, ms) in asked.logs.iter().enumerate() {
-        b[LOGS_AT + 4 * p..LOGS_AT + 4 * (p + 1)].copy_from_slice(&ms.to_le_bytes());
-    }
-    b[LOG_BLIND_AT..LOG_BLIND_AT + 4].copy_from_slice(&asked.log_blind_ms.to_le_bytes());
+    b[RESERVED_AT..CRC_AT].fill(0);
     let crc = crc16(&b[..CRC_AT]);
     b[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
     // This goes onto a board whole. A byte changed anywhere else would be flight
@@ -362,8 +506,17 @@ pub fn patch(image: &[u8], at: usize, asked: &Asked) -> Result<Vec<u8>, String> 
     Ok(out)
 }
 
-fn secs(ms: u32) -> String {
-    if ms == 0 { String::from("back to back") } else { format!("{} s", ms as f64 / 1000.0) }
+// What 0 means for a log slot. On the ground that is no time anchors either.
+pub fn log_zero_words(phase: usize) -> &'static str {
+    if phase == 0 { "nothing written" } else { "every reading" }
+}
+pub const TRANSMIT_ZERO_WORDS: &str = "back to back";
+
+fn rates_json(rates: &Option<[Rate; PHASES]>) -> String {
+    rates
+        .as_ref()
+        .map(|r| format!("[{}]", r.iter().map(|x| x.json()).collect::<Vec<_>>().join(",")))
+        .unwrap_or_else(|| String::from("null"))
 }
 
 impl Rate {
@@ -378,10 +531,12 @@ impl Rate {
     }
 
     // "every 60 s", or with the battery "10 s above 75 %, 30 s to 50 %, 60 s to 35 %,
-    // 120 s to 20 %, then 180 s (every 60 s when the gauge cannot be read)".
-    pub fn words(&self) -> String {
+    // 120 s to 20 %, then 180 s (every 60 s when the gauge cannot be read)". A gap of 0 is said
+    // as `zero`, which depends on the slot.
+    pub fn words(&self, zero: &str) -> String {
+        let secs = |ms: u32| if ms == 0 { zero.to_string() } else { format!("{} s", ms as f64 / 1000.0) };
         if !self.follow {
-            return format!("every {}", secs(self.fixed_ms)).replace("every back to back", "back to back");
+            return if self.fixed_ms == 0 { zero.to_string() } else { format!("every {}", secs(self.fixed_ms)) };
         }
         let mut parts = vec![format!("{} above {} %", secs(self.interval_ms[0]), self.percent[0])];
         for i in 1..BANDS - 1 {
@@ -399,7 +554,7 @@ impl Found {
         match self {
             Found::Nothing | Found::Layout(_) | Found::Damaged => String::from("null"),
             Found::Block(s) => format!(
-                "{{\"layoutVersion\":{},\"csid\":{},\"module\":\"{}\",\"sf\":{},\"dbm\":{},\"setBy\":\"{}\",\"txIntervalMs\":{},\"rates\":{},\"logMs\":{},\"logBlindMs\":{},\"reservedClear\":{}}}",
+                "{{\"layoutVersion\":{},\"csid\":{},\"module\":\"{}\",\"sf\":{},\"dbm\":{},\"setBy\":\"{}\",\"txIntervalMs\":{},\"transmit\":{},\"log\":{},\"olderSlots\":[{}],\"reservedClear\":{}}}",
                 s.layout,
                 s.csid,
                 s.module,
@@ -407,15 +562,19 @@ impl Found {
                 s.dbm,
                 s.set_by,
                 s.tx_interval_ms,
-                s.rates
-                    .as_ref()
-                    .map(|r| format!("[{}]", r.iter().map(|x| x.json()).collect::<Vec<_>>().join(",")))
-                    .unwrap_or_else(|| String::from("null")),
-                s.logs
-                    .as_ref()
-                    .map(|l| format!("[{}]", l.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")))
-                    .unwrap_or_else(|| String::from("null")),
-                s.log_blind_ms.map(|v| v.to_string()).unwrap_or_else(|| String::from("null")),
+                rates_json(&s.transmit),
+                rates_json(&s.log),
+                s.older
+                    .iter()
+                    .map(|o| format!(
+                        "{{\"phase\":{},\"name\":\"{}\",\"rate\":{},\"logMs\":{}}}",
+                        o.phase,
+                        o.name,
+                        o.rate.json(),
+                        o.log_ms.map(|v| v.to_string()).unwrap_or_else(|| String::from("null"))
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(","),
                 s.reserved_clear
             ),
         }
@@ -431,26 +590,35 @@ mod tests {
     const fn rate(fixed_ms: u32, follow: bool) -> Rate {
         Rate { fixed_ms, follow, percent: TABLE_PCT, interval_ms: TABLE_MS }
     }
-    // What a fresh build ships: the flight gap given for rising and falling both, the rest the
-    // repo's defaults, nothing following.
-    fn rates(flight_ms: u32) -> [Rate; PHASES] {
+    const fn flat(ms: u32) -> Rate {
+        Rate { fixed_ms: ms, follow: false, percent: TABLE_PCT, interval_ms: [ms; BANDS] }
+    }
+    // What a fresh build ships.
+    fn transmit(flight_ms: u32) -> [Rate; PHASES] {
+        [rate(60_000, false), rate(flight_ms, false)]
+    }
+    fn log() -> [Rate; PHASES] {
+        [flat(1000), flat(50)]
+    }
+    // The four transmit slots of layouts 2 and 3: the flight gap given for rising and falling.
+    fn rates(flight_ms: u32) -> [Rate; OLD_SLOTS] {
         [rate(60_000, false), rate(flight_ms, false), rate(flight_ms, false), rate(60_000, false)]
     }
 
-    const LOGS: [u32; PHASES] = [1000, 50, 50, 1000];
+    const LOGS: [u32; OLD_SLOTS] = [1000, 50, 50, 1000];
     const LOG_BLIND: u32 = 200;
 
-    // A block of the given layout, 2 or 3: layout 3 carries the log gaps a fresh build ships.
-    fn block(version: u8, csid: u8, module: u8, sf: u8, dbm: i8, set_by: u8, interval: u32) -> Vec<u8> {
-        block_with(version, csid, module, sf, dbm, set_by, &rates(interval))
+    fn put_rate(b: &mut [u8], slot: usize, r: &Rate) {
+        let at = RATES_AT + RATE_BYTES * slot;
+        b[at..at + 4].copy_from_slice(&r.fixed_ms.to_le_bytes());
+        b[at + 4] = r.follow as u8;
+        b[at + 5..at + 9].copy_from_slice(&r.percent);
+        for (i, ms) in r.interval_ms.iter().enumerate() {
+            b[at + 9 + 4 * i..at + 13 + 4 * i].copy_from_slice(&ms.to_le_bytes());
+        }
     }
 
-    fn block_with(version: u8, csid: u8, module: u8, sf: u8, dbm: i8, set_by: u8, rates: &[Rate; PHASES]) -> Vec<u8> {
-        block_logs(version, csid, module, sf, dbm, set_by, rates, &LOGS, LOG_BLIND)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn block_logs(version: u8, csid: u8, module: u8, sf: u8, dbm: i8, set_by: u8, rates: &[Rate; PHASES], logs: &[u32; PHASES], blind: u32) -> Vec<u8> {
+    fn head(version: u8, csid: u8, module: u8, sf: u8, dbm: i8, set_by: u8) -> Vec<u8> {
         let mut b = vec![0u8; SIZE];
         b[..16].copy_from_slice(&MAGIC);
         b[16] = version;
@@ -459,20 +627,39 @@ mod tests {
         b[19] = sf;
         b[20] = dbm as u8;
         b[21] = set_by;
+        b
+    }
+
+    // A block of this layout, built here by hand. The golden block below is what ties these
+    // offsets to the firmware's.
+    fn block4(csid: u8, module: u8, sf: u8, dbm: i8, set_by: u8, transmit: &[Rate; PHASES], log: &[Rate; PHASES]) -> Vec<u8> {
+        let mut b = head(LAYOUT, csid, module, sf, dbm, set_by);
+        for (slot, r) in transmit.iter().chain(log.iter()).enumerate() {
+            put_rate(&mut b, slot, r);
+        }
+        sealed(b)
+    }
+
+    // A block of an older layout, 2 or 3: layout 3 carries the log gaps a fresh build shipped.
+    fn block(version: u8, csid: u8, module: u8, sf: u8, dbm: i8, set_by: u8, interval: u32) -> Vec<u8> {
+        block_with(version, csid, module, sf, dbm, set_by, &rates(interval))
+    }
+
+    fn block_with(version: u8, csid: u8, module: u8, sf: u8, dbm: i8, set_by: u8, rates: &[Rate; OLD_SLOTS]) -> Vec<u8> {
+        block_logs(version, csid, module, sf, dbm, set_by, rates, &LOGS, LOG_BLIND)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn block_logs(version: u8, csid: u8, module: u8, sf: u8, dbm: i8, set_by: u8, rates: &[Rate; OLD_SLOTS], logs: &[u32; OLD_SLOTS], blind: u32) -> Vec<u8> {
+        let mut b = head(version, csid, module, sf, dbm, set_by);
         for (p, r) in rates.iter().enumerate() {
-            let at = RATES_AT + RATE_BYTES * p;
-            b[at..at + 4].copy_from_slice(&r.fixed_ms.to_le_bytes());
-            b[at + 4] = r.follow as u8;
-            b[at + 5..at + 9].copy_from_slice(&r.percent);
-            for (i, ms) in r.interval_ms.iter().enumerate() {
-                b[at + 9 + 4 * i..at + 13 + 4 * i].copy_from_slice(&ms.to_le_bytes());
-            }
+            put_rate(&mut b, p, r);
         }
         if version == 3 {
             for (p, ms) in logs.iter().enumerate() {
-                b[LOGS_AT + 4 * p..LOGS_AT + 4 * (p + 1)].copy_from_slice(&ms.to_le_bytes());
+                b[OLD_LOGS_AT + 4 * p..OLD_LOGS_AT + 4 * (p + 1)].copy_from_slice(&ms.to_le_bytes());
             }
-            b[LOG_BLIND_AT..LOG_BLIND_AT + 4].copy_from_slice(&blind.to_le_bytes());
+            b[OLD_LOG_BLIND_AT..OLD_LOG_BLIND_AT + 4].copy_from_slice(&blind.to_le_bytes());
         }
         sealed(b)
     }
@@ -508,32 +695,125 @@ mod tests {
         image
     }
 
+    // The same bytes test_settings.cpp checks against the firmware's parse().
+    fn golden() -> Vec<u8> {
+        include_str!("../../../fsw/V2_6_X_Tests/test/data/settings_layout4.inc")
+            .lines()
+            .filter(|l| !l.starts_with("//"))
+            .flat_map(|l| l.split(','))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).unwrap())
+            .collect()
+    }
+
+    fn golden_asked() -> Asked {
+        Asked {
+            csid: 7,
+            sf: 9,
+            dbm: 20,
+            transmit: [
+                Rate { fixed_ms: 60_000, follow: true, percent: [80, 60, 40, 20], interval_ms: [11_000, 21_000, 31_000, 41_000, 51_000] },
+                Rate { fixed_ms: 1_000, follow: false, percent: [75, 50, 35, 20], interval_ms: [1_100, 2_100, 3_100, 4_100, 5_100] },
+            ],
+            log: [
+                Rate { fixed_ms: 10_000, follow: true, percent: [80, 60, 40, 20], interval_ms: [12_000, 22_000, 32_000, 42_000, 0] },
+                Rate { fixed_ms: 50, follow: false, percent: [70, 55, 30, 10], interval_ms: [50, 100, 0, 20, 5_000] },
+            ],
+        }
+    }
+
+    #[test]
+    fn the_golden_block_reads_field_by_field_and_is_what_a_patch_writes() {
+        let g = golden();
+        assert_eq!(g.len(), SIZE);
+        let wanted = golden_asked();
+        match find_at(&image(&[(1001, g.clone())])).unwrap() {
+            (Found::Block(s), Some(1001)) => {
+                assert_eq!((s.layout, s.csid, s.module, s.sf, s.dbm, s.set_by), (4, 7, "hp", 9, 20, "tool"));
+                assert_eq!(s.transmit.as_ref(), Some(&wanted.transmit));
+                assert_eq!(s.log.as_ref(), Some(&wanted.log));
+                assert_eq!((s.tx_interval_ms, s.reserved_clear), (1_000, true));
+                assert!(s.older.is_empty());
+            }
+            other => panic!("{:?}", other),
+        }
+        // And written from those values, byte for byte, CRC included.
+        let built = image(&[(1001, block4(255, 2, 7, 14, 1, &transmit(1000), &log()))]);
+        let (at, _) = writable(&built).unwrap();
+        assert_eq!(patch(&built, at, &wanted).unwrap()[at..at + SIZE], g[..]);
+    }
+
     #[test]
     fn a_block_in_an_image_is_found_and_read() {
-        let landed_by_battery = Rate { fixed_ms: 300_000, follow: true, percent: [90, 60, 30, 5], interval_ms: [5_000, 20_000, 60_000, 90_000, 200_000] };
-        let mut set = rates(30_000);
-        set[3] = landed_by_battery.clone();
-        let b = block_with(3, 7, 2, 9, -4, 2, &set);
+        let by_battery = Rate { fixed_ms: 300_000, follow: true, percent: [90, 60, 30, 5], interval_ms: [5_000, 20_000, 60_000, 90_000, 200_000] };
+        let tx = [by_battery.clone(), rate(30_000, false)];
+        let logs = [flat(10_000), Rate { fixed_ms: 50, follow: true, percent: [70, 40, 20, 10], interval_ms: [50, 100, 200, 500, 1000] }];
+        let b = block4(7, 2, 9, -4, 2, &tx, &logs);
         let (found, at) = find_at(&image(&[(1001, b.clone())])).unwrap();
         assert_eq!(at, Some(1001));
         assert_eq!(
             found,
             Found::Block(Settings {
-                layout: 3,
+                layout: 4,
                 csid: 7,
                 module: "hp",
                 sf: 9,
                 dbm: -4,
                 set_by: "tool",
                 tx_interval_ms: 30_000,
-                rates: Some(set.clone()),
-                logs: Some(LOGS),
-                log_blind_ms: Some(LOG_BLIND),
+                transmit: Some(tx.clone()),
+                log: Some(logs.clone()),
+                older: Vec::new(),
                 reserved_clear: true,
             })
         );
         let j = found.json();
-        assert!(j.starts_with("{\"layoutVersion\":3,\"csid\":7,\"module\":\"hp\",\"sf\":9,\"dbm\":-4,\"setBy\":\"tool\",\"txIntervalMs\":30000,\"rates\":[{\"fixedMs\":60000,\"follow\":false,\"percent\":[75,50,35,20],\"intervalMs\":[10000,30000,60000,120000,180000]},{\"fixedMs\":30000,"), "{}", j);
+        assert!(j.starts_with("{\"layoutVersion\":4,\"csid\":7,\"module\":\"hp\",\"sf\":9,\"dbm\":-4,\"setBy\":\"tool\",\"txIntervalMs\":30000,\"transmit\":[{\"fixedMs\":300000,\"follow\":true,\"percent\":[90,60,30,5],\"intervalMs\":[5000,20000,60000,90000,200000]},{\"fixedMs\":30000,"), "{}", j);
+        assert!(j.ends_with("\"log\":[{\"fixedMs\":10000,\"follow\":false,\"percent\":[75,50,35,20],\"intervalMs\":[10000,10000,10000,10000,10000]},{\"fixedMs\":50,\"follow\":true,\"percent\":[70,40,20,10],\"intervalMs\":[50,100,200,500,1000]}],\"olderSlots\":[],\"reservedClear\":true}"), "{}", j);
+        assert_eq!(by_battery.words(TRANSMIT_ZERO_WORDS), "by battery: 5 s above 90 %, 20 s to 60 %, 60 s to 30 %, 90 s to 5 %, then 200 s (300 s when the gauge cannot be read)");
+        assert_eq!(rate(1_000, false).words(TRANSMIT_ZERO_WORDS), "every 1 s");
+        assert_eq!(rate(0, false).words(TRANSMIT_ZERO_WORDS), "back to back");
+        assert_eq!(flat(0).words(log_zero_words(0)), "nothing written");
+        assert_eq!(flat(0).words(log_zero_words(1)), "every reading");
+
+        // What a build with fixed settings carries.
+        let built = find(&image(&[(2048, block4(255, 1, 7, 14, 1, &transmit(1000), &log()))])).unwrap();
+        assert!(built.json().starts_with("{\"layoutVersion\":4,\"csid\":255,\"module\":\"le\",\"sf\":7,\"dbm\":14,\"setBy\":\"build\",\"txIntervalMs\":1000,\"transmit\":["));
+
+        // Right at the end of what was read, with nothing after it.
+        let mut tail = image(&[]);
+        tail.extend_from_slice(&b);
+        assert!(matches!(find(&tail).unwrap(), Found::Block(_)));
+    }
+
+    #[test]
+    fn a_layout_3_block_gives_the_page_the_same_shape_and_never_shows_its_spare_slots_as_log_tables() {
+        // Slots 2 and 3 hold transmit gaps. Read as layout 4 they would be log tables of 1 s and 60 s.
+        let mut set = rates(30_000);
+        set[0].percent = [90, 60, 30, 5];
+        set[3].percent = [90, 60, 30, 5];
+        let found = find(&image(&[(1001, block_logs(3, 7, 2, 9, -4, 2, &set, &[10_000, 50, 50, 10_000], 200))])).unwrap();
+        let Found::Block(s) = &found else { panic!("{:?}", found) };
+        assert_eq!((s.layout, s.tx_interval_ms, s.reserved_clear), (3, 30_000, true));
+        assert_eq!(s.transmit.as_ref().unwrap(), &[set[0].clone(), set[1].clone()]);
+        let [ground, air] = s.log.clone().unwrap();
+        assert_eq!(ground, Rate { fixed_ms: 10_000, follow: false, percent: [90, 60, 30, 5], interval_ms: [10_000; BANDS] });
+        assert_eq!(air, flat(50));
+        assert!(s.older.is_empty(), "{:?}", s.older);
+        let j = found.json();
+        assert!(!j.contains("\"rates\"") && !j.contains("\"logMs\":[") && !j.contains("logBlindMs"), "{}", j);
+
+        // A spare slot that differs is kept apart, with what that firmware logged in it.
+        let mut set = rates(1_000);
+        set[2].fixed_ms = 500;
+        set[3].follow = true;
+        let Found::Block(s) = find(&image(&[(1001, block_logs(3, 7, 2, 9, 14, 2, &set, &[10_000, 50, 100, 10_000], 200))])).unwrap() else { panic!() };
+        assert_eq!(s.older, vec![
+            OlderSlot { phase: 1, name: "falling", rate: set[2].clone(), log_ms: Some(100) },
+            OlderSlot { phase: 0, name: "landed", rate: set[3].clone(), log_ms: Some(10_000) },
+        ]);
+
         // A layout-2 block's flight gap is its falling one; layout 3's is rising.
         let mut two = rates(5_000);
         two[1].fixed_ms = 7_000;
@@ -541,19 +821,6 @@ mod tests {
         assert_eq!(s2.tx_interval_ms, 5_000);
         let Found::Block(s3) = find(&image(&[(1001, block_with(3, 7, 2, 9, -4, 2, &two))])).unwrap() else { panic!() };
         assert_eq!(s3.tx_interval_ms, 7_000);
-        assert!(j.ends_with("{\"fixedMs\":300000,\"follow\":true,\"percent\":[90,60,30,5],\"intervalMs\":[5000,20000,60000,90000,200000]}],\"logMs\":[1000,50,50,1000],\"logBlindMs\":200,\"reservedClear\":true}"), "{}", j);
-        assert_eq!(landed_by_battery.words(), "by battery: 5 s above 90 %, 20 s to 60 %, 60 s to 30 %, 90 s to 5 %, then 200 s (300 s when the gauge cannot be read)");
-        assert_eq!(rate(1_000, false).words(), "every 1 s");
-        assert_eq!(rate(0, false).words(), "back to back");
-
-        // What a build with fixed settings carries.
-        let built = find(&image(&[(2048, block(3, 255, 1, 7, 14, 1, 1000))])).unwrap();
-        assert!(built.json().starts_with("{\"layoutVersion\":3,\"csid\":255,\"module\":\"le\",\"sf\":7,\"dbm\":14,\"setBy\":\"build\",\"txIntervalMs\":1000,\"rates\":["));
-
-        // Right at the end of what was read, with nothing after it.
-        let mut tail = image(&[]);
-        tail.extend_from_slice(&b);
-        assert!(matches!(find(&tail).unwrap(), Found::Block(_)));
     }
 
     #[test]
@@ -563,9 +830,9 @@ mod tests {
         assert_eq!(at, Some(1001));
         let Found::Block(s) = &found else { panic!("{:?}", found) };
         assert_eq!((s.layout, s.csid, s.module, s.sf, s.dbm, s.set_by, s.tx_interval_ms, s.reserved_clear), (1, 12, "le", 9, 14, "tool", 500, true));
-        assert_eq!(s.rates, None);
+        assert_eq!((s.transmit.clone(), s.log.clone()), (None, None));
         assert!(found.json().starts_with("{\"layoutVersion\":1,"));
-        assert!(found.json().contains("\"txIntervalMs\":500,\"rates\":null,\"logMs\":null,\"logBlindMs\":null,"));
+        assert!(found.json().contains("\"txIntervalMs\":500,\"transmit\":null,\"log\":null,\"olderSlots\":[],"));
         // Its CRC is at 30, and what follows it is whatever the image held: not read.
         let mut flipped_tail = image(&[(1001, b.clone())]);
         flipped_tail[1001 + 40] ^= 0xFF;
@@ -596,7 +863,12 @@ mod tests {
             let mut set = rates(1000);
             set[phase].percent = pct;
             let e = find(&image(&[(1001, block_with(2, 7, 2, 9, -4, 2, &set))])).unwrap_err();
-            assert!(e.contains(what) && e.contains(PHASE_WORDS[phase]), "{}: {}", what, e);
+            assert!(e.contains(what) && e.contains(OLD_SLOT_WORDS[phase]), "{}: {}", what, e);
+            // The same in layout 4, where every slot is read and a log slot is named so.
+            let mut b = block4(7, 2, 9, -4, 2, &transmit(1000), &log());
+            b[RATES_AT + RATE_BYTES * phase + 5..RATES_AT + RATE_BYTES * phase + 9].copy_from_slice(&pct);
+            let e = find(&image(&[(1001, sealed(b))])).unwrap_err();
+            assert!(e.contains(what) && e.contains(SLOT_NAMES[phase]), "{}: {}", what, e);
         }
         // A flag byte that is neither 0 nor 1, in the rising phase.
         let mut b = block(2, 7, 2, 9, -4, 2, 0);
@@ -691,28 +963,28 @@ mod tests {
     fn a_layout_2_block_from_before_the_log_gaps_is_read_and_has_none() {
         let found = find(&image(&[(1001, block(2, 7, 2, 9, -4, 2, 30_000))])).unwrap();
         let Found::Block(s) = &found else { panic!("{:?}", found) };
-        assert_eq!((s.layout, s.csid, s.tx_interval_ms, s.logs, s.log_blind_ms, s.reserved_clear), (2, 7, 30_000, None, None, true));
-        assert_eq!(s.rates, Some(rates(30_000)));
-        assert!(found.json().contains("\"logMs\":null,\"logBlindMs\":null,"));
+        assert_eq!((s.layout, s.csid, s.tx_interval_ms, s.log.clone(), s.reserved_clear), (2, 7, 30_000, None, true));
+        assert_eq!(s.transmit, Some(transmit(30_000)));
+        assert!(found.json().contains("\"log\":null,"));
         // A log gap the firmware would refuse is an error here too, naming the phase.
         let e = find(&image(&[(1001, block_logs(3, 7, 2, 9, -4, 2, &rates(1), &[1000, 10, 50, 1000], 200))])).unwrap_err();
-        assert!(e.contains("for air a flash log gap") && e.contains("at least 20"), "{}", e);
+        assert!(e.contains("for air a flash log gap of") && e.contains("at least 20"), "{}", e);
         let e = find(&image(&[(1001, block_logs(3, 7, 2, 9, -4, 2, &rates(1), &LOGS, 5))])).unwrap_err();
         assert!(e.contains("no altitude source"), "{}", e);
     }
 
     #[test]
     fn a_layout_this_build_does_not_know_is_named_and_not_decoded() {
-        let found = find(&image(&[(1001, block(4, 7, 2, 9, -4, 2, 30_000))])).unwrap();
-        assert_eq!(found, Found::Layout(4));
+        let found = find(&image(&[(1001, block(5, 7, 2, 9, -4, 2, 30_000))])).unwrap();
+        assert_eq!(found, Found::Layout(5));
         // Nothing of it goes to the page as settings: fields read by the wrong layout
         // would look like settings and be wrong.
         assert_eq!(found.json(), "null");
         // And nothing of it is checked: where its CRC sits is part of what is not known,
-        // so a damaged block of an unknown layout is still "layout 3" and not "damaged".
-        let mut torn = block(4, 7, 2, 9, -4, 2, 30_000);
+        // so a damaged block of an unknown layout is still "layout 5" and not "damaged".
+        let mut torn = block(5, 7, 2, 9, -4, 2, 30_000);
         torn[40] ^= 0xFF;
-        assert_eq!(find(&image(&[(1001, torn)])).unwrap(), Found::Layout(4));
+        assert_eq!(find(&image(&[(1001, torn)])).unwrap(), Found::Layout(5));
     }
 
     #[test]
@@ -727,6 +999,14 @@ mod tests {
             other => panic!("{:?}", other),
         }
         assert!(find(&image(&[(1001, sealed(b))])).unwrap().json().ends_with("\"reservedClear\":false}"));
+        // The bytes layout 3 kept log gaps in are reserved again in layout 4.
+        for at in [RESERVED_AT, CRC_AT - 1] {
+            let mut b = block4(7, 2, 9, -4, 2, &transmit(1000), &log());
+            b[at] = 1;
+            let image = image(&[(1001, sealed(b))]);
+            assert!(matches!(find(&image).unwrap(), Found::Block(s) if !s.reserved_clear), "{}", at);
+            assert!(writable(&image).unwrap_err().contains("reserved"), "{}", at);
+        }
     }
 
     #[test]
@@ -745,12 +1025,12 @@ mod tests {
     }
 
     fn asked() -> Asked {
-        Asked { csid: 12, sf: 9, dbm: 20, rates: rates(1000), logs: LOGS, log_blind_ms: LOG_BLIND }
+        Asked { csid: 12, sf: 9, dbm: 20, transmit: transmit(1000), log: log() }
     }
 
     #[test]
     fn a_patch_changes_the_block_and_nothing_else() {
-        let before = image(&[(1001, block(3, 255, 2, 7, 14, 1, 1000))]);
+        let before = image(&[(1001, block4(255, 2, 7, 14, 1, &transmit(1000), &log()))]);
         let (at, was) = writable(&before).unwrap();
         assert_eq!((at, was.module, was.set_by), (1001, "hp", "build"));
 
@@ -765,60 +1045,143 @@ mod tests {
             find_at(&after).unwrap(),
             (
                 Found::Block(Settings {
-                    layout: 3,
+                    layout: 4,
                     csid: 12,
                     module: "hp",
                     sf: 9,
                     dbm: 20,
                     set_by: "tool",
                     tx_interval_ms: 1000,
-                    rates: Some(rates(1000)),
-                    logs: Some(LOGS),
-                    log_blind_ms: Some(LOG_BLIND),
+                    transmit: Some(transmit(1000)),
+                    log: Some(log()),
+                    older: Vec::new(),
                     reserved_clear: true,
                 }),
                 Some(1001)
             )
         );
         // Byte for byte, against a block built here by hand.
-        assert_eq!(after[1001..1001 + SIZE], block(3, 12, 2, 9, 20, 2, 1000)[..]);
+        assert_eq!(after[1001..1001 + SIZE], block4(12, 2, 9, 20, 2, &transmit(1000), &log())[..]);
 
-        // A negative power, the widest gaps and a table per phase fit their fields.
-        let odd_rates = [
+        // A negative power, the widest gaps and a table per slot fit their fields.
+        let odd_tx = [
             Rate { fixed_ms: 0, follow: true, percent: [99, 66, 33, 1], interval_ms: [0, 1, u32::MAX, 7, 180_000] },
             rate(u32::MAX, false),
-            Rate { fixed_ms: 1, follow: true, percent: [80, 40, 20, 10], interval_ms: [1, 2, 3, 4, 5] },
-            rate(7, true),
         ];
-        let odd_logs = [20, u32::MAX, 21, 3_600_000];
-        let odd = patch(&before, at, &Asked { csid: 1, sf: 12, dbm: -9, rates: odd_rates.clone(), logs: odd_logs, log_blind_ms: u32::MAX }).unwrap();
-        assert_eq!(odd[1001..1001 + SIZE], block_logs(3, 1, 2, 12, -9, 2, &odd_rates, &odd_logs, u32::MAX)[..]);
+        let odd_log = [
+            Rate { fixed_ms: 20, follow: true, percent: [80, 40, 20, 10], interval_ms: [0, 20, 21, u32::MAX, 3_600_000] },
+            flat(u32::MAX),
+        ];
+        let odd = patch(&before, at, &Asked { csid: 1, sf: 12, dbm: -9, transmit: odd_tx.clone(), log: odd_log.clone() }).unwrap();
+        assert_eq!(odd[1001..1001 + SIZE], block4(1, 2, 12, -9, 2, &odd_tx, &odd_log)[..]);
         // Patching what a tool already set works the same way.
-        let again = patch(&after, at, &Asked { csid: 13, sf: 7, dbm: 14, rates: rates(0), logs: LOGS, log_blind_ms: LOG_BLIND }).unwrap();
-        assert_eq!(again[1001..1001 + SIZE], block(3, 13, 2, 7, 14, 2, 0)[..]);
-        // A layout-2 image, from before the log gaps, is patched into layout 3.
-        let older = image(&[(1001, block(2, 255, 2, 7, 14, 1, 1000))]);
-        let (at2, was2) = writable(&older).unwrap();
-        assert_eq!((at2, was2.layout, was2.logs), (1001, 2, None));
-        assert_eq!(patch(&older, at2, &asked()).unwrap()[1001..1001 + SIZE], block(3, 12, 2, 9, 20, 2, 1000)[..]);
-        // A table the firmware would refuse is not written, and the phase is named.
+        let again = patch(&after, at, &Asked { csid: 13, sf: 7, dbm: 14, transmit: transmit(0), log: log() }).unwrap();
+        assert_eq!(again[1001..1001 + SIZE], block4(13, 2, 7, 14, 2, &transmit(0), &log())[..]);
+        // A table the firmware would refuse is not written, whichever slot it is in.
         let mut bad = asked();
-        bad.rates[3].percent = [50, 75, 35, 20];
+        bad.transmit[1].percent = [50, 75, 35, 20];
         let e = patch(&before, at, &bad).unwrap_err();
-        assert!(e.contains("have to fall") && e.contains("landed"), "{}", e);
-        // So is a log gap it would refuse.
+        assert!(e.contains("have to fall") && e.contains("air transmit"), "{}", e);
         let mut bad = asked();
-        bad.logs[1] = 19;
+        bad.log[0].percent = [50, 75, 35, 20];
         let e = patch(&before, at, &bad).unwrap_err();
-        assert!(e.contains("for air,") && e.contains("at least 20"), "{}", e);
-        let mut bad = asked();
-        bad.log_blind_ms = 7;
-        assert!(patch(&before, at, &bad).unwrap_err().contains("no altitude source"));
-        // 0 stays 0
-        let mut zero = asked();
-        zero.logs[1] = 0;
-        zero.log_blind_ms = 0;
-        assert!(patch(&before, at, &zero).is_ok());
+        assert!(e.contains("have to fall") && e.contains("ground log"), "{}", e);
+    }
+
+    #[test]
+    fn one_to_19_ms_is_refused_in_every_log_value_naming_the_cell_with_or_without_the_battery() {
+        let before = image(&[(1001, block4(255, 2, 7, 14, 1, &transmit(1000), &log()))]);
+        // follow, cell (None is the fixed gap), what the refusal has to say
+        let cells: [(bool, Option<usize>, &str); 8] = [
+            (false, None, "always, log gap"),
+            (true, None, "gauge unread, log gap"),
+            (true, Some(0), "above 75 %, log gap"),
+            (true, Some(1), "to 50 %, log gap"),
+            (true, Some(2), "to 35 %, log gap"),
+            (true, Some(3), "to 20 %, log gap"),
+            (true, Some(4), "below 20 %, log gap"),
+            (false, Some(4), "below 20 %, log gap"),   // off, and still refused
+        ];
+        for phase in 0..PHASES {
+            for (follow, cell, words) in cells {
+                for ms in [1, 19] {
+                    let mut bad = asked();
+                    bad.log[phase].follow = follow;
+                    match cell {
+                        None => bad.log[phase].fixed_ms = ms,
+                        Some(i) => bad.log[phase].interval_ms[i] = ms,
+                    }
+                    let e = patch(&before, 1001, &bad).unwrap_err();
+                    let want = format!("not written: {}, {}: {} ms, which has to be 0 or at least 20", PHASE_WORDS[phase], words, ms);
+                    assert_eq!(e, want);
+                }
+                // 0 and 20 are fine in the same cell.
+                for ms in [0, 20] {
+                    let mut good = asked();
+                    good.log[phase].follow = follow;
+                    match cell {
+                        None => good.log[phase].fixed_ms = ms,
+                        Some(i) => good.log[phase].interval_ms[i] = ms,
+                    }
+                    assert!(patch(&before, 1001, &good).is_ok(), "{} ms in {}", ms, words);
+                }
+            }
+        }
+        // The same value off a board is an error, not a table to show: that board is on its build values.
+        let mut hurt = log();
+        hurt[1].interval_ms[4] = 7;
+        let e = find(&image(&[(1001, block4(9, 2, 7, 14, 2, &transmit(1000), &hurt))])).unwrap_err();
+        assert!(e.contains("air, below 20 %, log gap") && e.contains("layout 4"), "{}", e);
+        // Transmit has no floor, it is not the log.
+        let mut tx = asked();
+        tx.transmit[1].interval_ms = [1, 2, 3, 4, 5];
+        tx.transmit[0].fixed_ms = 1;
+        assert!(patch(&before, 1001, &tx).is_ok());
+    }
+
+    #[test]
+    fn a_read_back_names_every_value_that_differs() {
+        let block_of = |a: &Asked| {
+            let b = patch(&image(&[(1001, block4(255, 2, 7, 14, 1, &transmit(1000), &log()))]), 1001, a).unwrap();
+            let Found::Block(s) = find(&b).unwrap() else { panic!() };
+            s
+        };
+        let wanted = block_of(&golden_asked());
+        assert_eq!(differences(&wanted, &wanted), Vec::<String>::new());
+        let changed = |f: &dyn Fn(&mut Asked)| {
+            let mut a = golden_asked();
+            f(&mut a);
+            differences(&wanted, &block_of(&a))
+        };
+        // Every slot, and in each one every field: flag, fixed gap, thresholds, bands.
+        for (slot, phase, column) in [(0, "ground", "transmit"), (1, "air", "transmit"), (2, "ground", "log"), (3, "air", "log")] {
+            let rate_of = move |a: &mut Asked, f: &dyn Fn(&mut Rate)| {
+                f(if slot < PHASES { &mut a.transmit[slot] } else { &mut a.log[slot - PHASES] })
+            };
+            let g = golden_asked();
+            let r = if slot < PHASES { &g.transmit[slot] } else { &g.log[slot - PHASES] };
+            let fixed = if r.follow { "gauge unread" } else { "always" };
+            assert_eq!(changed(&|a| rate_of(a, &|r| r.follow = !r.follow)), vec![format!("{}, {} battery switch", phase, column)]);
+            assert_eq!(changed(&|a| rate_of(a, &|r| r.fixed_ms += 1000)), vec![format!("{}, {}, {} gap", phase, fixed, column)]);
+            for k in 0..BANDS - 1 {
+                let n = changed(&|a| rate_of(a, &|r| r.percent[k] = if k == 3 { r.percent[3] - 1 } else { r.percent[k] + 1 }));
+                assert_eq!(n, vec![format!("{}, {} battery threshold {}", phase, column, k + 1)]);
+            }
+            for k in 0..BANDS {
+                let n = changed(&|a| rate_of(a, &|r| r.interval_ms[k] += 1000));
+                assert_eq!(n, vec![format!("{}, {}, {} gap", phase, band_words(&r.percent, k), column)]);
+            }
+        }
+        // And the head.
+        assert_eq!(changed(&|a| a.csid = 8), vec!["board id"]);
+        assert_eq!(changed(&|a| a.sf = 8), vec!["spreading factor"]);
+        assert_eq!(changed(&|a| a.dbm = 22), vec!["transmit power"]);
+        let mut other = wanted.clone();
+        other.layout = 3;
+        assert_eq!(differences(&wanted, &other), vec!["block layout"]);
+        other = wanted.clone();
+        other.log = None;
+        assert_eq!(differences(&wanted, &other), vec!["log gaps"]);
     }
 
     #[test]
@@ -826,26 +1189,29 @@ mod tests {
         let e = writable(&image(&[])).unwrap_err();
         assert_eq!(e, "this firmware has no settings block");
 
-        let mut bad = block(3, 255, 1, 7, 14, 1, 1000);
+        let mut bad = block4(255, 1, 7, 14, 1, &transmit(1000), &log());
         bad[19] ^= 0x10;
         let e = writable(&image(&[(1001, bad)])).unwrap_err();
         assert!(e.contains("damaged"), "{}", e);
 
-        let e = writable(&image(&[(1001, block(4, 255, 1, 7, 14, 1, 1000))])).unwrap_err();
-        assert!(e.contains("layout 4"), "{}", e);
+        let e = writable(&image(&[(1001, block(5, 255, 1, 7, 14, 1, 1000))])).unwrap_err();
+        assert!(e.contains("layout 5"), "{}", e);
 
-        // An older image is read but not written: its block has no room for the rates,
-        // and the words say what to do instead.
+        // An older image is read but not written, and the words say what to do instead.
         let e = writable(&image(&[(1001, block_v1(255, 1, 7, 14, 1, 1000))])).unwrap_err();
         assert!(e.contains("layout 1") && e.contains("flash the flight image"), "{}", e);
 
-        let mut reserved = block(2, 255, 1, 7, 14, 1, 1000);
-        reserved[145] = 0x40;
-        let e = writable(&image(&[(1001, sealed(reserved))])).unwrap_err();
-        assert!(e.contains("reserved"), "{}", e);
+        // Changed on purpose: layouts 2 and 3 used to be stamped with the newest layout. The
+        // firmware needs its exact layout, so that image booted on compiled defaults while the
+        // read-back passed. Patching it now is refused, and so is a tree still at layout 3.
+        for old in [2, 3] {
+            let e = writable(&image(&[(1001, block(old, 255, 1, 7, 14, 1, 1000))])).unwrap_err();
+            let says = format!("layout {} and this app writes layout 4", old);
+            assert!(e.contains(&says) && e.contains("flash the flight image") && e.contains("not patched"), "{}", e);
+        }
 
         // Told to patch somewhere that is not a block, it does not.
-        let whole = image(&[(1001, block(3, 255, 1, 7, 14, 1, 1000))]);
+        let whole = image(&[(1001, block4(255, 1, 7, 14, 1, &transmit(1000), &log()))]);
         assert!(patch(&whole, 1000, &asked()).is_err());
         assert!(patch(&whole, 4090, &asked()).is_err());
     }
@@ -871,8 +1237,12 @@ mod tests {
             // both written by the flight repo from the same config.h.
             assert_eq!(s.layout, LAYOUT, "{}", image.file);
             let radio = crate::radio::carried().unwrap();
-            assert_eq!(s.rates.as_ref(), Some(&radio.rates), "{}", image.file);
-            assert_eq!((s.logs, s.log_blind_ms), (Some(radio.logs), Some(radio.log_blind_ms)), "{}", image.file);
+            assert_eq!(s.transmit.as_ref(), Some(&radio.transmit), "{}", image.file);
+            assert_eq!(s.log.as_ref(), Some(&radio.log), "{}", image.file);
+            // Flat: a default image does what it did before the log had bands.
+            for r in radio.log {
+                assert_eq!((r.follow, r.interval_ms), (false, [r.fixed_ms; BANDS]), "{}", image.file);
+            }
         }
     }
 }

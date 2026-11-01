@@ -244,3 +244,10 @@ test('a chip that went round says so in how the transfer went, and only then', (
   const went = Object.fromEntries(D.transferRows(Object.assign({}, REPORT, { wrapped: true })).map((r) => [r.key, r]));
   assert.equal(went.wrapped.value, 'yes');
 });
+
+test('the log being written is named from the data folder down', () => {
+  assert.equal(D.dataName('/home/p/DeSCENT/2026-10-31/logs/0922-ground.log'), '2026-10-31/logs/0922-ground.log');
+  assert.equal(D.dataName('C:\\Users\\p\\DeSCENT\\2026-10-31\\logs\\0922-ground.log'), '2026-10-31/logs/0922-ground.log');
+  assert.equal(D.dataName('/home/p/ground-old.log'), 'ground-old.log');
+  assert.equal(D.dataName(null), '');
+});

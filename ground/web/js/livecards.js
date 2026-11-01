@@ -45,9 +45,14 @@
   }
 
   // ---------- the unit list ----------
+  // The spreading factor the last packet came in on. Each reception holds its own, so this
+  // stays true after a receiver is retuned; empty until a receiver has sent its header.
+  const heardSf = (u) => [...new Set(u.receptions.map((r) => r.sf).filter(Boolean))].map((n) => 'SF' + n).join(', ');
+
   // o: {runs, staleMs, sel, cfg: {lowBatteryV, weakRssiDbm}, heardBy}
   function unitCardHtml(u, state, age, rxTotal, o) {
     const d = u.latest;
+    const sf = heardSf(u);
     const cfg = o.cfg || {};
     const frac = Math.min(1, age / o.staleMs);
     const width = age > o.staleMs ? 100 : Math.max(2, frac * 100);
@@ -63,6 +68,7 @@
       '<div class="stalebar"><b class="' + state.toLowerCase() + '" style="width:' + width.toFixed(0) + '%"></b></div>' +
       '<div class="u3"><span' + (low ? ' class="low" title="Below ' + num(cfg.lowBatteryV, 2) + ' V, the low battery limit"' : '') + '><b>' + num(batt, 2) + '</b> V</span><i>·</i>' +
         '<span' + (weak ? ' class="low" title="Below ' + cfg.weakRssiDbm + ' dBm, the weak RF limit"' : '') + '><b>' + num(u.bestRssi, 1) + '</b> dBm</span><i>·</i>' +
+        (sf ? '<span title="Last packet came in on this"><b>' + sf + '</b></span><i>·</i>' : '') +
         '<span><b>' + num(u.packets, 0) + '</b> pkts</span>' +
         '<span class="rxn"' + (o.heardBy ? ' title="' + esc(o.heardBy) + '"' : '') + '>' + u.receptions.length + ' of ' + rxTotal + ' rx</span></div>' +
       '<div class="u4">' + bitsHtml(d.values.validity) + '</div>' +
@@ -140,6 +146,7 @@
     const expected = u.packets + u.missed;
     const link = [
       row('Counter', num(d.values.counter, 0)),
+      row('Spreading factor', heardSf(u) || '—'),
       row('Cell voltage', v.soc ? num(d.values.battery, 2) : '—', 'V'),
       row('Interval', Number.isFinite(u.intervalMs) ? num(u.intervalMs / 1000, 2) : '—', 's'),
       row('CRC', crc, Number.isFinite(d.crcReceived) ? d.crcReceived.toString(16).toUpperCase().padStart(4, '0') : ''),

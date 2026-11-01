@@ -2,6 +2,7 @@
 // dashboard to the operator's browser, and logs every line whether or not a
 // browser is open.
 mod assets;
+mod check;
 mod chipflash;
 mod chips;
 mod csv;
@@ -40,12 +41,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn main() {
+    // Before anything else: the settings file, the port and the data folder are the app's,
+    // and reading a log at home needs none of them.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|a| a == "check") {
+        std::process::exit(check::run(&argv[1..]));
+    }
+
     let dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     let opts = match opts::parse(&argv, opts::read_conf(&dir).as_deref()) {
         Ok(o) => o,
         Err(e) => {

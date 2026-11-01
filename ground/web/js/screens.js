@@ -170,7 +170,7 @@
       : '<span class="dot"></span>' + mark('warn', 'not logging to a file');
     $('strip-log-name').title = hub.log ? 'Logging to ' + hub.log : '';
     $('strip-log-save').hidden = !name;
-    if (name) { $('strip-log-save').href = logUrl(name); $('strip-log-save').download = name; }
+    if (name) { $('strip-log-save').href = logUrl(D.dataName(hub.log)); $('strip-log-save').download = name; }
 
     // Every build carries the same version number, so the bar says when the one on disk
     // is newer than the one running.

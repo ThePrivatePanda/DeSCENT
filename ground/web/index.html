@@ -19,10 +19,10 @@
 <header class="bar">
   <span class="brand">DeSCENT <span>ground</span></span>
   <nav class="views" role="tablist" aria-label="Screen">
+    <button id="view-chipsats" role="tab" aria-selected="false" data-screen="chipsats" title="Read, flash and pull the flight log off a ChipSat" hidden>ChipSats</button>
+    <button id="view-tbeams" role="tab" aria-selected="false" data-screen="tbeams" title="Serial boards and receivers" hidden>T-Beams</button>
     <button id="view-live" role="tab" aria-selected="true" data-screen="live">Live</button>
     <button id="view-replay" role="tab" aria-selected="false" data-screen="replay" disabled title="Open a log, or pull one off a ChipSat">Replay</button>
-    <button id="view-chipsats" role="tab" aria-selected="false" data-screen="chipsats" title="Read, flash and pull the flight log off a ChipSat" hidden>ChipSats <small>units</small></button>
-    <button id="view-tbeams" role="tab" aria-selected="false" data-screen="tbeams" title="Serial boards and receivers" hidden>T-Beams <small>receivers</small></button>
     <button id="view-data" role="tab" aria-selected="false" data-screen="data" title="Everything the app has written to disk" hidden>Data</button>
   </nav>
   <div class="bar-right">
@@ -207,6 +207,13 @@
 <script src="js/serial_native.js"></script>
 <script src="js/replay.js"></script>
 <script src="js/datamodel.js"></script>
+<div id="flash-done" class="modal" role="alertdialog" aria-modal="true" aria-labelledby="flash-done-title" hidden>
+  <div class="modal-card">
+    <div id="flash-done-body"></div>
+    <button id="flash-done-ok" class="primary">OK</button>
+  </div>
+</div>
+
 <script src="js/boardmodel.js"></script>
 <script src="js/update.js"></script>
 <script src="js/livecards.js"></script>

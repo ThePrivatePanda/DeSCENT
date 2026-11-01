@@ -36,7 +36,11 @@
     pickFor: null,      // the board it was chosen on, when it was chosen on one
     build: null,        // settings to compile into a fresh image: {uid, csid, sf, dbm, interval}
     refused: '', canForce: false,
-    open: {},           // 'radio:<uid>' a folded card on a bench board, 'images:<uid>' Other images, 'pulls:<uid>' every pull, shown
+    open: {},           // 'radio:<uid>' a folded card on a bench board, 'pulls:<uid>' every pull, shown
+    endedAt: {},        // when the pull and the chip job last ended, by kind, for the card under the head
+    sent: null,         // the draft the last flash was asked with, remembered for its board once it ends well
+    misses: 0,          // id checks in a row that nothing answered, while a board was shown as on the probe
+    homeNote: '',       // why the probe's own view is up: what the last id checks saw
     timer: null,
   };
 
@@ -94,6 +98,16 @@
     state.read = null;
     state.readAt = 0;
     state.stale = '';
+    state.misses = 0;
+  }
+  // The probe's own view: about whatever is under the clip now, not a remembered board. The
+  // sheet goes there when the board shown stops answering, when another board answers, or when
+  // a read fails, so nothing said about the probe lands under a board that is not on it
+  // (2026-10-31, the user: a swapped board kept the old board's sheet and its errors).
+  function goHome(serial, note) {
+    forgetRead();
+    state.homeNote = note || '';
+    state.sel = 'probe:' + serial;
   }
   function seeProbes(probes) {
     if (B.probesChanged(state.probes, probes)) forgetRead();
@@ -143,8 +157,17 @@
     state.peek = null;
     if (!quiet()) return;
     const shown = state.read && state.read.probe && state.read.probe.serial === to ? state.read.uid : null;
+    if (!uid) {
+      // Nothing answered: lifted off the clip, or mid-reset. One check says nothing; the
+      // third in a row (checks are 2 s apart) says the board shown is gone.
+      if (shown && ++state.misses >= 3) { goHome(to, 'Nothing has answered on the ST-Link since ' + clock(Date.now() - 4000) + '.'); render(); }
+      return;
+    }
+    state.misses = 0;
     if (!B.swapSeen(uid, shown, state.tried[to])) return;
     state.tried[to] = uid;
+    // another board is under the clip: the sheet shown says nothing true about it
+    if (shown) goHome(to, '');
     read(to, true);
   }
 
@@ -169,12 +192,15 @@
       state.read = j;
       state.readAt = Date.now();
       state.stale = '';
+      state.misses = 0;
+      state.homeNote = '';
       state.sel = j.uid;
       state.chips = await hub.chips().catch(() => state.chips);
       toast(B.readToast(j.uid, known));
     } catch (e) {
-      // No board answered, so no board is known to be there.
-      forgetRead();
+      // No board answered, so no board is known to be there, and what went wrong is said on
+      // the probe's own view, never under a board's name.
+      goHome(serial, '');
       state.readError = e.missing ? CANNOT : (e.message || String(e));
       toast(state.readError);
     }
@@ -267,6 +293,7 @@
         '<div class="line"><button data-read="' + esc(r.probe.serial) + '" class="primary"' + (busy() ? ' disabled' : '') + '>' +
           (state.reading ? 'Reading the board' : 'Read the board') + '</button>' +
           '<span class="note">' + READ_WARNING + '</span></div>' +
+        (state.homeNote ? '<span class="note line">' + esc(state.homeNote) + '</span>' : '') +
         (state.readError ? '<p class="outcome bad line">Could not read it: ' + esc(state.readError) + '</p>' : '') +
         (state.pick ? '<p class="note line">Chosen to write: ' + esc(state.pick.label) + '. Read the board first.</p>' : '') +
         '</div>';
@@ -314,7 +341,6 @@
       // a bench board says so in its own card
       (isBench(r) ? '' : consoleDisagrees(r)) +
       (probe && !r.onProbe ? '<span class="note line">' + READ_WARNING + '</span>' : '') +
-      (state.readError ? '<p class="outcome bad line">Could not read it: ' + esc(state.readError) + '</p>' : '') +
       forgetting +
       '</div>';
   }
@@ -334,102 +360,100 @@
   const AIR_MS = { 5: 47, 6: 80, 7: 143, 8: 257, 9: 456, 10: 854, 11: 1823, 12: 3187 };
 
   const seconds = (ms) => String(Number((ms / 1000).toFixed(3)));
-  const DEFAULT_RATE = { fixedMs: 60000, follow: false, percent: [75, 50, 35, 20], intervalMs: [10000, 30000, 60000, 120000, 180000] };
 
-  // The rates the draft starts from: the board's own when its block has them, else the ones
-  // a fresh image ships (radio.json), else the numbers that have always been compiled in.
-  function startingRates(was) {
-    if (was && was.rates) return was.rates;
-    if (state.radio && state.radio.phases) return state.radio.phases;
-    return [60000, 1000, 1000, 60000].map((fixedMs) => Object.assign({}, DEFAULT_RATE, { fixedMs }));
+  // The draft as the boxes hold it: id, SF, power, and per phase the switch, the thresholds and
+  // the gaps of both columns. From a block, or blank when there is none. No defaults anywhere
+  // (2026-10-31, the user's call): a blank box stays blank until someone types in it.
+  function draftFrom(uid, was) {
+    const d = {
+      uid,
+      csid: was && was.csid != null ? String(was.csid) : '',
+      sf: was && was.sf != null ? Number(was.sf) : '',
+      dbm: was && was.dbm != null ? Number(was.dbm) : '',
+    };
+    B.PHASES.forEach((ph, n) => {
+      const tx = was && was.transmit ? was.transmit[n] : null;
+      const log = was && was.log ? was.log[n] : null;
+      d['p' + n + 's'] = tx ? seconds(tx.fixedMs) : '';
+      d['p' + n + 'f'] = !!(tx && tx.follow);
+      for (let k = 0; k < B.BANDS - 1; k++) d['p' + n + 'soc' + k] = tx ? String(tx.percent[k]) : '';
+      for (let k = 0; k < B.BANDS; k++) d['p' + n + 'ms' + k] = tx ? seconds(tx.intervalMs[k]) : '';
+      d['p' + n + 'l'] = log ? seconds(log.fixedMs) : '';
+      for (let k = 0; k < B.BANDS; k++) d['p' + n + 'lms' + k] = log ? seconds(log.intervalMs[k]) : '';
+    });
+    return d;
   }
 
-  // Ground log gap is our own pick, 10 s so a board sitting on a bench doesn't fill the chip
-  const GROUND_LOG_MS = 10000;
-  function startingLogs(was) {
-    if (was && was.logMs && was.logBlindMs != null) return { logs: was.logMs, blind: was.logBlindMs };
-    const rp = state.radio && state.radio.phases;
-    const air = rp && rp[1] && rp[1].logMs != null ? rp[1].logMs : 50;
-    const blind = state.radio && state.radio.logBlindMs != null ? state.radio.logBlindMs : 200;
-    return { logs: [GROUND_LOG_MS, air, air, GROUND_LOG_MS], blind };
+  // The last settings known for a board, kept in this browser: the block last read off it, and
+  // the draft last written to it. A board that comes back on the dump firmware after a pull has
+  // no block, and this is what its boxes start from.
+  const draftKey = (uid) => 'dg-draft-' + uid;
+  function remembered(uid) {
+    try { const d = JSON.parse(store.get(draftKey(uid)) || 'null'); return d && typeof d === 'object' ? d : null; } catch (e) { return null; }
+  }
+  function remember(uid, d) {
+    if (!uid || !d) return;
+    const keep = Object.assign({}, d);
+    delete keep.uid;
+    store.set(draftKey(uid), JSON.stringify(keep));
   }
 
-  // n is the B.PHASES index (0 ground, 1 air). p<n>s fixed gap s, p<n>f follows battery,
-  // p<n>soc<k> thresholds %, p<n>ms<k> band gaps s, p<n>l log gap s.
-  // lb (no altitude source) has no box, the board's value is written back
+  // The boxes start from the block read off the board, else from what this browser remembers
+  // of it, else empty. n is the B.PHASES index (0 ground, 1 air). p<n>f is the phase's battery
+  // switch and p<n>soc<k> its thresholds in %, one set for both columns. p<n>s and p<n>ms<k> are
+  // the transmit gap and bands in seconds, p<n>l and p<n>lms<k> the log ones.
   function buildDraft(r) {
     const was = r.onProbe && !state.stale && state.read ? state.read.settings : null;
     if (!state.build || state.build.uid !== r.uid) {
-      state.build = {
-        uid: r.uid,
-        csid: was && was.csid != null ? String(was.csid) : (r.csid != null ? String(r.csid) : '255'),
-        sf: was && was.sf != null ? Number(was.sf) : 7,
-        dbm: was && was.dbm != null ? Number(was.dbm) : (r.module === 'hp' ? 14 : 14),
-      };
-      const rates = startingRates(was);
-      const logs = startingLogs(was);
-      B.PHASES.forEach((ph, n) => {
-        const rate = rates[ph.slots[0]];
-        state.build['p' + n + 's'] = seconds(rate.fixedMs);
-        state.build['p' + n + 'f'] = !!rate.follow;
-        rate.percent.forEach((p, k) => { state.build['p' + n + 'soc' + k] = String(p); });
-        rate.intervalMs.forEach((ms, k) => { state.build['p' + n + 'ms' + k] = seconds(ms); });
-        state.build['p' + n + 'l'] = seconds(logs.logs[ph.slots[0]]);
-      });
-      state.build.lb = seconds(logs.blind);
+      if (was) {
+        state.build = draftFrom(r.uid, was);
+        remember(r.uid, state.build);
+      } else {
+        const kept = remembered(r.uid);
+        state.build = kept ? Object.assign(draftFrom(r.uid, null), kept, { uid: r.uid }) : draftFrom(r.uid, null);
+      }
     }
     return state.build;
   }
 
-  const logSecs = (v, key) => B.logWords(Math.round(Number(v) * 1000), key);
-
-  // One phase of the draft as a rate object, for the words and the request.
-  function draftRate(d, i) {
-    const ms = (v) => Math.round(Number(v) * 1000);
-    return {
-      fixedMs: ms(d['p' + i + 's']), follow: !!d['p' + i + 'f'],
-      percent: [0, 1, 2, 3].map((k) => Number(d['p' + i + 'soc' + k])),
-      intervalMs: [0, 1, 2, 3, 4].map((k) => ms(d['p' + i + 'ms' + k])),
-    };
-  }
-
-  // ground goes in the waiting and landed slots, air in rising and falling
+  // Slots in the block's order: ground transmit, air transmit, ground log, air log. The switch
+  // and the thresholds go to both of a phase's slots; the firmware treats them independently.
+  // With the switch off the band table is not consulted by the firmware, and its boxes are not
+  // on the sheet, yet the app wants one for every slot: then every band is the one gap the
+  // operator typed, and thresholds nobody typed are the firmware's own table. Nothing the
+  // sheet shows is ever filled in from a default (draftStop refuses while a shown box is blank).
   function ratesAsked(d) {
-    const out = {};
-    const ms = (v) => Math.round(Number(v) * 1000);
+    const out = { layout: B.LAYOUT };
     for (let i = 0; i < 4; i++) {
-      const from = B.PHASES.findIndex((ph) => ph.slots.includes(i));
-      const r = draftRate(d, from);
+      const r = B.draftRate(d, i % 2, i < 2 ? 'transmit' : 'log');
       out['fixed' + i] = String(r.fixedMs);
       out['follow' + i] = r.follow ? '1' : '0';
-      out['soc' + i] = r.percent.join(',');
-      out['socms' + i] = r.intervalMs.join(',');
-      out['log' + i] = String(ms(d['p' + from + 'l']));
+      const percent = r.follow || r.percent.every((p) => !Number.isNaN(p)) ? r.percent : B.INERT_PERCENT;
+      out['soc' + i] = percent.join(',');
+      out['socms' + i] = (r.follow ? r.intervalMs : r.intervalMs.map((ms) => (Number.isNaN(ms) ? r.fixedMs : ms))).join(',');
     }
-    out.logblind = String(ms(d.lb));
     return out;
   }
 
   // Settings go into the image's block, whether the image is built here or carried, and the app
   // checks them against the firmware's own table before anything runs: a power the module has no
-  // row for, or a battery table the firmware would refuse, does not flash and says why. Laid out as
-  // the other panes are - a row per setting, then a confirm strip saying what the button will do.
+  // row for, or a battery table the firmware would refuse, does not flash and says why. It goes on
+  // the first press (2026-10-31, the user's call): those checks are what stand between the press
+  // and the board, not a second click.
 async function buildAndFlash() {
     const r = rows().find((x) => x.id === state.sel);
     if (!r) return;
-    // Never nothing: a press that cannot go through says which of the three reasons it is.
-    if (!r.module) { state.buildError = 'Choose the radio module first.'; render(); return; }
-    if (!r.onProbe) { state.buildError = 'That board is not on the ST-Link. Press Read the board.'; render(); return; }
-    if (busy()) { state.buildError = 'Something else is running on this board.'; render(); return; }
-    const how = B.flashWay(state.health, r.module);
-    if (how.stop) { state.buildError = how.stop; render(); return; }
-    const d = buildDraft(r);
+    // Never nothing: a press that cannot go through says which reason it is.
+    const { d, how, stop } = flightWrite(r);
+    if (stop) { state.buildError = stop; render(); return; }
     state.buildError = '';
     if (state.peek) await state.peek;
     try {
       const settings = Object.assign({ csid: d.csid, sf: d.sf, dbm: d.dbm }, ratesAsked(d));
       await hub.chipFlash(Object.assign({ uid: r.uid, backup: state.backup }, settings,
         how.way === 'build' ? { embedded: 'built', module: r.module } : { embedded: 'flight' }));
+      // kept once the flash has ended well, for the next time this board has no block
+      state.sent = { uid: r.uid, draft: Object.assign({}, d) };
       toast(how.way === 'build' ? 'Building the flight software for ' + nameOf(r) : 'Flashing ' + nameOf(r));
     } catch (e) {
       state.buildError = e.missing ? CANNOT : (e.message || String(e));
@@ -438,48 +462,36 @@ async function buildAndFlash() {
     render();
   }
 
-  // The flight write with the draft's settings: why it cannot go yet, what it will write, and
-  // its confirm row. Asked from the Write step, or from the Sensor bench card on a bench board.
+  // The flight write with the draft's settings: why it cannot go yet, and one line naming what
+  // is not in the Phases tables. Asked from the Write step, or from the Sensor bench card.
   function flightWrite(r) {
     const d = buildDraft(r);
-    const job = jobs.chip && jobs.chip.what === 'flash' && chipOwner() === r.uid ? jobs.chip : null;
     const how = B.flashWay(state.health, r.module);
     const stop = !r.module ? 'Choose the radio module in Identity and radio first.'
       : how.stop ? how.stop
         : !r.onProbe ? 'Put the board on the ST-Link and press Read the board.'
-          : busy() ? 'Something else is running on this board.' : '';
+          : busy() ? 'Something else is running on this board.' : B.draftStop(d);
     const buildOff = stop ? ' disabled' : '';
-    const pick = state.pick && state.pick.kind === 'build' ? state.pick : null;
-    const summary = 'board ' + d.csid + ', ' + B.MODULE[r.module || 'le'] + ', SF' + d.sf + ', ' + d.dbm + ' dBm; ' +
-      B.PHASES.map((ph, n) => ph.key + ' ' + B.rateWords(draftRate(d, n)) + ', log ' + logSecs(d['p' + n + 'l'], ph.key)).join('; ');
-    // The module is said in words either way: the image for the other module transmits
-    // almost nothing and still reports success.
-    const module = '<b>' + B.MODULE[r.module || 'le'] + ' module</b>';
-    const will = how.way === 'build'
-      ? (state.fsw ? 'Writes the flight software for the ' + module + ' from this computer\'s tree with these settings to <b>' + esc(nameOf(r)) + '</b>. ' + esc(nextImage(r.module))
-        : 'Builds the flight software for the ' + module + ' with these settings and writes it to <b>' + esc(nameOf(r)) + '</b>. About 13 seconds.')
-      : 'Writes the flight image this app carries for the ' + module + ' to <b>' + esc(nameOf(r)) + '</b>, with these settings in it.';
-    const confirm = !pick || job && job.running ? '' : '<div class="confirm">' +
-      '<span class="grow">' + (stop ? esc(stop) : will + (pick.where === 'bench' ? ' <span class="val">' + esc(summary) + '</span>' : '')) + '</span>' +
-      '<button data-buildgo="1" class="primary"' + buildOff + '>' + how.verb + '</button>' +
-      '<button data-buildcancel="1">Cancel</button></div>';
-    return { d, job, how, stop, buildOff, summary, confirm, where: pick ? pick.where || 'radio' : '' };
+    const say = (v) => (String(v).trim() === '' ? '—' : String(v));
+    const summary = 'board ' + say(d.csid) + ', ' + B.MODULE[r.module || 'le'] + ', SF' + say(d.sf) + ', ' + say(d.dbm) + ' dBm';
+    return { d, how, stop, buildOff, summary };
   }
 
   // The flight write in three steps: what goes in the board's block, how often each phase
-  // logs and transmits, then the write and what it changes on the board.
+  // logs and transmits, then the write and what it changes on the board, row by row.
   function stepsHtml(r) {
     const read = r.onProbe && !state.stale ? state.read : null;
     const settings = read ? read.settings || null : null;
     const t = B.settingsTable(settings, r.module, read ? read.settingsError : '', read && read.firmware ? read.firmware.kind : '');
     const seg = '<span class="seg" role="group" aria-label="Radio module">' + ['le', 'hp'].map((m) =>
       '<button data-module="' + m + '" aria-pressed="' + (r.module === m) + '"' + (r.module === m ? ' class="on"' : '') + '>' + B.MODULE[m] + '</button>').join('') + '</span>';
-    const { d, job, how, stop, buildOff, summary, confirm, where } = flightWrite(r);
+    const { d, how, stop, buildOff, summary } = flightWrite(r);
     const powers = powersFor(r.module || 'le');
     const box = (field, value, hint) => '<input type="text" inputmode="numeric" data-keep="build:' + field + '"' +
       ' data-build="' + field + '" value="' + esc(String(value)) + '" placeholder="' + hint + '"' +
       ' aria-label="' + hint + '" size="8">';
     const pick = (field, values, value, show) => '<select data-build="' + field + '">' +
+      (String(value).trim() === '' ? '<option value="" selected disabled hidden>—</option>' : '') +
       values.map((v) => '<option value="' + v + '"' + (Number(v) === Number(value) ? ' selected' : '') + '>' +
         show(v) + '</option>').join('') + '</select>';
     const differs = B.buildDiffers(settings, r.module, d);
@@ -512,77 +524,68 @@ async function buildAndFlash() {
           'The rows the ' + (r.module || 'le').toUpperCase() + ' module has.', onBoard(t.rows[2].onBoard, differs.dbm)) +
       '</div></div>';
 
-    // Ground and air, each with how often it logs to the chip and how often it transmits: a
-    // fixed gap, or its own battery table. The board works out the phase from its altitude.
-    const secsBox = (field, value, size) => '<input type="text" inputmode="numeric" data-keep="build:' + field + '" data-build="' + field + '"' +
-      ' value="' + esc(String(value)) + '" placeholder="s" aria-label="seconds" size="' + size + '">';
+    // Ground and air, one table each: how often it logs to the chip and how often it transmits,
+    // a row per battery band. The switch and the thresholds are the phase's, for both columns. The
+    // board works out the phase from its altitude.
+    const numBox = (field, value, label, unit, size) => '<input type="text" inputmode="numeric" data-keep="build:' + field + '" data-build="' + field + '"' +
+      ' value="' + esc(String(value)) + '" placeholder="' + unit + '" aria-label="' + label + '" size="' + size + '">';
     const WHAT = ['Switched on, on the bench or the drone, and again once landed.', 'From the climb through the release and the fall.'];
+    const LOG_ZERO = ['Log: the gap between records, 0 writes nothing, not even the time anchors.', 'Log: the gap between records, 0 is every reading.'];
     const subs = B.PHASES.map((ph, n) => {
       const follow = !!d['p' + n + 'f'];
-      const ch = differs[ph.key];
-      const row = (label, key) => '<label class="phase-row"><span class="l">' + label + '</span><span class="ctl">' +
-        wrapChanged(secsBox(key, d[key], 5), ch) + '<span class="u">s</span></span></label>';
-      return '<div class="phase' + (ch ? ' changed' : '') + '">' +
+      const percent = [0, 1, 2, 3].map((k) => d['p' + n + 'soc' + k]);
+      const label = (k) => k === B.FIXED ? (follow ? 'Gauge unread' : 'Always')
+        : k === B.BANDS - 1 ? 'Below ' + esc(String(percent[k - 1])) + ' %'
+          : (k === 0 ? 'Above ' : 'To ') + numBox('p' + n + 'soc' + k, percent[k], ph.label + ' battery threshold', '%', 3) + ' %';
+      const cell = (key, was, zero, what) => {
+        const value = d[key];
+        return '<td>' + wrapChanged(numBox(key, value, what, 's', 5), was.changed) + ' <span class="u">s</span>' +
+          (String(value).trim() !== '' && Number(value) === 0 ? '<span class="zero">' + zero + '</span>' : '') + '</td>';
+      };
+      const board = (word, c) => '<div><span class="u">' + word + '</span> <span class="val' + (c.changed && c.was ? ' was' : '') + '">' + esc(c.was || '—') + '</span></div>';
+      const rows = B.phaseRows(settings, d, n).map((row) => {
+        const fixed = row.key === B.FIXED;
+        return '<tr><th scope="row">' + label(row.key) + '</th>' +
+          cell(fixed ? 'p' + n + 'l' : 'p' + n + 'lms' + row.key, row.log, B.logZero(ph.key), ph.label + ' log gap') +
+          cell(fixed ? 'p' + n + 's' : 'p' + n + 'ms' + row.key, row.transmit, 'back to back', ph.label + ' transmit gap') +
+          (settings ? '<td class="board">' + board('log', row.log) + board('transmit', row.transmit) + '</td>' : '') + '</tr>';
+      }).join('');
+      const said = t.rows[3 + n];
+      return '<div class="phase' + (differs[ph.key] ? ' changed' : '') + '">' +
         '<div class="phase-name"><span class="dot' + (n ? ' on' : '') + '"></span>' + ph.label + '</div>' +
         '<div class="phase-what">' + WHAT[n] + '</div>' +
-        row('Log every', 'p' + n + 'l') +
-        '<p class="hint">' + (ph.key === 'ground' ? 'Between records, 0 writes nothing.' : 'Between records, 0 is every reading.') + '</p>' +
-        row('Transmit every', 'p' + n + 's') +
-        (follow ? '<p class="hint">Used while the gauge cannot be read.</p>' : '') +
-        '<label class="check"><input type="checkbox" data-build="p' + n + 'f"' + (follow ? ' checked' : '') + '> Follow the battery</label>' +
-        (follow ? '<div class="bands">' + bandRows(d, n) + '</div>' : '') +
-        onBoard(t.rows[3 + n].onBoard, ch) + '</div>';
+        '<label class="check"><input type="checkbox" data-build="p' + n + 'f"' + (follow ? ' checked' : '') + '> Set by battery level (changes both columns)</label>' +
+        '<div class="ratewrap"><table class="rates"><thead><tr><th scope="col">Battery</th><th scope="col">Log every</th><th scope="col">Transmit every</th>' +
+          (settings ? '<th scope="col">On the board</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+        '<p class="hint">' + LOG_ZERO[n] + ' Transmit: the gap after a packet, 0 is back to back.</p>' +
+        (said.apart ? '<p class="hint">' + esc(said.apart) + '</p>' : '') +
+        (said.older.length ? onBoard(said.older.join('; '), true) : '') + '</div>';
     });
     const phaseCard = '<div class="pane step">' + head(2, 'Phases', 'by altitude') +
       '<div class="phases">' + subs.join('') + '</div>' +
-      '<p class="plain">The board picks the phase from altitude: air after a 15 m climb (30 m on GPS if the barometer is dead), ground again after 30 s at rest below half the climb, or after 3 min with the IMU still at any height. Release is not detected, so air covers the climb and the fall. After a reset it logs as air for up to 5 min while transmitting at the ground rate. Each phase has its own log gap, and its own transmit gap or battery table.</p>' +
-      '<p class="plain">On the ground the readings mostly stay in the board\'s RAM, and only one per ground log gap reaches flash.</p></div>';
+      '<p class="plain">The board picks the phase from altitude: air after a 15 m climb (30 m on GPS if the barometer is dead), ground again after 30 s at rest below half the climb, or after 3 min with the IMU still at any height. Release is not detected, so air covers the climb and the fall. After a reset it logs as air for up to 5 min while transmitting at the ground rate.</p>' +
+      '<p class="plain">On the ground the readings mostly stay in the board\'s RAM, and only one per ground log gap reaches flash. So the air\'s battery bands apply only while the board logs as air: the rest of the time the RAM fills at the air\'s Gauge unread gap, and a take-off still writes the 30 s before it.</p></div>';
 
     // What the write changes, compared with the block read off the board
-    const phaseWords = (n) => B.rateWords(draftRate(d, n)) + ', log ' + logSecs(d['p' + n + 'l'], B.PHASES[n].key);
     const changes = !settings ? [] : [
       ['Radio module', t.module, B.MODULE[r.module || 'le'], differs.module],
       ['Board id', t.rows[0].onBoard, String(d.csid), differs.csid],
       ['Spreading factor', t.rows[1].onBoard, 'SF' + d.sf, differs.sf],
       ['Transmit power', t.rows[2].onBoard, B.dbmWords(Number(d.dbm)), differs.dbm],
-      ...B.PHASES.map((ph, n) => [ph.label, t.rows[3 + n].onBoard, phaseWords(n), differs[ph.key]]),
-    ].filter((c) => c[3]);
+    ].filter((c) => c[3]).concat(...B.PHASES.map((ph, n) => B.phaseChanges(settings, d, n)));
     const n = changes.length;
     const diff = !settings ? '' : '<p class="kicker">' + (n ? n + (n === 1 ? ' change' : ' changes') : 'No changes') + ' from the board</p>' +
       changes.map((c) => '<div class="chrow"><span>' + c[0] + '</span><span><span class="was">' + esc(c[1]) + '</span> → <b>' + esc(c[2]) + '</b></span></div>').join('');
-    // While the flash runs, its steps stand where the button was
-    const go = job && job.running ? jobBlock(job, (how.way === 'build' ? 'Building and flashing ' : 'Flashing ') + nameOf(r))
-      : '<button data-buildembed="1" class="primary block"' + buildOff + '>' + how.verb + ' ' + esc(nameOf(r)) + '</button>' +
-        // said here too: with the button off, the confirm that carries it never opens
-        (stop ? '<p class="note">' + esc(stop) + '</p>' : '');
-    // How the last write ended stays until the next job.
-    const last = !job || job.running || state.pick ? ''
-      : job.error ? '<p class="outcome bad">Flash failed: ' + esc(job.error) + '</p>'
-        : (job.steps || []).length ? '<p class="outcome">Flashed and checked.' +
-          (job.saved ? ' What was on the board is saved as <span class="path">' + esc(job.saved) + '</span>.' : '') + '</p>' : '';
+    // One press writes. While a job runs the button is off, and the card under the head says
+    // what is happening to the board and, after, how it ended.
+    const go = '<button data-buildembed="1" class="primary block"' + buildOff + '>' + how.verb + ' ' + esc(nameOf(r)) + '</button>' +
+      (stop ? '<p class="note">' + esc(stop) + '</p>' : '');
     const writeCard = '<div class="pane step write">' + head(3, 'Write') + diff +
-      '<p class="plain">' + how.column + ' ' + esc(summary) + '</p>' +
-      '<p class="plain">' + esc(how.says) + '</p>' +
+      '<p class="plain">' + how.column + ' ' + esc(summary) + '. The rates are the Phases tables.</p>' +
+      '<p class="plain">' + esc([how.says, how.way === 'build' ? nextImage(r.module) : ''].filter(Boolean).join(' ')) + '</p>' +
       '<label class="check"><input type="checkbox" data-backup="1"' + (state.backup ? ' checked' : '') + '> Save what is on the board first</label>' +
-      go + (where === 'radio' ? confirm : '') +
-      (state.buildError ? '<p class="outcome bad">' + esc(state.buildError) + '</p>' : '') +
-      (last ? '<div class="lastw">' + last + '</div>' : '') + '</div>';
+      go + (state.buildError ? '<p class="outcome bad">' + esc(state.buildError) + '</p>' : '') + '</div>';
     return '<div class="cs-steps">' + idCard + phaseCard + writeCard + '</div>';
-  }
-
-  // One phase's five bands as rows of boxes: "above [75] % → [10] s", then "to [50] % → [30] s"...,
-  // then "below that → [180] s". Thresholds are the boxes between bands, so each one appears once.
-  function bandRows(d, i) {
-    const small = (field, value, hint) => '<input type="text" inputmode="numeric" data-keep="build:' + field + '" data-build="' + field + '"' +
-      ' value="' + esc(String(value)) + '" placeholder="' + hint + '" aria-label="' + hint + '" size="4">';
-    const rows = [];
-    for (let k = 0; k < 5; k++) {
-      const lead = k === 0 ? 'Above ' + small('p' + i + 'soc0', d['p' + i + 'soc0'], '%') + ' %'
-        : k < 4 ? 'To ' + small('p' + i + 'soc' + k, d['p' + i + 'soc' + k], '%') + ' %'
-          : 'Below that';
-      rows.push('<div class="band"><span>' + lead + '</span><span>' + small('p' + i + 'ms' + k, d['p' + i + 'ms' + k], 's') + ' s</span></div>');
-    }
-    return rows.join('');
   }
 
   function nextImage(module) {
@@ -600,8 +603,8 @@ async function buildAndFlash() {
       steps(job) + track(job.pct) + '</div>';
   }
 
-  // Other images: putting back the saved flight software, a file, the sensor bench. Shut
-  // until asked, and open while one of them waits to be confirmed or was refused.
+  // Other images: putting back the saved flight software, a file, the sensor bench. Beside the
+  // flight logs and always open (2026-10-31: a Show that opened a pane elsewhere was no use).
   function imagesCard(r) {
     const can = r.onProbe && !busy();
     const dis = can ? '' : ' disabled';
@@ -609,11 +612,7 @@ async function buildAndFlash() {
     const images = imagesOf(r.uid);
     const pick = state.pick && (state.pick.kind === 'saved' || state.pick.kind === 'file') ? state.pick : null;
     const benchPick = state.pick && state.pick.kind === 'bench' && state.pickFor === r.uid ? state.pick : null;
-    const asked = !!(pick || benchPick || state.refused);
-    const open = asked || !!state.open['images:' + r.uid];
-    const top = '<div class="images-top"><h3>Other images</h3><span class="note">Put back, flash a file, sensor bench</span>' +
-      (asked ? '' : '<button class="expander" data-images="1" aria-expanded="' + open + '">' + (open ? 'Hide' : 'Show') + '</button>') + '</div>';
-    if (!open) return '<div class="pane images">' + top + '</div>';
+    const top = '<div class="images-top"><h3>Other images</h3><span class="note">Put back, flash a file, sensor bench</span></div>';
 
     // the app only keeps the newest one
     const newest = images[0];
@@ -646,44 +645,37 @@ async function buildAndFlash() {
       (state.canForce && pick ? '<div class="confirm"><span class="grow">That image came off a different board.</span>' +
         '<button data-flashforce="1"' + dis + '>Write it to this board anyway</button></div>' : '');
 
-    // A job that is running goes first, above the buttons it has switched off. How the
-    // last one ended goes last, and gives way to whatever is being confirmed now.
-    const now = job && job.running ? jobBlock(job, 'Flashing ' + nameOf(r)) : '';
-    let last = '';
-    if (now || pick || benchPick || state.refused) last = '';
-    else if (job && job.error) last = '<p class="outcome bad inpane">Flash failed: ' + esc(job.error) + '</p>' +
-      (job.saved ? '<p class="step inpane">What was on the board is saved as <span class="path">' + esc(job.saved) + '</span>.</p>' : '');
-    else if (job && (job.steps || []).length) last = '<p class="outcome inpane">Flashed and checked.' +
-      (job.saved ? ' What was on the board is saved as <span class="path">' + esc(job.saved) + '</span>.' : '') + '</p>';
-
-    return '<div class="pane images open">' + top + now + '<div class="rows kvrows">' +
+    return '<div class="pane images">' + top + '<div class="rows kvrows">' +
       saved +
       '<div><span class="l">From a file</span><label class="button' + (can ? '' : ' disabled') + '">Flash a file…<input type="file" accept=".bin" data-file="1" hidden' + dis + '></label>' +
         '<span class="note">A file\'s radio settings are whatever it was built with.</span></div>' +
       benchRow +
       '<div><label class="check"><input type="checkbox" data-backup="1"' + (state.backup ? ' checked' : '') + '> Save what is on the board first</label></div>' +
-      '</div>' + confirm + benchConfirm + refused + last + '</div>';
+      '</div>' + confirm + benchConfirm + refused + '</div>';
   }
 
-  // What a finished pull left behind: how much of the log came off the chip, where it is
-  // on this computer, and the ways to take it somewhere else. An older build of the app
-  // sends only the log's name, so each part is drawn when it is there and left out when
-  // it is not.
+  // ---------- what is happening to the board ----------
+  // What a finished pull left behind, in parts the box and the card both draw: a state mark,
+  // label and value rows, what the operator must act on, and what only the card shows (which
+  // dump firmware read it, what was on the board, the buttons). An older build of the app sends
+  // only the log's name, so each row is there when its value is.
   // boardCsid is the id the board's own settings gave when it was read, if they gave one.
   const COUNT = new Intl.NumberFormat('en-US');
-  function pullResult(s, boardCsid) {
+  function pullParts(s, boardCsid) {
     const rep = s.report || {};
     const n = (v) => COUNT.format(Number(v));
-    const got = [];
-    if (Number.isFinite(rep.read)) {
-      got.push(n(rep.read) + (Number.isFinite(rep.found) ? ' of ' + n(rep.found) : '') + ' records');
-    }
+    const rows = [];
+    if (Number.isFinite(rep.read)) rows.push(['Records', n(rep.read) + (Number.isFinite(rep.found) ? ' of ' + n(rep.found) : '')]);
+    else if (s.log) rows.push(['Log', esc(s.log)]);
     if (Array.isArray(rep.boots)) {
-      got.push(n(rep.boots.length) + (rep.boots.length === 1 ? ' boot' : ' boots'));
-      got.push(n(rep.boots.filter((b) => b && b.timeSource === 'anchor').length) + ' with GPS time');
+      rows.push(['Boots', n(rep.boots.length)]);
+      const gps = rep.boots.filter((b) => b && b.timeSource === 'anchor').length;
+      rows.push(['GPS time', gps ? n(gps) + (gps === 1 ? ' boot' : ' boots') : 'none']);
     }
-    if (D.boardIdWords(rep.csids)) got.push(D.boardIdWords(rep.csids));
-    const wrong = D.idMismatch(rep.csids, boardCsid);
+    const idw = D.boardIdWords(rep.csids);
+    if (idw) rows.push([idw.startsWith('board ids') ? 'Board ids' : 'Board id', esc(idw.replace(/^board ids? /, ''))]);
+    if (s.dir) rows.push(['Folder', '<span class="path">' + esc(s.dir) + '</span>']);
+    if (s.restored) rows.push(['Flight software', 'put back']);
     // Said in words as well as by the coloured edge: a log with holes in it must not
     // read as a whole one to someone who cannot tell amber from grey. The app calls a
     // pull complete when every record the board counted as good was read, so a record
@@ -695,32 +687,109 @@ async function buildAndFlash() {
       short.push(Number.isFinite(rep.found) ? 'fewer records were read than the board counted as good'
         : 'the board did not say how many records it holds');
     }
-    const word = rep.complete === false ? 'Incomplete' : 'Warning';
+    const status = rep.complete === true && !short.length ? mark('good', 'complete') : rep.complete === false ? mark('warn', 'incomplete') : '';
+    const alerts = [];
+    const wrong = D.idMismatch(rep.csids, boardCsid);
+    if (wrong) alerts.push(['bad', esc(wrong)]);
+    if (short.length) alerts.push(['warn', (rep.complete === false ? 'Incomplete' : 'Warning') + ': ' + esc(short.join(', ')) + '.']);
+    // A pull that was told not to put the flight software back ends well and still
+    // leaves a board that will not fly.
+    if (!s.restored) alerts.push(['bad', 'The board is still running the dump firmware, not flight software.']);
     const fwr = rep.firmware || {};
-    const made = [
-      fwr.dump && fwr.dump.words ? 'Read with the ' + fwr.dump.words + '.' : '',
-      fwr.onBoard && fwr.onBoard.built && fwr.onBoard.built.words ? 'On the board was the ' + fwr.onBoard.built.words + '.' : '',
-    ].filter(Boolean).join(' ');
-    const where = [
-      s.dir ? 'In <span class="path">' + esc(s.dir) + '</span>.' : '',
-      s.restored ? 'The flight software was put back.' : '',
-    ].filter(Boolean).join(' ');
-    return '<p class="outcome inpane">' +
-        esc(got.length ? 'Last pull: ' + got.join(', ') + '.' : 'Last pull wrote ' + s.log + '.') +
-        (rep.complete === true && !short.length ? ' ' + mark('good', 'complete') : '') + '</p>' +
-      (wrong ? '<p class="outcome bad inpane">' + esc(wrong) + '</p>' : '') +
-      (short.length ? '<p class="outcome warn inpane">' + word + ': ' + esc(short.join(', ')) + '.</p>' : '') +
-      (where ? '<p class="step inpane">' + where + '</p>' : '') +
-      (made ? '<p class="step inpane">' + esc(made) + '</p>' : '') +
-      // A pull that was told not to put the flight software back ends well and still
-      // leaves a board that will not fly.
-      (s.restored ? '' : '<p class="outcome bad inpane">The board is still running the dump firmware, not flight software.</p>') +
-      '<div class="acts inpane">' +
-        '<button data-openlog="' + esc(s.log) + '" class="primary">Open</button>' +
-        '<a class="button" download="' + esc(flatName(s.log)) + '" href="' + logUrl(s.log) + '">Save log</a>' +
-        '<button data-csv="' + esc(s.log) + '">Save CSV</button>' +
-        (s.raw ? '<a class="button" download="' + esc(flatName(s.raw)) + '" href="' + logUrl(s.raw) + '">Save raw</a>' : '') +
+    const cardRows = [];
+    if (fwr.dump && fwr.dump.words) cardRows.push(['Read with', esc('the ' + fwr.dump.words)]);
+    if (fwr.onBoard && fwr.onBoard.built && fwr.onBoard.built.words) cardRows.push(['On the board was', esc('the ' + fwr.onBoard.built.words)]);
+    const acts = '<div class="acts">' +
+      '<button data-openlog="' + esc(s.log) + '" class="primary">Open</button>' +
+      '<a class="button" download="' + esc(flatName(s.log)) + '" href="' + logUrl(s.log) + '">Save log</a>' +
+      '<button data-csv="' + esc(s.log) + '">Save CSV</button>' +
+      (s.raw ? '<a class="button" download="' + esc(flatName(s.raw)) + '" href="' + logUrl(s.raw) + '">Save raw</a>' : '') +
       '</div>';
+    return { status, rows, alerts, cardRows, acts };
+  }
+  const kvHtml = (rows) => (rows.length ? '<dl class="kv">' + rows.map((x) => '<dt>' + x[0] + '</dt><dd>' + x[1] + '</dd>').join('') + '</dl>' : '');
+  const alertHtml = (alerts) => alerts.map((x) => '<p class="outcome' + (x[0] ? ' ' + x[0] : '') + '">' + x[1] + '</p>').join('');
+
+  // The job on this board: the pull, clear or flash running now, else the last one to end.
+  // A pull nobody can put a board to goes on whichever sheet is up rather than on none.
+  function jobOn(r) {
+    const pull = jobs.pull && (pullOwner() === r.uid || !pullOwner() || r.id === ANY) ? jobs.pull : null;
+    const chip = jobs.chip && jobs.chip.what === 'flash' && chipOwner() === r.uid ? jobs.chip : null;
+    if (pull && pull.running) return { kind: 'pull', j: pull };
+    if (chip && chip.running) return { kind: 'chip', j: chip };
+    if (pull && chip) return store.get('dg-last-job') === 'chip' ? { kind: 'chip', j: chip } : { kind: 'pull', j: pull };
+    return pull ? { kind: 'pull', j: pull } : chip ? { kind: 'chip', j: chip } : null;
+  }
+  // What tells one finished job from the next, so a closed result stays closed across
+  // repaints and reloads and the next job opens the card again.
+  const jobKey = (kind, j) => [kind, j.log, j.saved, j.error, j.seconds, j.pct, j.wipe ? 'wipe' : ''].map((v) => String(v == null ? '' : v)).join('|');
+
+  // How a job ended: its title, a state mark, label and value rows, what must be acted on,
+  // and (card only) more rows, the steps and the buttons. null when it has nothing to say yet
+  // (the app's first answer, before anything was pulled). What happened last stays on screen:
+  // a pull that failed after reflashing leaves a board running the wrong firmware, and that
+  // must not vanish with a toast.
+  function ended(kind, j, r) {
+    const out = { title: '', status: '', rows: [], alerts: [], cardRows: [], more: '', acts: '' };
+    const saved = (p) => (p ? [['Saved copy', '<span class="path">' + esc(p) + '</span>']] : []);
+    if (kind === 'chip') {
+      if (j.error) return Object.assign(out, { title: 'Flash failed', rows: saved(j.saved), alerts: [['bad', esc(j.error)]] });
+      if ((j.steps || []).length) return Object.assign(out, { title: 'Flashed and checked', status: mark('good', 'checked'), rows: saved(j.saved) });
+      return null;
+    }
+    const csid = r && r.onProbe && state.read && state.read.settings ? state.read.settings.csid : null;
+    const what = j.wipe ? 'Clear' : 'Pull';
+    const left = (p) => (p ? '; the image that was on it is saved as <span class="path">' + esc(p) + '</span>' : '');
+    if (j.error && j.error.startsWith('stopped by the operator')) {
+      // not a failure: what arrived before the stop is kept
+      const dump = !j.restored && (j.steps || []).some((x) => x.startsWith('writing the dump'));
+      const parts = j.log ? pullParts(j, csid) : null;
+      return Object.assign(out, parts || {}, { title: what + ' stopped', status: '', more: steps(j),
+        alerts: [['', esc((j.wipe ? 'The chip was not erased: ' : '') + j.error)]]
+          .concat(dump ? [['bad', 'The board is left on the dump firmware' + left(j.savedFsw) + '.']] : [], parts ? parts.alerts : []) });
+    }
+    if (j.error) {
+      return Object.assign(out, { title: what + ' failed', more: steps(j), alerts: [['bad', esc(j.error)]]
+        .concat(j.keepFsw && !j.restored ? [['bad', 'The flight software was not put back. The board is still running the dump firmware' + left(j.savedFsw) + '.']] : []) });
+    }
+    if (j.wipe && j.pct === 100) {
+      return Object.assign(out, { title: 'Flash cleared', status: j.restored ? mark('good', 'flight software back') : '',
+        rows: [['Flight software', j.restored ? 'back on the board, settings as they were' : 'not on the board']],
+        alerts: j.restored ? [] : [['bad', !j.keepFsw ? 'The board is on the dump firmware: write a flight image next.'
+          : 'The board was already on the dump firmware and still is: write the flight image and its settings before it flies.']] });
+    }
+    if (j.log) return Object.assign(out, pullParts(j, csid), { title: 'Flight log pulled' });
+    return null;
+  }
+
+  // One card under the head for the job on this board (2026-10-31: the user asked for one
+  // place to read what is happening, not a checklist on each pane). While it runs: its
+  // steps, the bar, where it saves and Stop. After: how it ended, with Close.
+  function nowCard(r) {
+    const on = jobOn(r);
+    if (!on) return '';
+    const { kind, j } = on;
+    if (j.running) {
+      const title = kind === 'pull'
+        ? (j.wipe ? 'Clearing the flash on ' : 'Pulling the flight log from ') + nameOf(r) + (j.board ? ', console on ' + j.board : '')
+        : 'Flashing ' + nameOf(r);
+      // a clear saves nothing
+      const to = kind === 'pull' && j.dir && !j.wipe ? (j.raw ? j.dir + '/dump.txt' : j.dir) : '';
+      const stop = kind !== 'pull' ? '' : '<div class="acts"><button data-pullstop="1"' + (j.stopping ? ' disabled>Stopping…' : '>Stop') + '</button>' +
+        '<span class="note">' + (j.stopping ? 'Stopping after the step in hand.' : 'Keeps what has arrived.') +
+          (j.keepFsw ? ' The flight software goes back on.' : ' The board stays on the dump firmware: its flight software is not being kept.') + '</span></div>';
+      return '<div class="pane now">' + jobBlock(j, title) +
+        (to ? '<p class="note">Saving to <span class="path">' + esc(to) + '</span></p>' : '') + stop +
+        '<p class="note">Leave the board plugged in.</p></div>';
+    }
+    const end = ended(kind, j, r);
+    if (!end) return '';
+    const key = jobKey(kind, j);
+    if (store.get('dg-closed-job') === key) return '';
+    const at = state.endedAt[kind];
+    return '<div class="pane now"><h3>' + esc(end.title) + end.status + (at ? '<span class="note">' + clock(at) + '</span>' : '') +
+        '<button class="ghost close" data-closejob="' + esc(key) + '" title="Take this result off the sheet">Close</button></h3>' +
+      kvHtml(end.rows.concat(end.cardRows)) + end.more + alertHtml(end.alerts) + end.acts + '</div>';
   }
 
   // The console port for this board, as last chosen for it, while that port is still here.
@@ -773,16 +842,16 @@ async function buildAndFlash() {
     const s = A.benchPane ? A.benchPane.sessionOn(port) : null;
     const source = r.onProbe && !state.stale ? 'running it, read off the board now'
       : s && s.bench ? 'the console says test=bench' : 'on it when last read';
-    const { stop, buildOff, summary, confirm, where } = flightWrite(r);
+    const { stop, buildOff, summary } = flightWrite(r);
     return '<div class="pane bench"><h3>Sensor bench<span class="note">' + esc(source) + '</span></h3>' + consoleDisagrees(r) +
       '<div class="rows kvrows">' +
         '<div><span class="l">Console port</span>' + consoleChooser(r, port) +
           (port && !reading ? '<button data-listen="' + esc(port) + '">Read this port</button>' : '') + (reading ? mark('good', 'being read') : '') + '</div>' +
         '<div><span class="l">On the console</span><button data-radio="' + esc(port) + '"' + (reading ? '' : ' disabled') + '>Radio on/off</button>' +
           '<button data-clear="1">Clear this record</button>' + (reading ? '' : '<span class="note">Radio on/off needs the port read.</span>') + '</div>' +
-        '<div><span class="l">Flight software</span><button data-buildembed="1" data-where="bench"' + buildOff + '>Write flight software</button>' +
+        '<div><span class="l">Flight software</span><button data-buildembed="1"' + buildOff + '>Write flight software</button>' +
           '<span class="note">' + esc(stop || summary + '. Change it in Identity and radio below.') + '</span></div>' +
-      '</div>' + (where === 'bench' ? confirm : '') +
+      '</div>' +
       (state.buildError ? '<p class="outcome bad inpane">' + esc(state.buildError) + '</p>' : '') +
       '<div id="cs-bench" class="benchlive"></div></div>';
   }
@@ -793,76 +862,21 @@ async function buildAndFlash() {
     return '<details class="fold" data-fold="' + key + '"' + (state.open[key + ':' + r.uid] ? ' open' : '') + '><summary>' + summary + '</summary>' + inner + '</details>';
   }
 
-  // The flight logs row: how many pulls, the latest, all of them when asked, and the pull and
-  // the clear. A running pull takes the whole row.
+  // The flight logs card, top down: what has been pulled, the console the pull listens on,
+  // whether the flight software goes back on, then the pull and the clear with what each does
+  // beside it. What a pull or clear is doing, or left behind, is the card under the head.
   function logsCard(r) {
-    const s = jobs.pull;
-    // A pull nobody can put a board to is shown on whichever sheet is up, with the port
-    // it is reading, rather than on none.
-    const mine = s && (pullOwner() === r.uid || !pullOwner() || r.id === ANY);
     const boards = hub.boards || [];
     const port = consoleFor(r);
     const ready = (r.onProbe || r.id === ANY) && !busy() && !!port;
-
-    if (mine && s.running) {
-      // a clear saves nothing
-      const to = s.dir && !s.wipe ? (s.raw ? s.dir + '/dump.txt' : s.dir) : '';
-      return '<div class="pane logs"><h3>Flight logs</h3>' +
-        jobBlock(s, (s.wipe ? 'Clearing the flash' : 'Pulling the flight log') + (s.board ? ', console on ' + s.board : '')) +
-        (to ? '<p class="note inpane">Saving to <span class="path">' + esc(to) + '</span></p>' : '') +
-        '<div class="rows kvrows"><div><button data-pullstop="1"' + (s.stopping ? ' disabled>Stopping…' : '>Stop') + '</button>' +
-          '<span class="note">' + (s.stopping ? 'Stopping after the step in hand.' : 'Keeps what has arrived.') +
-            (s.keepFsw ? ' The flight software goes back on.' : ' The board stays on the dump firmware: its flight software is not being kept.') +
-          '</span></div></div>' +
-        '<p class="note inpane">Leave the board plugged in.</p></div>';
-    }
-
-    // What happened last time stays on screen: a pull that failed after reflashing leaves a
-    // board running the wrong firmware, and that must not vanish with a toast.
-    let last = '';
-    const stopped = mine && s.error && s.error.startsWith('stopped by the operator');
-    if (stopped) {
-      // not a failure, what arrived before the stop is kept
-      last = '<p class="outcome inpane">' + (s.wipe ? 'Clear stopped, the chip was not erased: ' : 'Pull stopped: ') + esc(s.error) + '</p>' +
-        '<div class="inpane">' + steps(s) + '</div>' +
-        (s.log ? pullResult(s, r.onProbe && state.read.settings ? state.read.settings.csid : null) : '') +
-        (!s.restored && (s.steps || []).some((x) => x.startsWith('writing the dump'))
-          ? '<p class="outcome bad inpane">The board is left on the dump firmware' +
-            (s.savedFsw ? '; the image that was on it is saved as <span class="path">' + esc(s.savedFsw) + '</span>' : '') + '.</p>'
-          : '');
-    } else if (mine && s.error) {
-      // console check failed, nothing written. A board that prints nothing can still be pulled anyway
-      const unproven = s.error.includes("is not this board's console");
-      last = '<p class="outcome bad inpane">' + (s.wipe ? 'Clear failed: ' : 'Pull failed: ') + esc(s.error) + '</p>' +
-        (unproven ? '<div class="rows kvrows inpane"><div><button data-anyconsole="1"' + (ready ? '' : ' disabled') + '>' +
-          (s.wipe ? 'Clear anyway' : 'Pull anyway') + '</button><span class="note">Skips the check, on ' + esc(port) + '.</span></div></div>' : '') +
-        '<div class="inpane">' + steps(s) + '</div>' +
-        (s.keepFsw && !s.restored
-          ? '<p class="outcome bad inpane">The flight software was not put back. The board is still running the dump firmware' +
-            (s.savedFsw ? '; the image that was on it is saved as <span class="path">' + esc(s.savedFsw) + '</span>' : '') + '.</p>'
-          : '');
-    } else if (mine && s.wipe && s.pct === 100) {
-      last = s.restored
-        ? '<p class="outcome inpane">Flash cleared. The flight software is back on the board with its settings as they were.</p>'
-        : !s.keepFsw
-          ? '<p class="outcome bad inpane">Flash cleared. The board is on the dump firmware: write a flight image next.</p>'
-          : '<p class="outcome bad inpane">Flash cleared. The board was already on the dump firmware and still is: write the flight image and its settings before it flies.</p>';
-    } else if (mine && s.log) {
-      // The id read off the board before the pull is still its id: a pull puts the same image back.
-      const read = r.onProbe && state.read.settings ? state.read.settings.csid : null;
-      last = pullResult(s, read);
-    }
-
     const pulls = r.uid ? pullsOf(r.uid) : [];
     const all = pulls.length > 0 && !!state.open['pulls:' + r.uid];
     const at = (l) => esc(D.dayTime(new Date(l.when * 1000), new Date()));
     const summary = !r.uid ? ''
       : pulls.length ? '<b>' + pulls.length + (pulls.length === 1 ? ' pull' : ' pulls') + '</b> · latest <b>' + at(pulls[0]) + '</b>, ' + D.bytes(pulls[0].bytes)
         : mark('warn', 'never pulled');
-    const acts = (pulls.length ? '<button data-openlog="' + esc(pulls[0].name) + '">Open latest</button>' +
-        '<button class="expander" data-allpulls="1" aria-expanded="' + all + '">All ' + pulls.length + '</button>' : '') +
-      '<button data-pull="1" class="primary"' + (ready ? '' : ' disabled') + '>Pull the flight log</button>' +
-      '<button data-wipe="1"' + (ready && r.uid ? '' : ' disabled') + '>Clear flash</button>';
+    const acts = !pulls.length ? '' : '<span class="acts"><button data-openlog="' + esc(pulls[0].name) + '">Open latest</button>' +
+      '<button class="expander" data-allpulls="1" aria-expanded="' + all + '">All ' + pulls.length + '</button></span>';
     const list = !all ? '' : '<div class="rows pulls"><div><span class="l">Log pulls</span><span class="grow note">' + pulls.length + (pulls.length === 1 ? ' pull' : ' pulls') + '</span>' +
         '<button data-todata="1">Show in Data</button></div>' +
       pulls.map((l) => '<div><span class="grow val">' + at(l) + ', ' + D.bytes(l.bytes) + '</span>' +
@@ -878,6 +892,12 @@ async function buildAndFlash() {
       : state.keepFsw ? 'Flashes the board twice. Takes minutes.' : 'Flashes the dump firmware. Takes minutes.';
     const clearNote = state.keepFsw ? 'Erases the log on the chip and nothing else. The flight software is read off and put back, settings untouched.'
       : 'Erases the log on the chip and leaves the board on the dump firmware.';
+    // A pull whose console check failed can go anyway: a board that prints nothing can still be pulled
+    const s = jobs.pull;
+    const mine = s && (pullOwner() === r.uid || !pullOwner() || r.id === ANY);
+    const unproven = mine && !s.running && s.error && s.error.includes("is not this board's console");
+    const anyway = !unproven ? '' : '<button data-anyconsole="1"' + (ready ? '' : ' disabled') + '>' + (s.wipe ? 'Clear anyway' : 'Pull anyway') + '</button>' +
+      '<span class="note">Skips the check, on ' + esc(port) + '.</span>';
     // a clear keeps no copy, so say when it was last pulled
     const wiping = state.pick && state.pick.kind === 'wipe' && state.pickFor === r.uid && !busy()
       ? '<div class="confirm"><span class="grow">' + (pulls.length
@@ -889,18 +909,19 @@ async function buildAndFlash() {
         '<button data-wipego="1" class="primary">Clear the flash</button><button data-wipecancel="1">Cancel</button></div>'
       : '';
 
-    return '<div class="pane logs"><div class="logs-top"><h3>Flight logs</h3><span class="sum">' + summary + '</span>' +
-        '<span class="acts">' + acts + '</span></div>' +
-      last +
-      '<div class="opts"><span class="l">Console port</span>' + chooser + '</div>' +
-      '<div class="opts"><label class="check"><input type="checkbox" data-keepfsw="1"' + (state.keepFsw ? ' checked' : '') +
-          '> Save the flight software that is on it and put it back</label>' +
-        (state.keepFsw ? '' : mark('warn', 'the board will be left on the dump firmware')) +
-        // the pull saves whatever is on it, here the sensor bench, not flight software
-        (bench && state.keepFsw ? '<span class="note">On this board that is the sensor bench.</span>' : '') + '</div>' +
-      '<div class="says"><span class="l">Pull</span><span class="note">' + pullNote + '</span>' +
-        '<span class="l">Clear flash</span><span class="note">' + clearNote + '</span></div>' +
-      wiping + list + '</div>';
+    return '<div class="pane logs"><div class="logs-top"><h3>Flight logs</h3><span class="sum">' + summary + '</span>' + acts + '</div>' + list +
+      '<div class="rows kvrows">' +
+        '<div><span class="l">Console port</span>' + chooser + '</div>' +
+        '<div><span class="l">Flight software</span><label class="check"><input type="checkbox" data-keepfsw="1"' + (state.keepFsw ? ' checked' : '') +
+            '> Save the flight software that is on it and put it back</label>' +
+          (state.keepFsw ? '' : mark('warn', 'the board will be left on the dump firmware')) +
+          // the pull saves whatever is on it, here the sensor bench, not flight software
+          (bench && state.keepFsw ? '<span class="note">On this board that is the sensor bench.</span>' : '') + '</div>' +
+        '<div><span class="l">Pull</span><button data-pull="1" class="primary"' + (ready ? '' : ' disabled') + '>Pull the flight log</button>' +
+          '<span class="note">' + pullNote + '</span>' + anyway + '</div>' +
+        '<div><span class="l">Clear</span><button data-wipe="1"' + (ready && r.uid ? '' : ' disabled') + '>Clear flash</button>' +
+          '<span class="note">' + clearNote + '</span></div>' +
+      '</div>' + wiping + '</div>';
   }
 
   // Clear the chip: the same job as a pull, told to erase instead of read.
@@ -936,14 +957,14 @@ async function buildAndFlash() {
       return '<div class="pane"><p class="empty">Clip a ChipSat onto the ST-Link and plug the ST-Link in.</p>' + chosen + '</div>';
     }
     if (r.unread) return headPane(r);
-    if (r.id === ANY) return headPane(r) + '<div class="cs-lower">' + logsCard(r) + '</div>';
+    if (r.id === ANY) return headPane(r) + nowCard(r) + '<div class="cs-lower">' + logsCard(r) + '</div>';
     if (isBench(r)) {
-      return headPane(r) + benchCard(r) + imagesCard(r) +
+      return headPane(r) + nowCard(r) + benchCard(r) + imagesCard(r) +
         fold('radio', r, '<b>Identity and radio, phases</b><span class="note">Not on the board: the sensor bench has no settings block. ' +
           'These are what the next flight write uses.</span>', stepsHtml(r)) +
         fold('log', r, '<b>Flight logs</b><span class="note">Pull or clear the chip.</span>', logsCard(r));
     }
-    return headPane(r) + stepsHtml(r) + '<div class="cs-lower">' + logsCard(r) + imagesCard(r) + '</div>';
+    return headPane(r) + nowCard(r) + stepsHtml(r) + '<div class="cs-lower">' + logsCard(r) + imagesCard(r) + '</div>';
   }
 
   function render() {
@@ -1054,7 +1075,7 @@ async function pull(anyConsole) {
       if (count < 1) { toast('Nothing to save: no packet in this log passes its CRC.'); return; }
       const out = flatName(name).replace(/\.[^.]*$/, '') + '.csv';
       A.ui.download(new Blob([csv], { type: 'text/csv' }), out);
-      toast('Saved ' + count.toLocaleString() + ' rows to ' + out);
+      toast('Saved ' + COUNT.format(count) + ' rows to ' + out);
     } catch (e) {
       toast('Could not get ' + name + ': ' + (e.message || e));
     }
@@ -1098,9 +1119,9 @@ async function pull(anyConsole) {
     const r = rows().find((x) => x.id === state.sel);
 
     if (at('data-read')) { read(at('data-read')); return; }
-    // Show and All n open in place; nothing chosen or refused goes with them
-    if (at('data-images') || at('data-allpulls')) {
-      const key = (at('data-images') ? 'images:' : 'pulls:') + (r ? r.uid : '');
+    // All n opens in place
+    if (at('data-allpulls')) {
+      const key = 'pulls:' + (r ? r.uid : '');
       state.open[key] = !state.open[key];
       render();
       return;
@@ -1126,13 +1147,10 @@ async function pull(anyConsole) {
     } else if (at('data-forgetcancel')) {
       state.pick = null;
     } else if (at('data-buildembed')) {
-      state.pickFor = r.uid;
-      state.pick = { kind: 'build', label: 'the flight software', where: at('data-where') || 'radio' };
-    } else if (at('data-buildgo')) {
       buildAndFlash();
       return;
-    } else if (at('data-buildcancel')) {
-      state.pick = null;
+    } else if (at('data-closejob')) {
+      store.set('dg-closed-job', at('data-closejob'));
     } else if (at('data-benchwrite') && r && r.uid) {
       state.pickFor = r.uid;
       state.pick = { kind: 'bench', label: 'the sensor bench' };
@@ -1203,14 +1221,21 @@ async function pull(anyConsole) {
   root.addEventListener('change', async (e) => {
     const t = e.target;
     if (t.getAttribute('data-build') && t.tagName === 'SELECT' && state.build) {
-      state.build[t.getAttribute('data-build')] = Number(t.value);
+      state.build[t.getAttribute('data-build')] = t.value === '' ? '' : Number(t.value);
       state.buildError = '';
       t.blur();
       render();
       return;
     }
     if (t.getAttribute('data-build') && t.type === 'checkbox' && state.build) {
-      state.build[t.getAttribute('data-build')] = !!t.checked;
+      const key = t.getAttribute('data-build');
+      state.build[key] = !!t.checked;
+      // Switching the battery on must not change logging until a box is edited, so the log
+      // bands start at the gap in use. Transmit keeps its table: those numbers are in view
+      const phase = t.checked && key.match(/^p(\d)f$/);
+      if (phase) {
+        for (let k = 0; k < B.BANDS; k++) state.build['p' + phase[1] + 'lms' + k] = state.build['p' + phase[1] + 'l'];
+      }
       state.buildError = '';
       render();
       return;
@@ -1246,26 +1271,51 @@ async function pull(anyConsole) {
   });
 
   // ---------- jobs ----------
-  A.shell.onJobs((ended) => {
-    for (const kind of ended) {
+  // A toast is gone before anyone who stepped away is back, so how a flash, a pull or a clear
+  // ended waits in a box to be dismissed, whichever screen is up.
+  function jobDone(kind, j) {
+    const r = rows().find((x) => x.uid && x.uid === j.uid) || null;
+    const end = ended(kind, j, r);
+    if (!end) return;
+    // The board by its name; a board the list does not know, by the id in the pull, else its uid
+    const ids = j.report && Array.isArray(j.report.csids) ? j.report.csids : [];
+    const who = r ? nameOf(r) : ids.length === 1 ? 'Board ' + ids[0] : j.uid ? B.chipName({ uid: j.uid }) : 'The board';
+    const when = new Date().toTimeString().slice(0, 8);
+    paint($('flash-done-body'), '<h2 id="flash-done-title"><span>' + esc(who) + ' · ' + esc(end.title) + '</span>' + end.status +
+      '<span class="note">' + when + '</span></h2>' + kvHtml(end.rows) + alertHtml(end.alerts));
+    $('flash-done').hidden = false;
+    $('flash-done-ok').focus();
+  }
+  $('flash-done-ok').addEventListener('click', () => { $('flash-done').hidden = true; });
+
+  A.shell.onJobs((over) => {
+    for (const kind of over) {
       const j = jobs[kind];
+      if (kind !== 'pull' && j.what !== 'flash') continue;
+      // the card under the head shows the one that ended last, also after a reload
+      state.endedAt[kind] = Date.now();
+      store.set('dg-last-job', kind);
+      jobDone(kind, j);
       if (kind === 'pull') {
-        toast(j.error ? 'Pull failed: ' + j.error : 'Flight log pulled. Open it from ChipSats.');
         state.stale = 'pull';
-      } else if (j.what === 'flash') {
-        toast(j.error ? 'Flash failed: ' + j.error : 'Flashed and checked.');
+      } else {
+        if (!j.error && state.sent && state.sent.uid === j.uid) remember(j.uid, state.sent.draft);
+        state.sent = null;
         // The job reads the board again once it has written it, and that read is the
-        // sheet's. Without it nobody knows what is on the board, so the sheet says to read.
-        if (!j.error && j.read && j.read.uid) {
+        // sheet's, also when its settings came back different. Without it nobody knows
+        // what is on the board, so the sheet says to read. A block read gives the draft
+        // its numbers; a bench or dump image has none, so the draft keeps the last ones.
+        if (j.read && j.read.uid) {
           state.read = j.read;
           state.readAt = Date.now();
           state.stale = '';
+          if (j.read.settings) state.build = null;
         } else {
           state.stale = 'flash';
         }
       }
     }
-    if (ended.length) load();
+    if (over.length) load();
     else if (A.shell.current() === 'chipsats') render();
   });
 

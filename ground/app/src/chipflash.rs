@@ -603,6 +603,19 @@ fn with_saved(e: String, saved: &Option<PathBuf>) -> String {
     }
 }
 
+// The block in what was written against the block read off the started board. An image
+// with no block (dump, bench) has nothing to compare, which is the false.
+fn settings_came_back(written: &[u8], on_board: &[u8]) -> Result<bool, String> {
+    let Ok((Found::Block(wanted), _)) = settings::find_at(written) else { return Ok(false) };
+    match settings::find_at(on_board) {
+        Ok((Found::Block(there), _)) => match settings::differences(&wanted, &there).join(", ") {
+            off if off.is_empty() => Ok(true),
+            off => Err(format!("the image is written, but the board's settings differ from what was written: {}", off)),
+        },
+        _ => Err(String::from("the image is written, but its settings block could not be read back off the board")),
+    }
+}
+
 fn flash(job: &Job, bench: &dyn Bench) {
     let Job { shared, registry, dir, uid, image, label, .. } = job;
     let mut saved: Option<PathBuf> = None;
@@ -671,6 +684,9 @@ fn flash(job: &Job, bench: &dyn Bench) {
         }
         // The page shows this in place of asking for a read that has just been done.
         shared.lock().unwrap().read = Some(read_json(&again, &now).0);
+        if settings_came_back(image, &again.image)? {
+            step(shared, 98, "the settings on the board match what was written");
+        }
         Ok(())
     })();
 
@@ -1028,6 +1044,36 @@ mod tests {
     }
 
     #[test]
+    fn settings_that_came_back_different_fail_the_job_and_the_page_gets_what_is_there() {
+        let mut desk = desk();
+        desk.lands_as = Some(|image| {
+            let at = image.windows(settings::MAGIC.len()).position(|w| w == settings::MAGIC).unwrap();
+            let mut back = image.to_vec();
+            back[at..at + 32].copy_from_slice(&block(8, 2));
+            back
+        });
+        let mut image = vec![0x42u8; 500];
+        image.extend_from_slice(&block(7, 2));
+        let (s, _, _, dir) = flashed("came-back", &desk, false, &image, None);
+        let error = s.error.expect("a board with other settings is not a good write");
+        assert!(error.contains("board id"), "{}", error);
+        assert!(s.read.unwrap().contains("\"csid\":8"), "the read is the board's, not the image's");
+        assert_eq!(s.note, "failed after the image was written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_that_came_back_the_same_are_said_to_match() {
+        let desk = desk();
+        let mut image = vec![0x42u8; 500];
+        image.extend_from_slice(&block(7, 2));
+        let (s, _, _, dir) = flashed("came-back-same", &desk, false, &image, None);
+        assert_eq!(s.error, None);
+        assert!(s.steps.iter().any(|l| l == "the settings on the board match what was written"), "{:?}", s.steps);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_note_about_the_image_is_a_step_before_anything_is_written() {
         let desk = desk();
         let note = "old.bin does not say which board it came off, so that was not checked";
@@ -1124,7 +1170,7 @@ mod tests {
 
     fn built_block(module: u8) -> Vec<u8> {
         let mut b = settings::MAGIC.to_vec();
-        b.extend_from_slice(&[2, 255, module, 7, 14, 1]);
+        b.extend_from_slice(&[settings::LAYOUT, 255, module, 7, 14, 1]);
         for fixed in [60_000u32, 10_000, 1_000, 60_000] {
             b.extend_from_slice(&fixed.to_le_bytes());
             b.extend_from_slice(&[0, 75, 50, 35, 20]);
@@ -1252,7 +1298,7 @@ mod tests {
         let dir = scratch("tree");
         let image = flight_with_block(1).to_vec();
         let rate = |fixed_ms: u32| settings::Rate { fixed_ms, follow: false, percent: [75, 50, 35, 20], interval_ms: [10_000, 30_000, 60_000, 120_000, 180_000] };
-        let asked = settings::Asked { csid: 9, sf: 7, dbm: 14, rates: [rate(60_000), rate(1000), rate(1000), rate(60_000)], logs: [10_000, 50, 50, 10_000], log_blind_ms: 200 };
+        let asked = settings::Asked { csid: 9, sf: 7, dbm: 14, transmit: [rate(60_000), rate(1000)], log: [rate(10_000), rate(50)] };
         let make: Make = Box::new(move |say: &dyn Fn(&str)| {
             say("building the flight LE from the flight software in /tree");
             Ok((image, String::from("flight LE built here 14:02 from abc1234 + config.h changed")))
@@ -1287,6 +1333,44 @@ mod tests {
             other => panic!("the board's settings are in the block: {:?}", other),
         }
         assert!(s.steps.iter().any(|l| l == "flight LE built here 14:02 from abc1234 + config.h changed, 4 kB"), "{:?}", s.steps);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tree_still_at_an_older_layout_never_reaches_the_board() {
+        // Stamping it would boot on compiled defaults and still read back as what was asked.
+        let mut old = flight_with_block(1).to_vec();
+        old[BLOCK_AT + 16] = 3;
+        let crc = crate::dump::crc16(&old[BLOCK_AT..BLOCK_AT + 158]);
+        old[BLOCK_AT + 158..BLOCK_AT + 160].copy_from_slice(&crc.to_le_bytes());
+        let rate = |fixed_ms: u32| settings::Rate { fixed_ms, follow: false, percent: [75, 50, 35, 20], interval_ms: [10_000, 30_000, 60_000, 120_000, 180_000] };
+        let asked = settings::Asked { csid: 9, sf: 7, dbm: 14, transmit: [rate(60_000), rate(1000)], log: [rate(10_000), rate(50)] };
+        let make: Make = Box::new(move |_: &dyn Fn(&str)| Ok((old, String::from("flight LE built here"))));
+        let state = shared();
+        let dir = scratch("old-tree");
+        let job = Job {
+            shared: state.clone(),
+            registry: known(),
+            dir: dir.clone(),
+            probe: None,
+            uid: UID.into(),
+            backup: false,
+            image: Vec::new(),
+            label: "a flight image for board 9".into(),
+            note: None,
+            known: with_blocks(),
+            build: Some(BuildPlan { make, asked: Some(asked), words: "a flight image for board 9".into() }),
+        };
+        let gate = stm32::Gate::new();
+        start(job, gate.take("the test").unwrap());
+        // No Bench is given to this job: anything past the refusal would have to touch a probe.
+        while state.lock().unwrap().running {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let s = state.lock().unwrap().clone();
+        let e = s.error.unwrap();
+        assert!(e.contains("layout 3 and this app writes layout 4"), "{}", e);
+        assert!(s.note.contains("nothing was written"), "{}", s.note);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1356,7 +1440,7 @@ mod tests {
 
         // A whole one is given with where it is, and no block at all has no place.
         let answer = read(&shared(), &known(), &on(self::desk(), flight_with_block(2)), &with_blocks());
-        assert!(answer.contains("\"setBy\":\"build\",\"txIntervalMs\":1000,\"rates\":[{\"fixedMs\":60000,\"follow\":false,\"percent\":[75,50,35,20],\"intervalMs\":[10000,30000,60000,120000,180000]},"), "{}", answer);
+        assert!(answer.contains("\"setBy\":\"build\",\"txIntervalMs\":10000,\"transmit\":[{\"fixedMs\":60000,\"follow\":false,\"percent\":[75,50,35,20],\"intervalMs\":[10000,30000,60000,120000,180000]},"), "{}", answer);
         assert!(answer.contains("\"reservedClear\":true},\"settingsError\":null,\"settingsBlockAt\":1000,"), "{}", answer);
         let answer = read(&shared(), &known(), &self::desk(), &with_blocks());
         assert!(answer.contains("\"settings\":null,\"settingsError\":null,\"settingsBlockAt\":null,"), "{}", answer);
@@ -1532,7 +1616,7 @@ mod tests {
         *desk.on_board.lock().unwrap() = image.clone();
         let answer = read(&shared(), &known(), &desk, &only_dump());
         assert!(
-            answer.contains("\"settings\":{\"layoutVersion\":1,\"csid\":7,\"module\":\"hp\",\"sf\":9,\"dbm\":14,\"setBy\":\"tool\",\"txIntervalMs\":0,\"rates\":null,\"logMs\":null,\"logBlindMs\":null,\"reservedClear\":true},\"settingsError\":null,"),
+            answer.contains("\"settings\":{\"layoutVersion\":1,\"csid\":7,\"module\":\"hp\",\"sf\":9,\"dbm\":14,\"setBy\":\"tool\",\"txIntervalMs\":0,\"transmit\":null,\"log\":null,\"olderSlots\":[],\"reservedClear\":true},\"settingsError\":null,"),
             "{}",
             answer
         );
@@ -1551,14 +1635,14 @@ mod tests {
     fn a_settings_block_in_a_newer_layout_is_said_to_be_there_and_not_read() {
         let desk = desk();
         let mut b = block(7, 2);
-        b[16] = 4;
+        b[16] = 5;
         let mut image = vec![0x42u8; 500];
         image.extend_from_slice(&b);
         *desk.on_board.lock().unwrap() = image;
         let state = shared();
         let answer = read(&state, &known(), &desk, &only_dump());
-        assert!(answer.contains("\"settings\":null,\"settingsError\":\"the settings block on the board is layout 4"), "{}", answer);
-        assert!(state.lock().unwrap().steps.iter().any(|l| l.contains("layout 4")));
+        assert!(answer.contains("\"settings\":null,\"settingsError\":\"the settings block on the board is layout 5"), "{}", answer);
+        assert!(state.lock().unwrap().steps.iter().any(|l| l.contains("layout 5")));
     }
 
     #[test]

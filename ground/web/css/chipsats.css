@@ -33,11 +33,11 @@
 /* By the sheet's width, not the window's: at 1440 the sheet is 1044 px, a Surface's 972 */
 #screen-chipsats .cs-steps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: stretch; }
 @container (min-width: 620px) {
-  #screen-chipsats .cs-steps { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
+  #screen-chipsats .cs-steps { grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); }
   #screen-chipsats .cs-steps > .write { grid-column: 1 / -1; }
 }
-@container (min-width: 960px) {
-  #screen-chipsats .cs-steps { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr); }
+@container (min-width: 1240px) {
+  #screen-chipsats .cs-steps { grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr) minmax(0, 1fr); }
   #screen-chipsats .cs-steps > .write { grid-column: auto; }
 }
 #screen-chipsats .pane.step { padding: 20px 22px; border-radius: var(--radius-lg); }
@@ -61,21 +61,35 @@
 #screen-chipsats .seg button.on { background: var(--color-fill-2); color: #fff; font-weight: 700; }
 
 /* 2 Phases */
-#screen-chipsats .step .phases { padding: 0; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+#screen-chipsats .step .phases { padding: 0; gap: 12px; grid-template-columns: minmax(0, 1fr); }
 #screen-chipsats .phase { gap: 8px; padding: 14px 12px 12px; }
 #screen-chipsats .phase-name { display: flex; align-items: center; gap: 8px; font-size: 17px; }
 #screen-chipsats .phase-what { font-size: 12.5px; line-height: 1.45; min-height: 0; }
-#screen-chipsats .phase-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; font-size: 12.5px; }
-#screen-chipsats .phase-row .ctl { display: inline-flex; align-items: center; gap: 6px; }
-#screen-chipsats .phase-row input { width: 58px; min-height: 32px; padding: 0 10px 0 6px; text-align: right; }
 /* On a surface box the control takes the card colour, as the handoff draws it */
 #screen-chipsats .phase input[type=text] { background: var(--color-control-on-surface); }
-#screen-chipsats .phase-row .u { font-size: 12.5px; color: var(--color-text-70); }
-#screen-chipsats .phase .hint { margin: -4px 0 0; }
-#screen-chipsats .phase .check { margin-top: 4px; font-size: 13px; font-weight: 600; }
-#screen-chipsats .phase .bands { gap: 2px; margin-top: 0; }
-#screen-chipsats .phase .bands .band { align-items: center; font-size: 12.5px; white-space: nowrap; }
-#screen-chipsats .phase .bands input { width: 48px; min-height: 28px; padding: 0 6px; text-align: right; }
+#screen-chipsats .phase .hint { margin: 0; }
+#screen-chipsats .phase .check { font-size: 13px; font-weight: 600; }
+/* Scrolls inside the card on a phone, the page itself never does */
+#screen-chipsats .ratewrap { overflow-x: auto; }
+#screen-chipsats .rates { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+#screen-chipsats .rates th, #screen-chipsats .rates td { padding: 2px 8px 2px 0; text-align: left; vertical-align: middle; white-space: nowrap; font-weight: 400; }
+#screen-chipsats .rates thead th { padding-bottom: 4px; color: var(--color-text-70); }
+#screen-chipsats .rates tbody th { color: var(--color-text-70); }
+#screen-chipsats .rates input { width: 56px; min-height: 28px; padding: 0 6px; text-align: right; }
+#screen-chipsats .rates th input { width: 40px; }
+#screen-chipsats .rates .u { color: var(--color-text-70); }
+#screen-chipsats .rates .zero { display: block; font-size: 11.5px; color: var(--color-text-70); }
+#screen-chipsats .rates .board { font-size: 12px; }
+
+/* ---------- what is happening to the board: one card under the head ---------- */
+#screen-chipsats .pane.now { padding: 14px 24px 16px; gap: 10px; border-radius: var(--radius-lg); }
+#screen-chipsats .pane.now > h3 { padding: 0; align-items: center; }
+#screen-chipsats .now > h3 .note { margin-left: auto; }
+#screen-chipsats .now > h3 .close { margin-left: auto; }
+#screen-chipsats .now > h3 .note + .close { margin-left: 0; }
+#screen-chipsats .now .acts { margin-top: 4px; }
+#screen-chipsats .now .job { padding: 0; border: 0; }
+#screen-chipsats .now > .note { margin: 0; }
 
 /* 3 Write */
 #screen-chipsats .pane.write { display: flex; flex-direction: column; }
@@ -87,16 +101,12 @@
 #screen-chipsats .write .check { margin-top: 14px; font-size: 13px; font-weight: 600; }
 #screen-chipsats .write .block { margin-top: 16px; min-height: 46px; font-size: 15px; white-space: normal; text-align: center; }
 #screen-chipsats .write > .note { margin: 8px 0 0; }
-#screen-chipsats .write .confirm { margin: 12px 0 0; }
-#screen-chipsats .write .job { padding: 0; margin-top: 16px; border: 0; }
 #screen-chipsats .write .outcome { margin: 12px 0 0; }
-#screen-chipsats .lastw { margin-top: auto; padding-top: 16px; }
 
 /* ---------- flight logs and other images ---------- */
 #screen-chipsats .cs-lower { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
 @container (min-width: 760px) {
-  #screen-chipsats .cs-lower { grid-template-columns: minmax(0, 1fr) 230px; }
-  #screen-chipsats .cs-lower:has(.images.open) { grid-template-columns: minmax(0, 1fr); }
+  #screen-chipsats .cs-lower { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); }
 }
 #screen-chipsats .pane.logs { padding: 14px 24px; gap: 10px; border-radius: var(--radius-lg); }
 #screen-chipsats .pane.logs > h3 { padding: 4px 0 0; }
@@ -112,13 +122,16 @@
 #screen-chipsats .logs .rows > div, #screen-chipsats .images .rows > div, #screen-chipsats .bench .rows > div { padding: 8px 0; }
 #screen-chipsats .logs .rows.pulls { border-top: 1px solid var(--color-neutral-200); }
 #screen-chipsats .logs .confirm, #screen-chipsats .images .confirm, #screen-chipsats .bench .confirm { margin: 0; }
+/* the row's buttons sit after the label on one line; the pull's two notes follow */
+#screen-chipsats .logs .rows .l { flex-basis: 110px; }
 
 #screen-chipsats .sheet .pane.images { background: var(--color-surface); padding: 14px 20px; gap: 10px; border-radius: var(--radius-lg); }
-#screen-chipsats .images-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 12px; }
+#screen-chipsats .images-top { display: flex; flex-direction: column; gap: 2px; }
 #screen-chipsats .images-top h3 { margin: 0; font: var(--font-heading-weight) 16px/1.3 var(--font-heading); color: var(--color-text-70); }
-#screen-chipsats .images-top .note { grid-row: 2; }
-#screen-chipsats .images-top .expander { grid-row: 1 / span 2; grid-column: 2; }
-#screen-chipsats .images .rows > div { border-color: var(--color-neutral-300); }
+/* A narrow column: the label on its own line, the control and its note under it */
+#screen-chipsats .images .rows > div { flex-direction: column; align-items: flex-start; gap: 6px; border-color: var(--color-neutral-300); }
+#screen-chipsats .images .rows .l { flex: none; }
+#screen-chipsats .images .rows .val { font-size: 13px; }
 
 /* ---------- the sensor bench, first on a bench board ---------- */
 #screen-chipsats .pane.bench { padding: 18px 22px; gap: 10px; border-radius: var(--radius-lg); }
