@@ -19,7 +19,7 @@
     maxPoints: 20000,         // graph points kept per unit
     lineWidth: 1.25,
     fileTag: 'descent',       // prefix for saved file names
-    alarmSound: true,         // beep when a unit that was being heard goes lost, chirp when a run starts
+    alarmSound: true,         // three notes when a unit that was being heard goes lost, one beep when a run starts
   };
   const MODEL_DEFAULTS = S.MODEL_DEFAULTS;
 
@@ -45,7 +45,7 @@
       hint: 'BNO085 range is ±8 g ≈ 78 m/s².' },
     { key: 'dedupeMs', model: 'dedupeWindowMs', scale: 1, label: 'Same packet across receivers within (ms)', type: 'number', min: 100, step: 100 },
     { key: 'alarmSound', label: 'Sound when a unit goes lost or a run starts', type: 'checkbox',
-      hint: 'Three low notes for lost, one short chirp for a run. The browser plays nothing until the page has been clicked once.' },
+      hint: 'Three low notes for lost, one short beep for a run. The browser plays nothing until the page has been clicked once.' },
     { section: 'Saving' },
     { key: 'fileTag', label: 'File name prefix', type: 'text' },
   ];
