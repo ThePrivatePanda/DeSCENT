@@ -239,6 +239,12 @@ pub fn handle_request(body: &str, ctx: &Arc<Ctx>) -> String {
         write_image(&port, image, &ctx.broadcast).map(|()| std::path::PathBuf::new())
     };
 
+    // The board reboots on the firmware's own spreading factor. It is put on the one asked
+    // for when its first header comes in, and asked again until a header shows it there:
+    // see Hub::want_sf. Set before the port is given back, so that first header counts.
+    if result.is_ok() {
+        ctx.hub.lock().unwrap().want_sf(&port, sf as u8);
+    }
     ctx.hub.lock().unwrap().take_back(&port);
 
     match result {
@@ -248,20 +254,6 @@ pub fn handle_request(body: &str, ctx: &Arc<Ctx>) -> String {
             } else {
                 saved.to_string_lossy().to_string()
             };
-            // The board is rebooting. poll() reopens the port; the spreading factor
-            // goes out once its boot header has arrived, because a command sent to a
-            // booting board is lost.
-            let hub = ctx.hub.clone();
-            let port2 = port.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(6));
-                let key = hub.lock().unwrap().ports().into_iter()
-                    .find(|p| p.port == port2)
-                    .map(|p| p.key);
-                if let Some(k) = key {
-                    let _ = hub.lock().unwrap().send(&k, &format!("#SET,sf,{}\n", sf));
-                }
-            });
             format!("{{\"ok\":true,\"backup\":\"{}\",\"sf\":{}}}", esc(&saved_text), sf)
         }
         Err(e) => err(&e),

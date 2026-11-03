@@ -275,12 +275,74 @@ test('flashing: one press of the button named for the board writes; the card say
   await p.settle();
   const fw = () => p.html('tb-sheet').split('Receiver firmware')[1];
   assert.match(fw(), /class="primary[^"]*" data-flash="\/dev\/ttyUSB0"[^>]*>Flash Mast to 1\.5\.0</);
-  assert.match(p.text('tb-sheet'), /Erases what is on the board and writes receiver firmware 1\.5\.0 over the serial port, then opens it again on/);
+  assert.match(p.text('tb-sheet'), /Erases what is on the board and writes receiver firmware 1\.5\.0 over the serial port, then asks it for .*once it is back/);
   assert.match(p.text('tb-sheet'), /Save what is on the board first/);
   assert.doesNotMatch(fw(), /data-ask=|data-cancel=|Overwrite it|confirm/);
   await p.fire('screen-tbeams', 'click', { 'data-flash': '/dev/ttyUSB0' });
   assert.deepEqual(o.flashed, [['/dev/ttyUSB0', 9]]);
-  assert.match(p.text('tb-sheet'), /Flashed, comes up on SF9\./);
+  assert.match(p.text('tb-sheet'), /Flashed\. Asked for SF9, waiting for the board to come back\./);
+  assert.equal(p.toasts[p.toasts.length - 1], 'Flashed Mast, asked for SF9');
+});
+
+// The user, 2026-11-03: the page said one factor and the board kept another, and they could
+// not tell which one it was on. A flash's factor is an ask until the board's header says it.
+const HEADER = (sf) => '#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf=' + sf + ',cr=7,sync=0x12,pre=8,name=,fw=1.2.1';
+async function flashed(sf) {
+  const r = rig();
+  r.rx('rx1', 7);
+  r.hub.flash = async (port, asked) => { r.o.flashed.push([port, asked]); return { backup: '', sf: asked }; };
+  r.p.parts.tbeams.show();
+  await r.p.settle();
+  await r.p.fire('screen-tbeams', 'change', { 'data-flashsf': '/dev/ttyUSB0' }, { value: String(sf) });
+  await r.p.fire('screen-tbeams', 'click', { 'data-flash': '/dev/ttyUSB0' });
+  // The board reboots: its port comes back under a new key, its own name wiped by the
+  // flash, and the app gives back the name it last reported (serial.rs)
+  r.o.ports[0] = { key: 'rx3', port: '/dev/ttyUSB0', usb: '10c4:ea60', status: 'open', rxId: '72E53C', name: 'Mast', rxFw: '1.2.1' };
+  r.feed = (text, t) => r.p.taps.forEach((fn) => fn('rx3', text, t || NOW));
+  return r;
+}
+
+test('after a flash the factor is asked for until the board\'s own header says it, and the board keeps its last name', async () => {
+  const { o, p, feed } = await flashed(12);
+  assert.deepEqual(o.flashed, [['/dev/ttyUSB0', 12]]);
+  assert.match(p.text('tb-sheet'), /Flashed\. Asked for SF12, waiting for the board to come back\./);
+  assert.match(p.html('tb-sheet'), /tb-last warn/);
+  // the boot header: the firmware's own SF9, and the ask now also stands for the receiver row
+  feed(HEADER(9));
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /Flashed\. Asked for SF12, waiting for its header to say so\./);
+  assert.equal(p.sfAsks.get('rx3').state, 'asked');
+  assert.match(p.text('tb-list'), /Mast/);
+  assert.doesNotMatch(p.text('tb-sheet'), /comes up on|confirmed/);
+  // the app asked it, and the board answers with its header
+  feed(HEADER(12), NOW + 2500);
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /Flashed\. SF12 confirmed at \d\d:\d\d:\d\d\./);
+  assert.doesNotMatch(p.html('tb-sheet'), /tb-last warn|tb-last bad/);
+  assert.equal(p.toasts[p.toasts.length - 1], 'Mast is listening on SF12');
+  assert.equal(p.sfAsks.get('rx3').state, 'heard');
+});
+
+test('a board whose header never shows the asked factor is not confirmed, with what it said', async () => {
+  const { p, feed } = await flashed(12);
+  feed(HEADER(9), NOW - 31000);
+  await p.every(1000, 1);
+  assert.match(p.text('tb-sheet'), /Flashed\. SF12 not confirmed: the board's header still says SF9\./);
+  assert.match(p.html('tb-sheet'), /tb-last bad/);
+  assert.equal(p.toasts[p.toasts.length - 1], "Mast: SF12 not confirmed: the board's header still says SF9");
+  // a later header that does say it changes nothing: the wait is over
+  feed(HEADER(12));
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /SF12 not confirmed/);
+});
+
+test('a board that refuses the factor says so', async () => {
+  const { p, feed } = await flashed(12);
+  feed(HEADER(9));
+  feed('#DG,ERR,sf');
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /Flashed\. The board refused SF12\./);
+  assert.equal(p.toasts[p.toasts.length - 1], 'Mast refused SF12');
 });
 
 test('while it flashes the progress replaces the button and the card says being flashed', async () => {

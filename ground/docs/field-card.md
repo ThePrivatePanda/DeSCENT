@@ -4,7 +4,7 @@ One page to print. The app needs no internet.
 
 ## Before leaving
 
-- set the spreading factor you are flying and flash both receivers to it (**T-Beams** → the **Receiver firmware** card → **Flash**)
+- set the spreading factor you are flying and flash both receivers to it (**T-Beams** → the **Receiver firmware** card → **Flash**); wait for the card to say **SFn confirmed**, which is the board's own header, not the request
 - check every ChipSat on the **ChipSats** screen: module set, and none still running the dump
   firmware or the sensor bench
 - set each board's **Phases**: for the ground and the air, the gap between flash log records and

@@ -29,7 +29,8 @@
     opts: new Map(),    // port -> {sf, backup}: how it is flashed
     heard: new Map(),   // port -> what Listen said
     looks: new Map(),   // port -> what Listen took it for, see LOOKS
-    done: new Map(),    // port -> {bad, text}: how the last flash of it ended
+    done: new Map(),    // port -> {bad, warn, text}: how the last flash of it ended
+    flashAsks: new Map(), // port -> the spreading factor asked of a board after its flash, see flashHeard
     lines: new Map(),   // receiver key -> its last three lines
     hb: new Map(),      // receiver key -> {up, t}: uptime its last heartbeat gave, and when
     busy: null, pct: 0, note: '',
@@ -60,7 +61,81 @@
     state.lines.set(rx, seen);
     const beat = /^HB,(\d+),/.exec(text);
     if (beat) state.hb.set(rx, { up: Number(beat[1]), t });
+    flashHeard(rx, text, t);
   });
+
+  // A flashed board boots on the spreading factor its firmware was built with. The app
+  // asks it for the one chosen here when its first header comes in, and again until a
+  // header shows it there (serial.rs, want_sf). Until then the card says asked, as the
+  // Radio card does for its own asks: the board's header is the only proof (the user,
+  // 2026-11-03, could not tell which factor a flashed board was on).
+  const FLASH_SF_WAIT_MS = 30000;   // boot, the app's #GET and up to five asks
+  const FLASH_BACK_MS = 90000;      // a board that never says anything after the flash
+
+  // The words under the firmware card for the last flash of a port, from where its ask stands.
+  function flashOutcome(port) {
+    const ask = state.flashAsks.get(port);
+    if (!ask) return;
+    const saved = ask.backup ? ' The old firmware is saved as ' + ask.backup + '.' : '';
+    let text; let bad = false; let warn = false;
+    if (ask.state === 'asked') {
+      warn = true;
+      text = 'Flashed. Asked for SF' + ask.sf + (ask.back ? ', waiting for its header to say so.' : ', waiting for the board to come back.');
+    } else if (ask.state === 'heard') {
+      text = 'Flashed. SF' + ask.sf + ' confirmed at ' + clockS(ask.heardAt) + '.';
+    } else {
+      bad = true;
+      text = 'Flashed. ' + ask.said + '.';
+    }
+    state.done.set(port, { bad, warn, text: text + saved });
+  }
+
+  // A line from a port with a flash ask on it. The port comes back under a new receiver
+  // key, so the ask is kept by port and handed to app.js under that key at the first
+  // header, which puts the same words on the receiver row and the Radio card.
+  function flashHeard(rx, text, t) {
+    const port = hub.ports.find((p) => p.key === rx);
+    const ask = port ? state.flashAsks.get(port.port) : null;
+    if (!ask) return;
+    const line = String(text);
+    if (ask.state === 'asked' && line.startsWith('#DG,ERR,sf')) {
+      ask.state = 'refused';
+      ask.said = 'The board refused SF' + ask.sf;
+      toast(ask.name + ' refused SF' + ask.sf);
+    } else if (line.startsWith('#DG,RX,')) {
+      if (!ask.back) {
+        ask.back = t;
+        ask.key = rx;
+        if (A.sfAsks) A.sfAsks.set(rx, ask);
+      }
+      if (ask.state !== 'asked') { flashOutcome(port.port); return; }
+      const m = /,sf=(\d+)/.exec(line);
+      const sf = m ? Number(m[1]) : NaN;
+      if (sf !== ask.sf) { ask.heardSf = sf; flashOutcome(port.port); return; }
+      ask.state = 'heard'; ask.heardAt = t;
+      ask.said = ask.name + ' is listening on SF' + sf;
+      toast(ask.said);
+    } else return;
+    flashOutcome(port.port);
+    if (A.shell.current() === 'tbeams') render();
+  }
+
+  // An ask with no answer in time is not confirmed, and the card says what the board did say.
+  function flashWaits(now) {
+    for (const [port, ask] of state.flashAsks) {
+      if (ask.state !== 'asked') continue;
+      const limit = ask.back ? FLASH_SF_WAIT_MS : FLASH_BACK_MS;
+      if (now - (ask.back || ask.at) <= limit) continue;
+      ask.state = 'silent';
+      ask.said = !ask.back ? 'SF' + ask.sf + ' not confirmed: no header from the board in ' + (limit / 1000) + ' s'
+        : Number.isFinite(ask.heardSf) ? 'SF' + ask.sf + ' not confirmed: the board\'s header still says SF' + ask.heardSf
+          : 'SF' + ask.sf + ' not confirmed: no header said so in ' + (limit / 1000) + ' s';
+      toast(ask.name + ': ' + ask.said);
+      flashOutcome(port);
+      if (A.shell.current() === 'tbeams') render();
+    }
+  }
+  setInterval(() => flashWaits(Date.now()), 1000);
 
   // Which physical board is /dev/ttyUSB0? Nobody can answer that from a port name, so
   // the app watches for one to be unplugged and plugged back in, and you name that one.
@@ -257,7 +332,7 @@
     const o = optsFor(b.port);
     const busy = state.busy === b.port;
     const done = state.done.get(b.port);
-    const last = done ? '<p class="outcome tb-last' + (done.bad ? ' bad' : '') + '">' + esc(done.text) + '</p>' : '';
+    const last = done ? '<p class="outcome tb-last' + (done.bad ? ' bad' : done.warn ? ' warn' : '') + '">' + esc(done.text) + '</p>' : '';
     const rx = reading(b);
     const fw = B.receiverFirmware(rx ? rx.port : null, state.firmwareVersion);
     const name = nameOf(b);
@@ -271,7 +346,7 @@
     } else if (!state.firmware) {
       body = '<p class="note">This build carries no receiver firmware.</p>';
     } else {
-      const sf = '<select data-flashsf="' + esc(b.port) + '" aria-label="Spreading factor it comes up on">' +
+      const sf = '<select data-flashsf="' + esc(b.port) + '" aria-label="Spreading factor to ask it for">' +
         [6, 7, 8, 9, 10, 11, 12].map((n) => '<option value="' + n + '"' + (n === o.sf ? ' selected' : '') + '>SF' + n + '</option>').join('') +
         '</select>';
       // One press writes (the user, 2026-11-01, as for the ChipSat flight write); what stands
@@ -279,7 +354,7 @@
       const go = '<button class="primary block" data-flash="' + esc(b.port) + '"' + (state.busy ? ' disabled' : '') + '>Flash ' + esc(name) +
           (state.firmwareVersion ? ' to ' + esc(state.firmwareVersion) : '') + '</button>';
       body = '<p>Erases what is on the board and writes ' + (state.firmwareVersion ? 'receiver firmware ' + esc(state.firmwareVersion) : esc(state.firmware)) +
-          ' over the serial port, then opens it again on ' + sf + '. Reading stops until the board is back.</p>' +
+          ' over the serial port, then asks it for ' + sf + ' once it is back. Reading stops until the board is back.</p>' +
         '<div class="tb-save"><label class="check"><input type="checkbox" data-backup="' + esc(b.port) + '"' + (o.backup ? ' checked' : '') +
           '> Save what is on the board first</label><span class="note">Takes a few minutes.</span></div>' + go;
     }
@@ -449,7 +524,7 @@
       state.forget = null;
       try {
         await hub.forgetBoard(gone);
-        for (const kept of [state.opts, state.heard, state.done]) kept.delete(gone);
+        for (const kept of [state.opts, state.heard, state.done, state.flashAsks]) kept.delete(gone);
         toast('Forgot ' + called);
       } catch (err) {
         toast('Could not forget ' + called + ': ' + (err.message || err));
@@ -465,6 +540,7 @@
     const name = b ? nameOf(b) : go;
     state.busy = go; state.pct = 0;
     state.done.delete(go);
+    state.flashAsks.delete(go);
     // The whole chip is read before anything is erased. It is minutes, not seconds, so
     // say so rather than let a still line look like a board that stopped answering.
     state.note = o.backup ? "saving the board's current firmware, a few minutes" : 'writing the firmware';
@@ -473,8 +549,11 @@
     render();
     try {
       const j = await hub.flash(go, o.sf, null, o.backup);
-      state.done.set(go, { bad: false, text: 'Flashed, comes up on SF' + o.sf + '.' + (j.backup ? ' The old firmware is saved as ' + j.backup + '.' : '') });
-      toast('Flashed ' + name + ' on SF' + o.sf);
+      // The app says which factor it will ask the board for; an older build says nothing
+      const sf = Number(j.sf) || o.sf;
+      state.flashAsks.set(go, { sf, at: Date.now(), state: 'asked', was: NaN, said: '', heardSf: NaN, heardAt: 0, back: 0, key: null, backup: j.backup || '', name });
+      flashOutcome(go);
+      toast('Flashed ' + name + ', asked for SF' + sf);
     } catch (err) {
       state.done.set(go, { bad: true, text: 'Flash failed: ' + (err.message || err) });
       toast('Did not flash ' + name + ': ' + (err.message || err));

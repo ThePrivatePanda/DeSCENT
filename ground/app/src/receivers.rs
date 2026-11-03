@@ -23,6 +23,8 @@ pub struct Header {
     // The firmware's version, which it prints from 1.2.1 on. Shown, and nothing more:
     // what a board can do is read from what its header carries, not from this.
     pub fw: Option<String>,
+    // The spreading factor it is listening on, from sf=. None on a line where it does not read.
+    pub sf: Option<u8>,
 }
 
 // What a version looks like, and short: digits and dots, starting with a digit, 16
@@ -50,15 +52,17 @@ pub fn header(line: &str) -> Option<Header> {
     let mut id = None;
     let mut name = None;
     let mut fw = None;
+    let mut sf = None;
     for field in fields.split(',') {
         match field.split_once('=') {
             Some(("id", v)) => id = an_id(v),
             Some(("name", v)) => name = Some(v.trim().to_string()),
             Some(("fw", v)) => fw = a_version(v),
+            Some(("sf", v)) => sf = v.parse::<u8>().ok().filter(|n| (6..=12).contains(n)),
             _ => {}
         }
     }
-    Some(Header { id: id?, name, fw })
+    Some(Header { id: id?, name, fw, sf })
 }
 
 // A name as it can be kept here and sent to a board: one line, no commas, because a
@@ -173,12 +177,12 @@ mod tests {
     #[test]
     fn a_header_line_says_which_receiver_it_is() {
         let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8").unwrap();
-        assert_eq!(h, Header { id: "A4C1F3".into(), name: None, fw: None });
+        assert_eq!(h, Header { id: "A4C1F3".into(), name: None, fw: None, sf: Some(9) });
         // Newer firmware says what it is called, or that it is called nothing yet.
         let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8,name=Left one").unwrap();
         assert_eq!(h.name.as_deref(), Some("Left one"));
         let h = header("#DG,RX,v1,id=a4c1f3,name=,f=915.0").unwrap();
-        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some(String::new()), fw: None });
+        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some(String::new()), fw: None, sf: None });
 
         for no in [
             "PKT,55,00FF,-50.0,13.75,-12",
@@ -199,7 +203,7 @@ mod tests {
     #[test]
     fn a_header_says_which_firmware_it_runs_from_1_2_1_on() {
         let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8,name=Left one,fw=1.2.1").unwrap();
-        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some("Left one".into()), fw: Some("1.2.1".into()) });
+        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some("Left one".into()), fw: Some("1.2.1".into()), sf: Some(9) });
         assert_eq!(header("#DG,RX,v1,id=A4C1F3,name=,fw=1.10.0\r").unwrap().fw.as_deref(), Some("1.10.0"));
         assert_eq!(header("#DG,RX,v1,id=A4C1F3,fw=2").unwrap().fw.as_deref(), Some("2"));
         assert_eq!(header("#DG,RX,v1,id=A4C1F3,fw=1234567.123456.1").unwrap().fw.as_deref(), Some("1234567.123456.1"));
