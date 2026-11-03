@@ -64,6 +64,7 @@
 
 #screen-tbeams .tb-last { margin: auto 0 0; padding: 14px 0 0; box-shadow: none; font-size: 12.5px; color: var(--color-text-70); }
 #screen-tbeams .tb-last.bad { padding: 4px 0 4px 10px; margin-top: 12px; color: var(--color-text); box-shadow: inset 3px 0 0 var(--color-accent); }
+#screen-tbeams .tb-last.warn { padding: 4px 0 4px 10px; margin-top: 12px; color: var(--color-text); box-shadow: inset 3px 0 0 var(--color-accent-400); }
 
 /* index.html gives Start watching the link look; in its card it is a pill like the others */
 #screen-tbeams .tb-whichacts button.ghost { border-color: var(--color-divider); color: var(--color-text); padding: 0 16px; }

@@ -165,6 +165,22 @@ impl Keys {
 
 type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
 
+// The spreading factor a port's board is to be put on once it has come back from a
+// flash: device path -> what is wanted. Kept by the hub, not the port, because a flash
+// closes the port and the reader that sees the board come back is a new one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WantSf {
+    sf: u8,
+    sent: u32,      // how many #SET,sf have gone out for it
+    since_ms: u128, // when it was asked for
+}
+type WantsSf = Arc<Mutex<HashMap<String, WantSf>>>;
+
+// A board that refuses the factor is not asked for ever, and a want for a board that
+// never came back does not land on the next one plugged into that socket.
+const WANT_SF_TRIES: u32 = 5;
+const WANT_SF_FOR_MS: u128 = 120_000;
+
 // What a port has said about itself, and what has been done about it.
 #[derive(Default)]
 struct Heard {
@@ -203,6 +219,7 @@ pub struct Hub {
     // receiver id -> what this computer calls it. Shared with the reader threads, which
     // are the ones that see a board come back without its name.
     rx_names: Arc<Mutex<receivers::Names>>,
+    want_sf: WantsSf,
     // open receivers missing from the listing, and for how many passes
     missing: HashMap<String, u32>,
     listing_failed: bool,          // said once, not every 2 s
@@ -216,8 +233,20 @@ pub struct Hub {
 // board keeps its settings in, so it comes back with none; and which board came back is
 // not known until it says so here. A board that says it takes a name and has none is
 // sent the one kept for its id. A board that reports a name is never sent one: its own
-// stands, even where this computer calls it something else.
-fn notice(line: &str, heard: &Mutex<Heard>, names: &Mutex<receivers::Names>, writer: Option<&Writer>) -> bool {
+// stands, and it becomes the name kept for its id, so the name given back after a flash
+// is the one the board had, not whatever this computer was last told.
+//
+// The same goes for the spreading factor wanted after a flash (want, for this port):
+// it is sent each time a header shows the board on another one, and is done with once
+// a header shows it on that one. The board answers #SET,sf with a header, so that is
+// the board's own word, not an assumption that a command arrived.
+fn notice(
+    line: &str,
+    heard: &Mutex<Heard>,
+    names: &Mutex<receivers::Names>,
+    writer: Option<&Writer>,
+    want: Option<(&WantsSf, &str)>,
+) -> bool {
     let Some(header) = receivers::header(line) else { return false };
     let id = header.id.clone();
     let mut give_back = None;
@@ -227,26 +256,56 @@ fn notice(line: &str, heard: &Mutex<Heard>, names: &Mutex<receivers::Names>, wri
             Some("") if was.asked.as_deref() != Some(id.as_str()) => {
                 give_back = names.lock().unwrap().get(&id).map(String::from);
                 if give_back.is_some() {
-                    was.asked = Some(id);
+                    was.asked = Some(id.clone());
                 }
             }
             Some("") | None => {}
-            Some(_) => was.asked = None,
+            Some(own) => {
+                was.asked = None;
+                // Only a name that could have been set here: half a line is no name.
+                let mut kept = names.lock().unwrap();
+                if receivers::a_name(own).ok().as_deref() == Some(own) && kept.get(&id) != Some(own) {
+                    if let Err(e) = kept.set(&id, own) {
+                        println!("receiver {} calls itself {}, but that could not be kept: {}", id, own, e);
+                    }
+                }
+            }
         }
         let news = was.header.as_ref() != Some(&header);
-        was.header = Some(header);
+        was.header = Some(header.clone());
         news
     };
+    let mut set_sf = None;
+    if let (Some((wants, port)), Some(on)) = (want, header.sf) {
+        let mut wants = wants.lock().unwrap();
+        if let Some(w) = wants.get_mut(port) {
+            if w.sf == on {
+                println!("{}: receiver {} is on SF{}, as asked after the flash", port, id, on);
+                wants.remove(port);
+            } else if w.sent >= WANT_SF_TRIES || now_ms().saturating_sub(w.since_ms) > WANT_SF_FOR_MS {
+                println!("{}: receiver {} is still on SF{}, not the SF{} asked for after the flash; stopped asking", port, id, on, w.sf);
+                wants.remove(port);
+            } else {
+                w.sent += 1;
+                set_sf = Some(w.sf);
+            }
+        }
+    }
     // Written with the lock let go: a port that is slow to take it must not hold up
     // whoever is asking what this port has said.
-    if let Some(name) = give_back {
-        let sent = writer
-            .and_then(|w| w.lock().ok().map(|mut w| w.write_all(format!("#SET,name,{}\n", name).as_bytes()).and_then(|()| w.flush())))
+    let write = |text: String| -> bool {
+        writer
+            .and_then(|w| w.lock().ok().map(|mut w| w.write_all(text.as_bytes()).and_then(|()| w.flush())))
             .map(|r| r.is_ok())
-            .unwrap_or(false);
-        if !sent {
+            .unwrap_or(false)
+    };
+    if let Some(name) = give_back {
+        if !write(format!("#SET,name,{}\n", name)) {
             heard.lock().unwrap().asked = None;
         }
+    }
+    if let Some(sf) = set_sf {
+        let _ = write(format!("#SET,sf,{}\n", sf));
     }
     news
 }
@@ -268,6 +327,7 @@ impl Hub {
             boards: Vec::new(),
             store: None,
             rx_names: Arc::new(Mutex::new(receivers::Names::empty())),
+            want_sf: Arc::new(Mutex::new(HashMap::new())),
             missing: HashMap::new(),
             listing_failed: false,
         }
@@ -583,6 +643,13 @@ impl Hub {
         Ok(())
     }
 
+    // The board on this port is to be put on this spreading factor when it next says
+    // which one it is on: after a flash, which leaves it on the one its firmware was
+    // built with. See notice().
+    pub fn want_sf(&mut self, port: &str, sf: u8) {
+        self.want_sf.lock().unwrap().insert(port.to_string(), WantSf { sf, sent: 0, since_ms: now_ms() });
+    }
+
     // Give it back. poll() reopens it on its next pass, which also re-reads the
     // #DG,RX header from the firmware that is now on the board.
     pub fn take_back(&mut self, port: &str) {
@@ -754,6 +821,8 @@ impl Hub {
         let thread_error = error.clone();
         let thread_heard = heard.clone();
         let thread_names = self.rx_names.clone();
+        let thread_wants = self.want_sf.clone();
+        let thread_port = port_name.clone();
         let thread_writer = writer.clone();
         let mut reader = reader;
         let handle = std::thread::spawn(move || {
@@ -768,7 +837,7 @@ impl Hub {
                     Ok(n) => {
                         let t = now_ms();
                         for line in framer.push(&buf[..n]) {
-                            let news = notice(&line, &thread_heard, &thread_names, thread_writer.as_ref());
+                            let news = notice(&line, &thread_heard, &thread_names, thread_writer.as_ref(), Some((&thread_wants, &thread_port)));
                             let _ = tx.send(Event::Line {
                                 key: thread_key.clone(),
                                 t_ms: t,
@@ -1133,7 +1202,7 @@ mod tests {
     // A line arriving on a port that is being read.
     fn said(hub: &Hub, key: &str, line: &str) -> bool {
         let o = &hub.open[key];
-        notice(line, &o.heard, &hub.rx_names, o.writer.as_ref())
+        notice(line, &o.heard, &hub.rx_names, o.writer.as_ref(), Some((&hub.want_sf, &o.port)))
     }
 
     fn text(wire: &Arc<Mutex<Vec<u8>>>) -> String {
@@ -1176,11 +1245,62 @@ mod tests {
         let mut hub = keeping("01");
         let wire = wired(&mut hub, "rx1", "/dev/ttyUSB0");
         said(&hub, "rx1", NAMED);
-        // Even one this computer does not call it by: the board's own name stands.
+        // Even one this computer does not call it by: the board's own name stands, and it
+        // is the one kept from now on, so a flash gives back "roof" and not the old "01".
         said(&hub, "rx1", &NAMED.replace("name=01", "name=roof"));
         assert_eq!(text(&wire), "");
         assert_eq!(hub.ports()[0].rx_name.as_deref(), Some("roof"));
-        assert_eq!(hub.ports()[0].name.as_deref(), Some("01"));
+        assert_eq!(hub.ports()[0].name.as_deref(), Some("roof"));
+    }
+
+    #[test]
+    fn a_flashed_board_gets_back_the_name_it_last_reported() {
+        // Named "01" on this computer long ago, renamed "Mast" since (on another computer,
+        // or on the board): this computer has heard it say so, then it is flashed.
+        let mut hub = keeping("01");
+        let wire = wired(&mut hub, "rx1", "/dev/ttyUSB0");
+        said(&hub, "rx1", &NAMED.replace("name=01", "name=Mast"));
+        said(&hub, "rx1", UNNAMED);
+        assert_eq!(text(&wire), "#SET,name,Mast\n");
+        // A garbled line whose name could not have been set here changes nothing kept.
+        said(&hub, "rx1", &NAMED.replace("name=01", "name=Ma\u{7f}st"));
+        assert_eq!(hub.rx_names.lock().unwrap().get("A4C1F3"), Some("Mast"));
+    }
+
+    #[test]
+    fn the_spreading_factor_asked_for_in_a_flash_is_sent_until_the_board_says_it_is_on_it() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut hub = Hub::new(tx);
+        let wire = wired(&mut hub, "rx1", "/dev/ttyUSB0");
+        // Nothing wanted: a header on SF9 is left alone.
+        said(&hub, "rx1", UNNAMED);
+        assert_eq!(text(&wire), "");
+
+        hub.want_sf("/dev/ttyUSB0", 12);
+        // The boot header and the answer to #GET both say SF9: asked each time.
+        said(&hub, "rx1", UNNAMED);
+        said(&hub, "rx1", UNNAMED);
+        assert_eq!(text(&wire), "#SET,sf,12\n#SET,sf,12\n");
+        // Its answer says SF12. Done: later headers are not a reason to ask again.
+        said(&hub, "rx1", &UNNAMED.replace("sf=9", "sf=12"));
+        said(&hub, "rx1", UNNAMED);
+        assert_eq!(text(&wire), "#SET,sf,12\n#SET,sf,12\n");
+    }
+
+    #[test]
+    fn a_board_that_will_not_take_the_spreading_factor_is_asked_a_few_times_only() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut hub = Hub::new(tx);
+        let wire = wired(&mut hub, "rx1", "/dev/ttyUSB0");
+        hub.want_sf("/dev/ttyUSB0", 12);
+        for _ in 0..10 {
+            said(&hub, "rx1", UNNAMED);
+        }
+        assert_eq!(text(&wire).matches("#SET,sf,12").count(), WANT_SF_TRIES as usize);
+        // A want for another socket is not sent to this one.
+        hub.want_sf("/dev/ttyUSB1", 7);
+        said(&hub, "rx1", UNNAMED);
+        assert!(!text(&wire).contains("#SET,sf,7"));
     }
 
     #[test]
