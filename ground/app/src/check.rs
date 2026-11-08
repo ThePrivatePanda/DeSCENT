@@ -5,12 +5,14 @@
 // a file does not hold is said to be missing, and what could not be read is counted.
 //
 // Three things in the firmware shape what can be said (fsw FlashLog.h, Health.cpp):
-//   - flash holds packets, time anchors, the boot event and dropped events. Sensor recovery, BUS
-//     lines and phase changes only ever go to the console, so a pull has none of them unless
-//     a console was caught. Event kinds 0x10-0x3F are kept for them but nothing writes those yet.
+//   - flash holds packets, time anchors, the boot event, dropped events and, from 2026-11-06,
+//     system events: sensor recovery, the bus watchdog, phase changes, radio and flash trouble,
+//     each a pooled run with a count. Older firmware sent those to the console only, so a pull
+//     from it has none of them unless a console was caught.
 //   - no record says which phase it was written in, so ground and air are read off the spacing
 //     and called that. Going to air also writes the RAM ring, so the fast spacing starts about
-//     30 s before take-off.
+//     30 s before take-off. The phase events say when the phase changed, and the phase segments
+//     come from those alone, never from the spacing.
 //   - the settings and RST lines in a dump.txt are the board restarting for the pull. They say
 //     what it was set to then, not what an older boot in the log ran with.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -32,6 +34,8 @@ const STEADY_PERCENT: u64 = 10;  // either side of their middle value
 const SENSORS: usize = 7;        // validity bits 0-6, bit 7 is the all-fresh flag and not a sensor
 const FRESH_BIT: usize = 7;
 const SPELLS_KEPT: usize = 50;   // per sensor in the JSON
+const EVENTS_KEPT: usize = 200;  // system event runs per boot in the JSON, the earliest
+const EVENTS_PRINTED: usize = 20;
 const SHOWN: usize = 5;          // lines of any one list in the printed report
 const SAMPLES: usize = 5;
 const SAMPLE_CHARS: usize = 80;
@@ -488,6 +492,367 @@ impl Consoles {
 
 // worst first when sorted high to low, the fields in the order rank() gives them
 type BootRank = (bool, u32, bool, usize, usize, u64, u32);
+
+// One source and what across a boot: every run of it added up, the parts it happened to
+#[derive(Debug, PartialEq)]
+struct SystemSum {
+    source: u8,
+    what: u8,
+    count: u64,
+    records: usize,
+    first_ms: u32,
+    last_ms: u32,
+    parts: Vec<u8>,
+}
+
+impl SystemSum {
+    fn names(&self) -> (String, String, Vec<String>) {
+        let word = |w: Option<&str>, n: u8| w.map_or_else(|| n.to_string(), str::to_string);
+        (
+            word(dump::source_word(self.source), self.source),
+            word(dump::what_word(self.source, self.what), self.what),
+            self.parts.iter().map(|p| word(dump::part_word(*p), *p)).collect(),
+        )
+    }
+}
+
+// Most often first, so a storm heads the list
+fn system_sums(events: &[&dump::Event]) -> Vec<SystemSum> {
+    let mut sums: BTreeMap<(u8, u8), SystemSum> = BTreeMap::new();
+    for e in events {
+        let EventKind::System(s) = &e.kind else { continue };
+        let sum = sums.entry((s.source, s.what)).or_insert(SystemSum {
+            source: s.source,
+            what: s.what,
+            count: 0,
+            records: 0,
+            first_ms: s.first_ms,
+            last_ms: s.last_ms,
+            parts: Vec::new(),
+        });
+        sum.count += s.count as u64;
+        sum.records += 1;
+        sum.first_ms = sum.first_ms.min(s.first_ms);
+        sum.last_ms = sum.last_ms.max(s.last_ms);
+        if !sum.parts.contains(&s.part) {
+            sum.parts.push(s.part);
+        }
+    }
+    let mut out: Vec<SystemSum> = sums.into_values().collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.count));
+    out
+}
+
+// source, what, part and reason as SystemEvent.h names them, the number for one this build does not know
+fn run_words(e: &dump::SystemEvent) -> [String; 4] {
+    let code_word = |w: Option<&str>, n: u8| w.map_or_else(|| n.to_string(), str::to_string);
+    [
+        code_word(dump::source_word(e.source), e.source),
+        code_word(dump::what_word(e.source, e.what), e.what),
+        code_word(dump::part_word(e.part), e.part),
+        dump::reason_word(e.source, e.what, e.reason).unwrap_or_else(|| e.reason.to_string()),
+    ]
+}
+
+// The comments in SystemEvent.h and docs/phases.md, said plainly. No threshold: the log does not
+// record the constants the board ran with
+fn meaning(e: &dump::SystemEvent) -> &'static str {
+    match (e.source, e.what) {
+        (1, 1) => "went bad, the driver only re-reads",
+        (1, 2) => "a reset held off in the air, the part still partly works",
+        (1, 3) => "first reset: IMU soft reset, BME280 or gauge restart, GPS port",
+        (1, 4) => "second reset: IMU pin reset, GPS hot start",
+        (1, 5) => "resets did not help, left alone for a while",
+        (1, 6) => "a good reading again",
+        (1, 7) => "the IMU reset pin was pulsed",
+        (1, 8) => "the IMU driver's own background restart ended",
+        (2, 1) => "a bus line was low before a transfer",
+        (2, 2) => "a bus line was low right after a transfer, blamed on that address",
+        (2, 3) => "timeouts in a row, the part held back",
+        (2, 4) => "two parts timing out together, so the bus was cleared",
+        (2, 5) => "a bus clear ran",
+        (2, 6) => "jammed too often, the part put in quarantine",
+        (2, 7) => "out of quarantine, on probation",
+        (3, 1) => "to the air",
+        (3, 2) => "to the ground",
+        (3, 3) => "the barometer started falling in the air, which holds the air phase",
+        (3, 4) => "boot-air ended: the log goes to its ground rate, the radio's phase does not move",
+        (3, 5) => "the IMU stepped up to its fast rate on the ground",
+        (3, 6) => "the IMU went back to its slow rate on the ground without going up",
+        (3, 7) => "landed with a fix held: GPS in standby, the MCU stopped between work, packets carry the held fix",
+        (3, 8) => "out of asleep, everything on again",
+        (4, 1) => "a transmission failed",
+        (4, 2) => "a transmission did not finish in time",
+        (4, 3) => "the radio was set up again",
+        (5, 1) => "a flash write failed",
+        (5, 2) => "an erase did not finish in time",
+        (5, 3) => "flash logging stopped for this boot",
+        _ => "a code this build does not know",
+    }
+}
+
+fn reason_meaning(e: &dump::SystemEvent) -> Option<String> {
+    let word = dump::reason_word(e.source, e.what, e.reason)?;
+    let said = match (e.source, word.as_str()) {
+        (_, "none") => return None,
+        (1, "asleep") => "the IMU was asleep",
+        (1, "silent") => "every IMU report stopped",
+        (1, "partial") => "some IMU reports stopped",
+        (1, "stale") => "ready but no fresh reading",
+        (1, "notready") => "the driver is not up",
+        (1, "nopvt") => "bytes from the GPS but no position",
+        (1, "nobytes") => "nothing at all from the GPS",
+        (1, "boot") => "at boot, before the first start",
+        (1, "busstuck") => "before a bus clear the IMU is blamed for",
+        (1, "noack") => "the probe or the reset write got no ACK",
+        (1, "noreset") => "no reset complete in time",
+        (1, "noenable") => "a Set Feature write failed",
+        (2, "clearok") => "both lines high after it",
+        (2, "clearlow") => "SDA still low after the pulses",
+        (2, "clearsclheld") => "SCL never came up, so clocking cannot help",
+        (2, lines) if e.what <= 2 => return Some(lines.replace("sdalow", "SDA low").replace("scllow", "SCL low").replace('+', " and ")),
+        (3, "imumotion") => "most of the IMU's motion window moved",
+        (3, "quiet") => "no moving IMU reading for the landed time",
+        (3, "quietnoalt") => "the IMU quiet for the longer time, with no altitude live all flight",
+        (3, "barodescent") => "the barometer falling",
+        (3, "imudead") => "the IMU missing, so the altitude decided",
+        (3, "bootairlimit") => "boot-air's uptime limit",
+        (3, "motionheld") => "moving without a break for the held time, altitude live and no climb",
+        (3, "quiethigh") => "quiet and flat for the long time, above half the climb",
+        (3, "moving") => "enough of the last slow IMU readings moved",
+        (3, "goodfix") => "enough good fixes in a row",
+        (4, "startrefused") => "the radio refused to start it",
+        (4, "finishfailed") => "it did not finish",
+        (4, "setupok") => "setup worked",
+        (4, "setupfailed") => "setup failed",
+        _ => return None,
+    };
+    Some(said.to_string())
+}
+
+// The detail is the last one's of the run, and means something different for each what
+fn detail_words(e: &dump::SystemEvent) -> String {
+    let d = e.detail;
+    match (e.source, e.what) {
+        (1, 1 | 2) if e.part == 1 && d != 0 => {
+            let silent: Vec<&str> = ["accel", "gyro", "mag", "quat"].iter().enumerate().filter(|(bit, _)| d & (1 << bit) != 0).map(|(_, w)| *w).collect();
+            format!("silent: {}", silent.join(" "))
+        }
+        (1, 3 | 4) => String::from(if d == 1 { "the driver said ok" } else { "the driver did not say ok" }),
+        (1, 5) => format!("backs off {}", seconds(d as u64)),
+        (1, 6) => format!("bad for {}", seconds(d as u64)),
+        (1, 7) => format!("{} after it", plural(d as usize, "failed restart")),
+        (1, 8) => String::from(if d == 1 { "ok" } else { "failed" }),
+        (2, 1 | 2 | 7) => format!("address 0x{:02X}", d),
+        (2, 3) => format!("held back {}", seconds(d as u64)),
+        (2, 4) => format!("the transfer took {}", seconds(d as u64)),
+        (2, 5) => plural(d as usize, "clock pulse"),
+        (2, 6) => format!("quarantine {}", seconds(d as u64)),
+        (3, 7) => format!("hAcc {} mm", d),
+        (4, 2) => format!("waited {}", seconds(d as u64)),
+        (4, _) => format!("radio code {}", d as i32),
+        (5, 1) => format!("next record {}", d),
+        (5, 2) => format!("sector {}", d),
+        (5, 3) => format!("{} on the chip", plural(d as usize, "record")),
+        _ if d == 0 => String::new(),
+        _ => format!("detail {}", d),
+    }
+}
+
+fn run_line(e: &dump::SystemEvent) -> String {
+    let [source, what, part, reason] = run_words(e);
+    let mut s = format!("up={} to {} ms {} {}", e.first_ms, e.last_ms, source, what);
+    if e.part != 0 {
+        s.push_str(&format!(" on {}", part));
+    }
+    if e.reason != 0 {
+        s.push_str(&format!(", {}", reason));
+        if let Some(m) = reason_meaning(e) {
+            s.push_str(&format!(" ({})", m));
+        }
+    }
+    if e.count > 1 {
+        s.push_str(&format!(", {}", plural(e.count as usize, "time")));
+    }
+    let detail = detail_words(e);
+    if !detail.is_empty() {
+        s.push_str(&format!(", {}{}", detail, if e.count > 1 { " the last time" } else { "" }));
+    }
+    format!("{}: {}", s, meaning(e))
+}
+
+fn run_json(e: &dump::SystemEvent) -> String {
+    let [source, what, part, reason] = run_words(e);
+    format!(
+        "{{\"firstMs\":{},\"lastMs\":{},\"count\":{},\"source\":\"{}\",\"what\":\"{}\",\"part\":\"{}\",\"reason\":\"{}\",\"detail\":{},\"detailWords\":\"{}\",\"meaning\":\"{}\",\"reasonMeaning\":{}}}",
+        e.first_ms,
+        e.last_ms,
+        e.count,
+        source,
+        what,
+        part,
+        reason,
+        e.detail,
+        esc(&detail_words(e)),
+        esc(meaning(e)),
+        opt_text(&reason_meaning(e))
+    )
+}
+
+// A stretch of one phase, begun by a phase event, or by the boot for the first one: every reset
+// starts in boot-air (docs/phases.md). Nothing here is read off the record spacing
+#[derive(Debug, Clone, PartialEq)]
+struct Segment {
+    from_ms: u64,
+    to_ms: u64,
+    phase: &'static str,
+    by: Option<dump::SystemEvent>,
+    held_fix: bool,   // asleep: the GPS fields are the fix it held, valid bit and all
+}
+
+// imufast and imuslow change the IMU's rate, not the phase, so they are only in the event list
+fn phase_segments(runs: &[dump::SystemEvent], end_ms: u64) -> Vec<Segment> {
+    let changes: Vec<&dump::SystemEvent> = runs.iter().filter(|e| e.source == 3 && !matches!(e.what, 5 | 6)).collect();
+    if changes.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![Segment { from_ms: 0, to_ms: 0, phase: "boot-air", by: None, held_fix: false }];
+    // the ground after a real air spell is landed; boot-air does not count
+    let mut flown = false;
+    for e in changes {
+        let phase = match e.what {
+            1 => "air",
+            2 if flown => "landed, looking for a fix",
+            2 | 4 => "ground",
+            3 => "air, falling",
+            7 => "landed, asleep",
+            8 if e.reason == 5 => "air",
+            8 => "landed, looking for a fix",
+            _ => "a phase this build does not know",
+        };
+        flown |= phase.starts_with("air");
+        let at = e.first_ms as u64;
+        out.last_mut().unwrap().to_ms = at;
+        out.push(Segment { from_ms: at, to_ms: at, phase, by: Some(e.clone()), held_fix: e.what == 7 });
+    }
+    let last = out.last_mut().unwrap();
+    last.to_ms = end_ms.max(last.from_ms);
+    out
+}
+
+impl Segment {
+    fn json(&self) -> String {
+        let (by, reason, count) = match &self.by {
+            Some(e) => {
+                let [_, what, _, reason] = run_words(e);
+                (format!("\"{}\"", what), format!("\"{}\"", reason), e.count)
+            }
+            None => (String::from("null"), String::from("null"), 0),
+        };
+        format!(
+            "{{\"fromMs\":{},\"toMs\":{},\"phase\":\"{}\",\"by\":{},\"reason\":{},\"count\":{},\"heldFix\":{}}}",
+            self.from_ms, self.to_ms, self.phase, by, reason, count, self.held_fix
+        )
+    }
+}
+
+// What a drop is looked at for: the packet field (accel and gyro are the length of their three
+// axes), what to call it, the unit, and the validity bit a reading needs to count
+const READINGS: [(&str, &str, &str, usize); 7] = [
+    ("envAlt", "barometer altitude", "m", 6),
+    ("gpsAlt", "GPS altitude", "m", 4),
+    ("accel", "linear acceleration", "m/s²", 0),
+    ("gyro", "rotation rate", "deg/s", 1),
+    ("pressure", "pressure", "hPa", 6),
+    ("temp", "temperature", "°C", 6),
+    ("battery", "cell voltage", "V", 5),
+];
+
+#[derive(Debug, Clone, PartialEq)]
+struct Range {
+    key: &'static str,
+    words: &'static str,
+    unit: &'static str,
+    flag: &'static str,
+    lo: Option<(f64, u64)>,   // value and uptime, of the readings with the flag set
+    hi: Option<(f64, u64)>,
+    set: usize,
+    clear: usize,
+    held: usize,   // GPS readings on a held fix, left out of lo and hi
+}
+
+fn reading(d: &Decoded, key: &str) -> f64 {
+    let length = |axes: [&str; 3]| {
+        let sum: f64 = axes.iter().map(|k| d.value(k).unwrap().powi(2)).sum();
+        (sum.sqrt() * 100.0).round() / 100.0
+    };
+    match key {
+        "accel" => length(["ax", "ay", "az"]),
+        "gyro" => length(["gx", "gy", "gz"]),
+        k => d.value(k).unwrap(),
+    }
+}
+
+fn ranges(rows: &[(u64, &Decoded)], held: &[(u64, u64)]) -> Vec<Range> {
+    READINGS
+        .iter()
+        .map(|(key, words, unit, bit)| {
+            let mut r = Range { key, words, unit, flag: VALIDITY_KEYS[*bit], lo: None, hi: None, set: 0, clear: 0, held: 0 };
+            for (ms, d) in rows {
+                if !d.valid[*bit] {
+                    r.clear += 1;
+                    continue;
+                }
+                if *key == "gpsAlt" && held.iter().any(|(from, to)| ms >= from && ms <= to) {
+                    r.held += 1;
+                    continue;
+                }
+                r.set += 1;
+                let v = reading(d, key);
+                if r.lo.is_none_or(|(lo, _)| v < lo) {
+                    r.lo = Some((v, *ms));
+                }
+                if r.hi.is_none_or(|(hi, _)| v > hi) {
+                    r.hi = Some((v, *ms));
+                }
+            }
+            r
+        })
+        .collect()
+}
+
+impl Range {
+    fn json(&self) -> String {
+        let at = |v: &Option<(f64, u64)>| v.map_or((String::from("null"), String::from("null")), |(v, ms)| (decode::js_num(v), ms.to_string()));
+        let (lo, lo_ms) = at(&self.lo);
+        let (hi, hi_ms) = at(&self.hi);
+        format!(
+            "{{\"key\":\"{}\",\"words\":\"{}\",\"unit\":\"{}\",\"flag\":\"{}\",\"min\":{},\"minMs\":{},\"max\":{},\"maxMs\":{},\"set\":{},\"clear\":{},\"heldFix\":{}}}",
+            self.key, self.words, self.unit, self.flag, lo, lo_ms, hi, hi_ms, self.set, self.clear, self.held
+        )
+    }
+
+    fn line(&self) -> String {
+        let clear = if self.clear > 0 { format!(", {} with it clear", self.clear) } else { String::new() };
+        let held = if self.held > 0 { format!(", {} on a held fix left out", self.held) } else { String::new() };
+        match (self.lo, self.hi) {
+            (Some((lo, lo_ms)), Some((hi, hi_ms))) => format!(
+                "{}: {} {} at up={} ms to {} {} at up={} ms, of {} with the {} flag set{}{}",
+                self.words, lo, self.unit, lo_ms, hi, self.unit, hi_ms, plural(self.set, "reading"), self.flag, clear, held
+            ),
+            _ => format!("{}: no reading with the {} flag set{}{}", self.words, self.flag, clear, held),
+        }
+    }
+}
+
+// How a boot ended is the next boot's reset cause. The last one ended when the board was restarted for the pull
+#[derive(Debug, Clone, PartialEq)]
+enum End {
+    Reset(Option<String>),
+    Pull,
+    NotInLog,
+}
+
 type PullRank = (bool, bool, usize, BootRank);
 
 #[derive(Debug, PartialEq)]
@@ -505,6 +870,12 @@ struct BootCheck {
     dropped: u32,
     dropped_seen: Vec<(u64, u32)>,   // every dropped event, uptime and the count so far
     other_events: Vec<(u64, u8)>,
+    system: Vec<SystemSum>,          // worst first
+    system_raw: Vec<(u64, u8)>,      // uptime and layout of the ones this cannot read
+    runs: Vec<dump::SystemEvent>,    // every system event run, by when it began
+    phases: Vec<Segment>,
+    ranges: Vec<Range>,
+    end: End,
     space: Spacing,
     sensors: Vec<Sensor>,
     fresh: usize,
@@ -592,6 +963,15 @@ impl BootCheck {
             Some(at) => line(out, format!("first record {} UTC, GPS time from {}{}", at, plural(self.anchors, "anchor"), rejected(self.anchors_rejected))),
             None => line(out, format!("no GPS time in this boot{}", rejected(self.anchors_rejected))),
         }
+        line(
+            out,
+            match &self.end {
+                End::Reset(Some(r)) => format!("ended by a reset, {} as the next boot found it", r),
+                End::Reset(None) => String::from("ended by a reset whose cause is not in the log"),
+                End::Pull => String::from("ended when the board was restarted for the pull"),
+                End::NotInLog => String::from("how it ended is not known, the next boot is not in the log"),
+            },
+        );
         if self.csids.len() > 1 {
             line(out, format!("packets carry more than one board id: {}", join_ids(&self.csids)));
         }
@@ -609,11 +989,55 @@ impl BootCheck {
         for (ms, kind) in self.other_events.iter().take(SHOWN) {
             line(out, format!("event of kind 0x{:02X} at up={} ms, not one this reads", kind, ms));
         }
+        for s in self.system.iter().take(SHOWN) {
+            let (source, what, parts) = s.names();
+            line(
+                out,
+                format!(
+                    "system {} {}: {} in {}, up={} to {} ms, on {}",
+                    source,
+                    what,
+                    plural(s.count as usize, "time"),
+                    plural(s.records, "record"),
+                    s.first_ms,
+                    s.last_ms,
+                    parts.join(" ")
+                ),
+            );
+        }
+        if self.system.len() > SHOWN {
+            line(out, format!("and {} more kinds of system event", self.system.len() - SHOWN));
+        }
+        for (ms, layout) in self.system_raw.iter().take(SHOWN) {
+            line(out, format!("system event in layout {} at up={} ms, not one this reads, kept as it came", layout, ms));
+        }
+        for e in self.runs.iter().take(EVENTS_PRINTED) {
+            line(out, format!("event {}", run_line(e)));
+        }
+        if self.runs.len() > EVENTS_PRINTED {
+            line(out, format!("and {} more", plural(self.runs.len() - EVENTS_PRINTED, "system event")));
+        }
+        if self.phases.is_empty() {
+            line(out, String::from("no phase events in this boot. Firmware from before 2026-11-06 wrote none"));
+        } else {
+            let said: Vec<String> = self
+                .phases
+                .iter()
+                .map(|s| match &s.by {
+                    Some(e) => {
+                        let [_, what, _, reason] = run_words(e);
+                        format!("{} from up={} ms ({}, {})", s.phase, s.from_ms, what, reason)
+                    }
+                    None => format!("{} from up={} ms", s.phase, s.from_ms),
+                })
+                .collect();
+            line(out, format!("phases, from the phase events: {}", said.join(", ")));
+        }
         if self.records > 1 {
             line(
                 out,
                 format!(
-                    "spacing, since flash keeps no phase: {} fast (air rate), {} steady and slow (ground rate), {} in gaps",
+                    "record spacing, which is not a phase: {} fast, {} steady and slow, {} in gaps",
                     seconds(self.space.fast_ms),
                     seconds(self.space.steady_ms),
                     seconds(self.space.gap_ms)
@@ -672,11 +1096,32 @@ impl BootCheck {
         }
         if self.records > 0 {
             line(out, format!("all-fresh flag set on {} of {} records", self.fresh, self.records));
+            for r in &self.ranges {
+                line(out, r.line());
+            }
         }
     }
 
     fn json(&self) -> String {
-        let gaps: Vec<String> = self.space.gaps.iter().map(|g| format!("{{\"afterMs\":{},\"ms\":{}}}", g.at_ms, g.len_ms)).collect();
+        // whether a dropped event inside the gap counted more than the last one before it
+        let rose = |g: &Gap| {
+            let before = self.dropped_seen.iter().filter(|(ms, _)| *ms <= g.at_ms).map(|d| d.1).max().unwrap_or(0);
+            self.dropped_seen.iter().any(|(ms, n)| *ms > g.at_ms && *ms <= g.at_ms + g.len_ms && *n > before)
+        };
+        let gaps: Vec<String> = self
+            .space
+            .gaps
+            .iter()
+            .map(|g| format!("{{\"afterMs\":{},\"ms\":{},\"droppedRose\":{}}}", g.at_ms, g.len_ms, rose(g)))
+            .collect();
+        let runs: Vec<String> = self.runs.iter().take(EVENTS_KEPT).map(run_json).collect();
+        let phases: Vec<String> = self.phases.iter().map(Segment::json).collect();
+        let ranges: Vec<String> = self.ranges.iter().map(Range::json).collect();
+        let (end, end_reset) = match &self.end {
+            End::Reset(r) => ("reset", opt_text(r)),
+            End::Pull => ("pull", String::from("null")),
+            End::NotInLog => ("unknown", String::from("null")),
+        };
         let changes: Vec<String> = self
             .space
             .changes
@@ -685,6 +1130,24 @@ impl BootCheck {
             .collect();
         let dropped: Vec<String> = self.dropped_seen.iter().map(|(ms, n)| format!("{{\"ms\":{},\"count\":{}}}", ms, n)).collect();
         let other: Vec<String> = self.other_events.iter().map(|(ms, k)| format!("{{\"ms\":{},\"kind\":{}}}", ms, k)).collect();
+        let system: Vec<String> = self
+            .system
+            .iter()
+            .map(|s| {
+                let (source, what, parts) = s.names();
+                format!(
+                    "{{\"source\":\"{}\",\"what\":\"{}\",\"count\":{},\"records\":{},\"firstMs\":{},\"lastMs\":{},\"parts\":[{}]}}",
+                    source,
+                    what,
+                    s.count,
+                    s.records,
+                    s.first_ms,
+                    s.last_ms,
+                    quoted(&parts)
+                )
+            })
+            .collect();
+        let system_raw: Vec<String> = self.system_raw.iter().map(|(ms, l)| format!("{{\"ms\":{},\"layout\":{}}}", ms, l)).collect();
         let sensors: Vec<String> = self
             .sensors
             .iter()
@@ -706,7 +1169,7 @@ impl BootCheck {
             })
             .collect();
         format!(
-            "{{\"n\":{},\"records\":{},\"firstMs\":{},\"lastMs\":{},\"startUtc\":{},\"anchors\":{},\"anchorsRejected\":{},\"csids\":[{}],\"resetCsr\":{},\"reset\":{},\"hardwareWatchdog\":{},\"dropped\":{},\"droppedEvents\":[{}],\"otherEvents\":[{}],\"fastMs\":{},\"steadyMs\":{},\"gapMs\":{},\"gaps\":[{}],\"spacingChanges\":[{}],\"uptimeBackward\":{},\"sensors\":[{}],\"fresh\":{},\"badPacketCrc\":{},\"verdict\":\"{}\"}}",
+            "{{\"n\":{},\"records\":{},\"firstMs\":{},\"lastMs\":{},\"startUtc\":{},\"anchors\":{},\"anchorsRejected\":{},\"csids\":[{}],\"resetCsr\":{},\"reset\":{},\"hardwareWatchdog\":{},\"dropped\":{},\"droppedEvents\":[{}],\"otherEvents\":[{}],\"systemEvents\":[{}],\"systemRaw\":[{}],\"events\":[{}],\"eventsLeftOut\":{},\"phases\":[{}],\"ranges\":[{}],\"end\":\"{}\",\"endReset\":{},\"fastMs\":{},\"steadyMs\":{},\"gapMs\":{},\"gaps\":[{}],\"spacingChanges\":[{}],\"uptimeBackward\":{},\"sensors\":[{}],\"fresh\":{},\"badPacketCrc\":{},\"verdict\":\"{}\"}}",
             self.n,
             self.records,
             self.first_ms,
@@ -721,6 +1184,14 @@ impl BootCheck {
             self.dropped,
             dropped.join(","),
             other.join(","),
+            system.join(","),
+            system_raw.join(","),
+            runs.join(","),
+            self.runs.len().saturating_sub(EVENTS_KEPT),
+            phases.join(","),
+            ranges.join(","),
+            end,
+            end_reset,
             self.space.fast_ms,
             self.space.steady_ms,
             self.space.gap_ms,
@@ -746,12 +1217,21 @@ fn check_boot(dump: &Dump, b: &dump::BootReport, several_boards: bool) -> BootCh
         .iter()
         .map(|r| (r.ms, decode::hex_to_bytes(&r.hex).map_or_else(|| Err(String::from("not hex")), |bytes| decode::decode(&bytes))))
         .collect();
-    let good: Vec<(u64, [bool; 8])> = packets
-        .iter()
-        .filter_map(|(ms, d)| d.as_ref().ok().filter(|d| d.crc_ok).map(|d| (*ms, d.valid)))
-        .collect();
+    let decoded: Vec<(u64, &Decoded)> = packets.iter().filter_map(|(ms, d)| d.as_ref().ok().filter(|d| d.crc_ok).map(|d| (*ms, d))).collect();
+    let good: Vec<(u64, [bool; 8])> = decoded.iter().map(|(ms, d)| (*ms, d.valid)).collect();
     let mut events: Vec<&dump::Event> = dump.events.iter().filter(|e| e.boot == b.n).collect();
     events.sort_by_key(|e| e.ms);
+    let mut runs: Vec<dump::SystemEvent> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::System(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    runs.sort_by_key(|r| r.first_ms);
+    let end_ms = runs.iter().map(|r| r.last_ms as u64).fold(b.last_ms, u64::max);
+    let phases = phase_segments(&runs, end_ms);
+    let held: Vec<(u64, u64)> = phases.iter().filter(|s| s.held_fix).map(|s| (s.from_ms, s.to_ms)).collect();
     let mut boot = BootCheck {
         n: b.n,
         records: mine.len(),
@@ -778,6 +1258,18 @@ fn check_boot(dump: &Dump, b: &dump::BootReport, several_boards: bool) -> BootCh
                 _ => None,
             })
             .collect(),
+        system: system_sums(&events),
+        system_raw: events
+            .iter()
+            .filter_map(|e| match e.kind {
+                EventKind::SystemRaw { layout, .. } => Some((e.ms, layout)),
+                _ => None,
+            })
+            .collect(),
+        ranges: ranges(&decoded, &held),
+        runs,
+        phases,
+        end: End::NotInLog,
         space: spacing(&ms),
         sensors: sensors(&good),
         fresh: good.iter().filter(|(_, v)| v[FRESH_BIT]).count(),
@@ -794,7 +1286,7 @@ fn check_boot(dump: &Dump, b: &dump::BootReport, several_boards: bool) -> BootCh
 struct PullCheck {
     name: String,
     file: String,
-    from_log: bool,          // read from a ground.log, so no events and no slot counts
+    from_log: bool,          // read from a ground.log, so no slot counts and of the events only the system ones
     uid: Option<String>,
     format: &'static str,
     found: Option<usize>,
@@ -1135,6 +1627,15 @@ fn pull_from(
     let report = dump::report(parsed, bytes, 0);
     let mut boots: Vec<BootCheck> = report.boots.iter().map(|b| check_boot(parsed, b, report.csids.len() > 1)).collect();
     let numbers: Vec<u32> = boots.iter().map(|b| b.n).collect();
+    let resets: HashMap<u32, Option<String>> = boots.iter().map(|b| (b.n, b.reset.clone())).collect();
+    let newest = numbers.iter().max().copied();
+    for b in &mut boots {
+        b.end = match resets.get(&(b.n + 1)) {
+            Some(reset) => End::Reset(reset.clone()),
+            None if Some(b.n) == newest => End::Pull,
+            None => End::NotInLog,
+        };
+    }
     boots.sort_by_key(|b| std::cmp::Reverse(b.rank()));
     let kept = parsed.records.len() + parsed.anchors.len() + parsed.events.len();
     PullCheck {
@@ -1192,6 +1693,13 @@ fn check_flash_log(name: &str, file: &str, text: &str, bytes: usize) -> PullChec
                 })
             }
             (Kind::Device { .. }, _) => continue,
+            (Kind::Other, Some(boot)) => {
+                if let Some((ms, kind)) = dump::system_from_line(l.text) {
+                    parsed.events.push(dump::Event { boot, ms, kind });
+                    continue;
+                }
+                None
+            }
             _ => None,
         };
         match row {
@@ -2332,5 +2840,234 @@ I BOOT 0 c0: start test=flashdump\r\n";
         assert_eq!(run(&[String::from("--nope"), String::from("x")]), 1);
         assert_eq!(run(&[]), 1);
         assert_eq!(run(&[String::from("--help")]), 0);
+    }
+
+    fn system(n: u64, boot: u16, ms: u32, source: u8, what: u8, part: u8, reason: u8, count: u16, first: u32, last: u32) -> String {
+        system_detail(n, boot, ms, [source, what, part, reason], count, first, last, 0)
+    }
+
+    fn system_detail(n: u64, boot: u16, ms: u32, codes: [u8; 4], count: u16, first: u32, last: u32, detail: u32) -> String {
+        let mut p = vec![0x10, 1];
+        p.extend_from_slice(&codes);
+        p.extend_from_slice(&count.to_le_bytes());
+        p.extend_from_slice(&first.to_le_bytes());
+        p.extend_from_slice(&last.to_le_bytes());
+        p.extend_from_slice(&detail.to_le_bytes());
+        raw(n, 0xA7, boot, ms, &p)
+    }
+
+    // A record with the barometer altitude in cm, the GPS altitude in mm and x acceleration in cm/s2
+    fn reading_rec(n: u64, boot: u16, ms: u32, validity: u8, env_cm: i32, gps_mm: i32, ax: i16) -> String {
+        let mut p = packet(0, 17, validity);
+        p[8..12].copy_from_slice(&gps_mm.to_le_bytes());
+        p[12..16].copy_from_slice(&env_cm.to_le_bytes());
+        p[16..18].copy_from_slice(&ax.to_le_bytes());
+        let crc = dump::crc16(&p[..53]);
+        p[53..].copy_from_slice(&crc.to_le_bytes());
+        raw(n, 0xA5, boot, ms, &p)
+    }
+
+    const PHASE: u8 = 3;
+    const BUS: u8 = 2;
+
+    #[test]
+    fn system_event_runs_are_listed_by_when_they_began_in_words() {
+        let text = [
+            rec(0, 0, 1000, ALL_SET),
+            system_detail(1, 0, 9000, [BUS, 2, 1, 1], 2, 922, 930, 0x4A),
+            system(2, 0, 9100, 1, 6, 2, 0, 1, 5000, 5000),
+            system_detail(3, 0, 9200, [1, 6, 2, 0], 1, 300, 300, 8663),
+            rec(4, 0, 9300, ALL_SET),
+            found(5),
+        ]
+        .concat();
+        let p = pull(&text);
+        let b = &p.boots[0];
+        assert_eq!(b.runs.iter().map(|r| r.first_ms).collect::<Vec<u32>>(), vec![300, 922, 5000]);
+        let printed = printed(&p);
+        assert!(
+            printed.contains("event up=922 to 930 ms bus jam on imu, sdalow (SDA low), 2 times, address 0x4A the last time: a bus line was low right after a transfer, blamed on that address\n"),
+            "{}",
+            printed
+        );
+        assert!(printed.contains("event up=300 to 300 ms sensor ok on env, bad for 8.7 s: a good reading again\n"), "{}", printed);
+        let json = p.json();
+        assert!(
+            json.contains("\"events\":[{\"firstMs\":300,\"lastMs\":300,\"count\":1,\"source\":\"sensor\",\"what\":\"ok\",\"part\":\"env\",\"reason\":\"none\",\"detail\":8663,\"detailWords\":\"bad for 8.7 s\",\"meaning\":\"a good reading again\",\"reasonMeaning\":null},"),
+            "{}",
+            json
+        );
+        assert!(json.contains("\"eventsLeftOut\":0"), "{}", json);
+    }
+
+    #[test]
+    fn a_boot_without_phase_events_has_no_phases_whatever_its_spacing() {
+        // fast, then a steady 5 s, then fast again: the spacing says air and ground, the log says nothing
+        let ms = [0, 50, 100, 5100, 10_100, 15_100, 20_100, 20_150, 20_200];
+        let mut text: Vec<String> = ms.iter().enumerate().map(|(i, t)| rec(i as u64, 0, 1000 + t, ALL_SET)).collect();
+        text.push(found(ms.len()));
+        let p = pull(&text.concat());
+        let b = &p.boots[0];
+        assert!(!b.space.changes.is_empty());
+        assert!(b.phases.is_empty());
+        assert!(printed(&p).contains("no phase events in this boot. Firmware from before 2026-11-06 wrote none\n"), "{}", printed(&p));
+        assert!(p.json().contains("\"phases\":[]"));
+    }
+
+    #[test]
+    fn phases_follow_the_phase_events_and_asleep_holds_the_fix() {
+        let text = [
+            reading_rec(0, 0, 1000, GPS, 0, 100_000, 0),
+            system(1, 0, 40_000, PHASE, 4, 1, 2, 1, 37_004, 37_004),
+            system(2, 0, 45_000, PHASE, 5, 1, 9, 1, 41_000, 41_000),
+            system(3, 0, 60_000, PHASE, 1, 1, 1, 1, 50_000, 50_000),
+            reading_rec(4, 0, 55_000, GPS, 0, 300_000, 0),
+            system(5, 0, 95_000, PHASE, 2, 1, 2, 1, 90_000, 90_000),
+            system_detail(6, 0, 130_000, [PHASE, 7, 4, 10], 1, 125_000, 125_000, 2400),
+            reading_rec(7, 0, 140_000, GPS, 0, 999_000, 0),
+            system(8, 0, 160_000, PHASE, 8, 1, 9, 1, 150_000, 150_000),
+            reading_rec(9, 0, 170_000, GPS, 0, 120_000, 0),
+            found(10),
+        ]
+        .concat();
+        let p = pull(&text);
+        let b = &p.boots[0];
+        let phases: Vec<(u64, u64, &str, bool)> = b.phases.iter().map(|s| (s.from_ms, s.to_ms, s.phase, s.held_fix)).collect();
+        assert_eq!(
+            phases,
+            vec![
+                (0, 37_004, "boot-air", false),
+                (37_004, 50_000, "ground", false),
+                (50_000, 90_000, "air", false),
+                (90_000, 125_000, "landed, looking for a fix", false),
+                (125_000, 150_000, "landed, asleep", true),
+                (150_000, 170_000, "landed, looking for a fix", false),
+            ],
+            "imufast changes no phase"
+        );
+        let gps_alt = b.ranges.iter().find(|r| r.key == "gpsAlt").unwrap();
+        assert_eq!((gps_alt.lo, gps_alt.hi, gps_alt.set, gps_alt.held), (Some((100.0, 1000)), Some((300.0, 55_000)), 3, 1));
+        let text = printed(&p);
+        assert!(text.contains("phases, from the phase events: boot-air from up=0 ms, ground from up=37004 ms (bootairend, quiet), "), "{}", text);
+        assert!(text.contains("event up=125000 to 125000 ms phase asleep on gps, goodfix (enough good fixes in a row), hAcc 2400 mm: "), "{}", text);
+        assert!(text.contains("GPS altitude: 100 m at up=1000 ms to 300 m at up=55000 ms, of 3 readings with the gps flag set, 1 on a held fix left out\n"), "{}", text);
+        let json = p.json();
+        assert!(json.contains("{\"fromMs\":125000,\"toMs\":150000,\"phase\":\"landed, asleep\",\"by\":\"asleep\",\"reason\":\"goodfix\",\"count\":1,\"heldFix\":true}"), "{}", json);
+    }
+
+    #[test]
+    fn ranges_count_only_readings_with_their_flag_set() {
+        let no_gps = ALL_SET & !GPS;
+        let text = [
+            reading_rec(0, 0, 1000, no_gps, 23_331, 0, 300),
+            reading_rec(1, 0, 1050, no_gps & !0x40, 9_000_000, 0, 300),
+            reading_rec(2, 0, 1100, no_gps, 25_000, 0, -1250),
+            reading_rec(3, 0, 1150, no_gps & !0x01, 23_000, 0, 7000),
+            found(4),
+        ]
+        .concat();
+        let p = pull(&text);
+        let r = |key: &str| p.boots[0].ranges.iter().find(|r| r.key == key).unwrap().clone();
+        let env = r("envAlt");
+        assert_eq!((env.lo, env.hi, env.set, env.clear), (Some((230.0, 1150)), Some((250.0, 1100)), 3, 1));
+        let accel = r("accel");
+        assert_eq!((accel.lo, accel.hi, accel.set, accel.clear), (Some((3.0, 1000)), Some((12.5, 1100)), 3, 1));
+        assert_eq!((r("gpsAlt").set, r("gpsAlt").lo), (0, None), "the GPS flag is clear on every record");
+        let json = p.json();
+        assert!(json.contains("{\"key\":\"envAlt\",\"words\":\"barometer altitude\",\"unit\":\"m\",\"flag\":\"env\",\"min\":230,\"minMs\":1150,\"max\":250,\"maxMs\":1100,\"set\":3,\"clear\":1,\"heldFix\":0}"), "{}", json);
+        assert!(printed(&p).contains("GPS altitude: no reading with the gps flag set, 4 with it clear\n"), "{}", printed(&p));
+    }
+
+    #[test]
+    fn a_boot_ends_with_the_next_ones_reset_and_the_last_with_the_pull() {
+        let text = [
+            event(0, 0, 300, 1, PIN_BOR_SFT),
+            rec(1, 0, 1000, ALL_SET),
+            event(2, 1, 300, 1, PIN_IWDG),
+            event(3, 3, 300, 1, PIN_BOR_SFT),
+            rec(4, 3, 1000, ALL_SET),
+            found(5),
+        ]
+        .concat();
+        let p = pull(&text);
+        let end = |n: u32| p.boots.iter().find(|b| b.n == n).unwrap().end.clone();
+        assert_eq!(end(0), End::Reset(Some(String::from("PIN+IWDG"))));
+        assert_eq!(end(1), End::NotInLog, "boot 2 is not in the log");
+        assert_eq!(end(3), End::Pull);
+        assert_eq!(p.boots.iter().find(|b| b.n == 1).unwrap().records, 0, "a boot with only its reset is still a boot");
+        let json = p.json();
+        assert!(json.contains("\"end\":\"pull\",\"endReset\":null"), "{}", json);
+        assert!(json.contains("\"end\":\"reset\",\"endReset\":\"PIN+IWDG\""), "{}", json);
+        assert!(printed(&p).contains("ended when the board was restarted for the pull\n"));
+    }
+
+    #[test]
+    fn a_gap_says_whether_the_dropped_count_rose_in_it() {
+        let text = [
+            rec(0, 0, 1000, ALL_SET),
+            event(1, 0, 1020, 3, 4),
+            rec(2, 0, 1050, ALL_SET),
+            event(3, 0, 3000, 3, 30),
+            rec(4, 0, 5050, ALL_SET),
+            rec(5, 0, 9050, ALL_SET),
+            found(6),
+        ]
+        .concat();
+        let json = pull(&text).json();
+        assert!(json.contains("{\"afterMs\":1050,\"ms\":4000,\"droppedRose\":true}"), "{}", json);
+        assert!(json.contains("{\"afterMs\":5050,\"ms\":4000,\"droppedRose\":false}"), "{}", json);
+    }
+
+    fn storm_text() -> String {
+        [
+            event(0, 0, 3700, 1, PIN_BOR_SFT),
+            rec(1, 0, 4122, ALL_SET),
+            system(2, 0, 35000, 1, 1, 1, 2, 101, 4000, 34000),
+            system(3, 0, 36000, 3, 1, 1, 1, 1, 30500, 30500),
+            system(4, 0, 65000, 1, 1, 1, 2, 99, 34300, 64000),
+            system(5, 0, 66000, 1, 1, 4, 7, 1, 60000, 60000),
+            system(6, 0, 70000, 1, 3, 1, 2, 2, 20000, 50000),
+            rec(7, 0, 70100, ALL_SET),
+            found(8),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn system_events_are_summed_by_source_and_what_worst_first() {
+        let p = pull(&storm_text());
+        let b = &p.boots[0];
+        let lines: Vec<(String, String, u64, usize, u32, u32)> = b
+            .system
+            .iter()
+            .map(|s| {
+                let (source, what, _) = s.names();
+                (source, what, s.count, s.records, s.first_ms, s.last_ms)
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                ("sensor".into(), "retry".into(), 201, 3, 4000, 64000),
+                ("sensor".into(), "reset".into(), 2, 1, 20000, 50000),
+                ("phase".into(), "toair".into(), 1, 1, 30500, 30500),
+            ]
+        );
+        let text = printed(&p);
+        assert!(text.contains("system sensor retry: 201 times in 3 records, up=4000 to 64000 ms, on imu gps\n"), "{}", text);
+        assert!(text.find("system sensor retry").unwrap() < text.find("system phase toair").unwrap(), "{}", text);
+        let json = p.json();
+        assert!(json.contains("\"systemEvents\":[{\"source\":\"sensor\",\"what\":\"retry\",\"count\":201,\"records\":3,\"firstMs\":4000,\"lastMs\":64000,\"parts\":[\"imu\",\"gps\"]},"), "{}", json);
+        assert!(json.contains("\"systemRaw\":[]"), "{}", json);
+        assert_eq!(b.other_events, vec![]);
+    }
+
+    #[test]
+    fn a_ground_log_made_from_a_pull_keeps_its_system_events() {
+        let parsed = dump::parse(&storm_text());
+        let log = dump::to_log(&parsed, "ttyACM0");
+        let from_log = check_flash_log("x", "ground.log", &log, log.len());
+        assert_eq!(from_log.unread, 0, "{:?}", from_log.samples);
+        assert_eq!(from_log.boots[0].system, pull(&storm_text()).boots[0].system);
     }
 }

@@ -1,0 +1,52 @@
+/* Analysis. Only selectors under #screen-analysis; a class another screen needs goes in style.css */
+
+#screen-analysis .sheet-head { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 6px; padding: 14px 24px 16px; }
+#screen-analysis .sheet-head .top { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; min-width: 0; }
+#screen-analysis .sheet-head .acts { margin-left: auto; }
+#screen-analysis .sheet-head p { margin: 0; overflow-wrap: anywhere; }
+#screen-analysis .sheet-head .kicker { margin-right: 6px; }
+
+#screen-analysis .pane > h3 .note { flex: 1 1 320px; }
+#screen-analysis .an-wrap { overflow-x: auto; padding: 0 22px 8px; }
+#screen-analysis .an-wrap .grid td { vertical-align: top; }
+#screen-analysis .an-wrap .grid td.wrap { white-space: normal; min-width: 14ch; }
+#screen-analysis .an-wrap .grid td .note { font-size: var(--t-note); }
+#screen-analysis .boots tr.sel td { background: var(--color-surface); }
+#screen-analysis .boots tbody tr { cursor: pointer; }
+#screen-analysis .boots .expander { font-size: var(--t-body); }
+#screen-analysis .an-boots { padding-bottom: 10px; }
+
+#screen-analysis .an-boot { padding-bottom: 8px; }
+#screen-analysis .an-part { padding: 4px 22px 12px; }
+#screen-analysis .an-part > h4 { font: 600 11px/1.3 var(--font-body); text-transform: uppercase; letter-spacing: .08em; color: var(--color-accent-2-700); margin: 0 0 8px; }
+#screen-analysis .an-part > .an-wrap { padding: 0; }
+#screen-analysis .an-part > .note { margin: 6px 0 0; }
+#screen-analysis .an-part ul, #screen-analysis .an-part ol { margin: 0; padding-left: 20px; font-size: var(--t-label); line-height: 1.6; }
+
+/* The phases as the phase events cut them, sized by uptime, each one named */
+#screen-analysis .lane { position: relative; height: 34px; border-radius: var(--radius-sm); overflow: hidden; background: var(--color-neutral-200); }
+#screen-analysis .lane .seg {
+  position: absolute; top: 0; bottom: 0; display: flex; align-items: center; min-width: 2px; padding: 0 8px;
+  background: var(--color-neutral-300); border-right: 2px solid var(--color-neutral-100); overflow: hidden;
+}
+#screen-analysis .lane .seg:nth-child(even) { background: var(--color-neutral-400); }
+#screen-analysis .lane .seg.held {
+  background: repeating-linear-gradient(135deg, var(--color-neutral-300) 0 6px, var(--color-neutral-200) 6px 12px);
+}
+#screen-analysis .lane .seg span { font: 600 12.5px/1 var(--font-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#screen-analysis .lane .tick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--color-text); }
+#screen-analysis .an-part .phaselist { margin-top: 8px; }
+
+/* A validity flag over the boot's records: dark where it was clear */
+#screen-analysis .flags { display: grid; grid-template-columns: 52px minmax(120px, 1fr) minmax(0, 1.3fr); gap: 6px 12px; align-items: center; font-size: var(--t-label); }
+#screen-analysis .flag { display: contents; }
+#screen-analysis .flag .strip { position: relative; height: 12px; border-radius: 6px; overflow: hidden; background: var(--color-neutral-200); }
+#screen-analysis .flag .strip .off { position: absolute; top: 0; bottom: 0; background: var(--color-neutral-700); }
+
+@media (max-width: 700px) {
+  #screen-analysis .sheet-head { padding: 14px 16px; }
+  #screen-analysis .an-wrap { padding: 0 16px 8px; }
+  #screen-analysis .an-part { padding: 4px 16px 12px; }
+  #screen-analysis .flags { grid-template-columns: 52px minmax(0, 1fr); }
+  #screen-analysis .flag .note { grid-column: 1 / -1; margin-bottom: 4px; }
+}

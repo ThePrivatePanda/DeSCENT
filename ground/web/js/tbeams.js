@@ -82,7 +82,8 @@
       warn = true;
       text = 'Flashed. Asked for SF' + ask.sf + (ask.back ? ', waiting for its header to say so.' : ', waiting for the board to come back.');
     } else if (ask.state === 'heard') {
-      text = 'Flashed. SF' + ask.sf + ' confirmed at ' + clockS(ask.heardAt) + '.';
+      text = ask.chip ? 'Flashed. SF' + ask.sf + ' confirmed at ' + clockS(ask.heardAt) + '.'
+        : 'Flashed. SF' + ask.sf + ' said by the board at ' + clockS(ask.heardAt) + '; its firmware does not read the radio chip back.';
     } else {
       bad = true;
       text = 'Flashed. ' + ask.said + '.';
@@ -109,11 +110,14 @@
         if (A.sfAsks) A.sfAsks.set(rx, ask);
       }
       if (ask.state !== 'asked') { flashOutcome(port.port); return; }
-      const m = /,sf=(\d+)/.exec(line);
-      const sf = m ? Number(m[1]) : NaN;
-      if (sf !== ask.sf) { ask.heardSf = sf; flashOutcome(port.port); return; }
-      ask.state = 'heard'; ask.heardAt = t;
-      ask.said = ask.name + ' is listening on SF' + sf;
+      const said = B.headerSf(line);
+      if (said.sf !== ask.sf || !said.listening) {
+        ask.heardSf = said.sf; ask.deaf = !said.listening;
+        flashOutcome(port.port);
+        return;
+      }
+      ask.state = 'heard'; ask.heardAt = t; ask.chip = said.chip;
+      ask.said = said.chip ? ask.name + ' is listening on SF' + said.sf : ask.name + ' says it is on SF' + said.sf;
       toast(ask.said);
     } else return;
     flashOutcome(port.port);
@@ -128,6 +132,7 @@
       if (now - (ask.back || ask.at) <= limit) continue;
       ask.state = 'silent';
       ask.said = !ask.back ? 'SF' + ask.sf + ' not confirmed: no header from the board in ' + (limit / 1000) + ' s'
+        : ask.deaf ? 'SF' + ask.sf + ' not confirmed: the board\'s radio is not in receive'
         : Number.isFinite(ask.heardSf) ? 'SF' + ask.sf + ' not confirmed: the board\'s header still says SF' + ask.heardSf
           : 'SF' + ask.sf + ' not confirmed: no header said so in ' + (limit / 1000) + ' s';
       toast(ask.name + ': ' + ask.said);
@@ -276,11 +281,16 @@
     const ask = A.sfAsks ? A.sfAsks.get(key) : null;
     const hears = ' It hears only boards on this spreading factor.';
     const hint = (words) => '<span class="hint">' + words + hears + '</span>';
+    if (String(info.rx) === '0') return mark('bad', 'not listening') + hint("The board's radio chip says it is not in receive.");
+    if (info.sfchip !== undefined && Number(info.sfchip) !== Number(info.sf)) {
+      return mark('bad', 'radio on SF' + esc(info.sfchip)) + hint('The firmware says SF' + esc(info.sf) + ' but its radio chip is on SF' + esc(info.sfchip) + '.');
+    }
     if (!ask) return hint("The board's own report. A change is asked of it and counts only when its header says so.");
     if (ask.state === 'asked') return mark('warn', 'asked for SF' + ask.sf) + hint('Asked for SF' + ask.sf + ' at ' + clockS(ask.at) + ". Waiting for the board's header.");
     if (ask.state === 'heard') {
       if (Number(info.sf) !== ask.sf) return hint("The board's own report. A change is asked of it and counts only when its header says so.");
-      return mark('good', 'confirmed') + hint("The board's header confirmed SF" + ask.sf + ' at ' + clockS(ask.heardAt || ask.at) + '.');
+      if (!ask.chip) return mark('warn', 'said, chip not read') + hint("The board's header said SF" + ask.sf + ' at ' + clockS(ask.heardAt || ask.at) + '; its firmware does not read the radio chip back.');
+      return mark('good', 'confirmed') + hint("The board's radio chip confirmed SF" + ask.sf + ' at ' + clockS(ask.heardAt || ask.at) + '.');
     }
     const word = ask.state === 'refused' ? 'refused SF' + ask.sf : ask.state === 'failed' ? 'SF' + ask.sf + ' not sent' : 'SF' + ask.sf + ' not confirmed';
     return mark('bad', word) + hint(esc(ask.said) + '.' + (ask.state === 'refused' ? ' The board answered #DG,ERR,sf.' : ''));

@@ -310,6 +310,20 @@
       return answered(await fetch('/api/fsw'));
     }
 
+    // Every pull folder, newest first, the ones that read nothing too.
+    async pulls() {
+      const r = await fetch('/api/pulls');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return (await r.json()).pulls || [];
+    }
+
+    // What the app reads off a pull's dump.txt or a log, by its name from the data folder down.
+    async check(name) {
+      const r = await fetch('/api/check/' + String(name).split('/').map(encodeURIComponent).join('/'));
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+      return r.json();
+    }
+
     // A pull's report.json, by the name logs() gives the pull's folder.
     async report(name) {
       const r = await fetch('/api/log/' + String(name).split('/').map(encodeURIComponent).join('/'));

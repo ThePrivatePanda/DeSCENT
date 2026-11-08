@@ -18,6 +18,7 @@ function page(scripts, hub, o) {
   const heard = [];
   const toasts = [];
   const asks = [];   // [rx key, sf] handed to the app's askSf
+  const opened = [];   // [name, more] handed to the app's openServerLog
   const el = (id) => (els[id] = els[id] || {
     id, html: '', dataset: {}, style: {},
     focus() {},
@@ -39,6 +40,7 @@ function page(scripts, hub, o) {
   sandbox.DGApp = {
     hub, live: { receivers: new Map() }, taps: [], packetTaps: [],
     sfAsks: new Map(), askSf: (k, sf) => { asks.push([k, Number(sf)]); },
+    openServerLog: (name, more) => { opened.push([name, more]); },
     ui: { $: el, esc, toast: (t) => toasts.push(t), logUrl: (n) => n, flatName: (n) => n, age: () => '', sfSelect: () => '' },
     shell: {
       paint: (e, html) => { e.html = html; },
@@ -57,7 +59,7 @@ function page(scripts, hub, o) {
     { getAttribute: (n) => (n in attrs ? attrs[n] : null), closest: () => null, blur() {}, tagName: 'BUTTON' }, more || {});
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    parts, jobs, toasts, asks, sfAsks: sandbox.DGApp.sfAsks, settle, target, storage, taps: sandbox.DGApp.taps, packetTaps: sandbox.DGApp.packetTaps, shell: sandbox.DGApp.shell,
+    parts, jobs, toasts, asks, opened, sfAsks: sandbox.DGApp.sfAsks, settle, target, storage, taps: sandbox.DGApp.taps, packetTaps: sandbox.DGApp.packetTaps, shell: sandbox.DGApp.shell,
     el, html: (id) => el(id).html,
     // What a person reads: tags out, entities back, runs of space as one
     text: (id) => el(id).html.replace(/<[^>]*>/g, ' ')

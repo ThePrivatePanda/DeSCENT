@@ -40,6 +40,9 @@ Settings changed with `#SET` are kept in flash (NVS namespace `dgrx`) and come b
 
 ## Versions
 
+* 1.2.2 - the header ends `,sfchip=<n>,rx=<0|1>`, read off the SX1276 after the radio is back in
+  receive: the factor the chip itself is on and whether it is in continuous receive. A `#SET,sf` the
+  chip didn't take answers `#DG,ERR,sf`. The app confirms a factor only from these when they are there
 * 1.2.1 - the header ends `,fw=<version>`, so a receiver says which build it is running instead of
   being guessed at from which keys it carries. A board that sends no `fw=` is 1.1.0 or older
 * 1.2.0 - a name can be bound to the board's id, kept in NVS, shown on the screen's top line. The
