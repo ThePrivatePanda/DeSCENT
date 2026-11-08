@@ -26,6 +26,7 @@ public:
   // recover() runs a due clear, true if it did. Health calls it at most once a pass
   bool recover(uint32_t nowMs);
   bool faulted(uint32_t nowMs) const;
+  bool imuResetDue(uint32_t nowMs) const;   // Health pulses the IMU's NRST before recover() then
 
   // The libraries need the Wire object itself
   TwoWire &arduinoWire();

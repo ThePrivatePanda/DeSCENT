@@ -478,6 +478,21 @@ Status Radio::finishTransmit()
   return status;
 }
 
+// Whether every register begin wrote survives a warm sleep (sync word, IQ, clamp, OCP) is not
+// checked on this chip yet
+Status Radio::sleep()
+{
+  startCall();
+  if (!ready) {
+    return Status::NotReady;
+  }
+  Status status = Status::Ok;
+  const uint8_t warm = kRadioSleepWarmStart;
+  command(status, "sleep", RADIO_SET_SLEEP, &warm, 1);
+  lastCode_ = status == Status::Ok ? 0 : lastError;
+  return status;
+}
+
 uint8_t Radio::headerType()
 {
   return radioSettings().spreadingFactor <= 6 ? kRadioHeaderImplicit : kRadioHeaderExplicit;

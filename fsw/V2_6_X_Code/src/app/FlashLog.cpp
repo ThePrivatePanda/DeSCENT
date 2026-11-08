@@ -8,6 +8,7 @@ using ChipSatPlatform::Status;
 using ChipSatTelemetry::calculateCRC16;
 using namespace ChipSatConstants;
 using namespace ChipSatConfig;
+using namespace ChipSatLog;
 
 static_assert(sizeof(ChipSatTelemetry::TelemetryPacket) == kLogCrcOffset - kLogPacketOffset, "the packet fills bytes 7-61");
 static_assert(kFlashPageSize % kLogRecordSize == 0, "a record can't cross a page, the chip would wrap it");
@@ -239,6 +240,8 @@ bool FlashLog::eraseRunning()
       return true;
     }
     ready_ = false;
+    poolSystem({kSourceFlash, kFlashEraseStuck, kPartFlash, 0, erasingSector_, system_.nowMs()});
+    poolSystem({kSourceFlash, kFlashStopped, kPartFlash, 0, used_, system_.nowMs()});
   } else {
     prepared_ = erasingSector_;
   }
@@ -305,9 +308,9 @@ bool FlashLog::holding() const
   return false;
 }
 
-// A full ring drops its oldest, counted unless the ground had let it go anyway. On the ground only
-// one packet per gap and the time and event records are kept, none with a gap of 0 except the boot
-// event
+// A full ring drops its oldest, counted unless the ground had let it go anyway. On the ground a gap
+// only thins the packet records to one per gap; the time and event records are always kept, and with
+// a gap of 0 every packet too
 void FlashLog::push(const uint8_t *bytes)
 {
   if (ringPending_ == kRing) {
@@ -318,12 +321,9 @@ void FlashLog::push(const uint8_t *bytes)
     --ringPending_;
   }
   const uint32_t uptimeMs = get32(&bytes[kLogUptimeOffset]);
-  bool keep = air_ || groundGapMs_ != 0;
-  if (bytes[0] == kLogTypeEvent && bytes[kLogEventKindOffset] == kLogEventBoot) {
-    keep = true;
-  }
+  bool keep = true;
   if (bytes[0] == kLogTypePacket) {
-    keep = air_ || (groundGapMs_ != 0 && (!keptAny_ || uptimeMs - keptMs_ >= groundGapMs_));
+    keep = air_ || groundGapMs_ == 0 || !keptAny_ || uptimeMs - keptMs_ >= groundGapMs_;
     if (keep) {
       keptAny_ = true;
       keptMs_ = uptimeMs;
@@ -337,15 +337,17 @@ void FlashLog::push(const uint8_t *bytes)
 }
 
 // At most kLogDrainPerCall records a call. On the ground it waits until a record is about to leave
-// the ring, kLogRingSlackRecords early so an erase doesn't cost a kept one
+// the ring, kLogRingSlackRecords early so an erase doesn't cost a kept one. With a ground gap of 0
+// every record is kept, so there is nothing to wait for: holding them only lost the last 29 s to a
+// reset (board 18, 2026-11-06, pulled 9 s after boot-air ended with nothing on the chip)
 Status FlashLog::drain()
 {
   Status result = Status::Ok;
   uint8_t written = 0;
   while (ringPending_ > 0 && written < kLogDrainPerCall) {
     const uint16_t at = oldestSlot();
-    if (dragging_) {
-      if (ringPending_ < kRing - kLogRingSlackRecords) {
+    if (dragging_ && groundGapMs_ != 0) {
+      if (!landed_ && ringPending_ < kRing - kLogRingSlackRecords) {
         break;
       }
       if (!kept(at)) {
@@ -365,6 +367,13 @@ Status FlashLog::drain()
   }
   if (!air_ && ringPending_ == 0) {
     dragging_ = true;   // caught up after the air
+  }
+  // after the loop, since pooling can push and the loop holds a slot of the ring
+  if (result != Status::Ok && result != Status::NotReady) {
+    poolSystem({kSourceFlash, kFlashWriteFail, kPartFlash, static_cast<uint8_t>(result), next_, system_.nowMs()});
+    if (!ready_) {
+      poolSystem({kSourceFlash, kFlashStopped, kPartFlash, 0, used_, system_.nowMs()});
+    }
   }
   return result;
 }
@@ -436,6 +445,70 @@ Status FlashLog::appendEvent(uint8_t kind, uint32_t uptimeMs, const uint8_t *dat
   return appendBytes(bytes);
 }
 
+// Into the ring only, drain() writes it. Before begin() and after the log stopped it's lost, the
+// console line is all there is then
+void FlashLog::writeSystem(SystemRun &run)
+{
+  const SystemEvent &e = run.last;
+  uint8_t data[19] = {kLogSystemLayout, e.source, e.what, e.part, e.reason};
+  put16(&data[5], run.count);
+  put32(&data[7], run.firstMs);
+  put32(&data[11], e.ms);
+  put32(&data[15], e.detail);
+  run.count = 0;
+  if (!ready_) {
+    return;
+  }
+  uint8_t bytes[kLogRecordSize];
+  eventBytes(kLogEventSystem, system_.nowMs(), data, sizeof data, bytes);
+  push(bytes);
+}
+
+void FlashLog::poolSystem(const SystemEvent &event)
+{
+  for (SystemRun &run : runs_) {
+    if (run.count != 0 && run.last.source == event.source && run.last.what == event.what &&
+        run.last.part == event.part && run.last.reason == event.reason) {
+      if (event.ms - run.last.ms < kLogSystemQuietMs && run.count < 0xFFFF) {
+        ++run.count;
+        run.last = event;
+        return;
+      }
+      writeSystem(run);
+      break;
+    }
+  }
+  SystemRun *at = &runs_[0];
+  for (SystemRun &run : runs_) {
+    if (run.count == 0) {
+      at = &run;
+      break;
+    }
+    if (static_cast<int32_t>(run.firstMs - at->firstMs) < 0) {
+      at = &run;
+    }
+  }
+  if (at->count != 0) {
+    writeSystem(*at);   // the table is full, the oldest goes early
+  }
+  at->last = event;
+  at->firstMs = event.ms;
+  at->count = 1;
+}
+
+// true if anything went into the ring
+bool FlashLog::flushSystem(uint32_t nowMs)
+{
+  bool wrote = false;
+  for (SystemRun &run : runs_) {
+    if (run.count != 0 && (nowMs - run.last.ms >= kLogSystemQuietMs || nowMs - run.firstMs >= kLogSystemRunMs)) {
+      writeSystem(run);
+      wrote = true;
+    }
+  }
+  return wrote;
+}
+
 Status FlashLog::appendBytes(const uint8_t *bytes)
 {
   eraseRunning();
@@ -468,8 +541,12 @@ Status FlashLog::ensureSpace()
     return written;
   }
 
-  // Dropped count goes in the log too
   const uint32_t now = system_.nowMs();
+  if (flushSystem(now)) {
+    drain();
+  }
+
+  // Dropped count goes in the log too
   if (dropped_ != droppedLogged_ && now - droppedEventMs_ >= kLogDroppedEventMs) {
     uint8_t data[4];
     put32(data, dropped_);

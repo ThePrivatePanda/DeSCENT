@@ -182,27 +182,24 @@ file(MAKE_DIRECTORY "${DEPS}")
 # The settings block is a const object that nothing but the firmware's own startup reads, and the
 # link runs with --gc-sections. Stop calling it and the linker quietly deletes it from the image, so
 # a build still succeeds and a tool flashing that image finds no block to configure. That happened
-# once; this is here so it cannot happen quietly again
-function(check_settings_block bin)
+# once; this is here so it cannot happen quietly again. The dump sketch's console baud is patched the
+# same way and is checked the same way
+function(check_one_copy bin magic what why)
   if(NOT EXISTS "${bin}")
     return()
   endif()
   execute_process(COMMAND python3 -c
-    "import sys;m=bytes([0x5A,0xA5,0x43,0x48,0x49,0x50,0x53,0x41,0x54,0x43,0x46,0x47,0x5A,0xA5,0x7B,0x3C]);b=open(sys.argv[1],'rb').read();n=0;i=b.find(m)
+    "import sys;m=bytes.fromhex(sys.argv[2]);b=open(sys.argv[1],'rb').read();n=0;i=b.find(m)
 while i!=-1:
  n+=1;i=b.find(m,i+1)
 print(n)"
-    "${bin}" OUTPUT_VARIABLE found OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE rc)
+    "${bin}" "${magic}" OUTPUT_VARIABLE found OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE rc)
   if(NOT rc EQUAL 0)
-    message("could not check the settings block (python3 missing?), carrying on")
+    message("could not check the ${what} (python3 missing?), carrying on")
     return()
   endif()
   if(NOT found EQUAL 1)
-    message(FATAL_ERROR
-      "the image holds ${found} copies of the settings block and it must hold exactly one. "
-      "None means the linker dropped it because nothing reads it any more - check that "
-      "ChipSatSettings::begin() is still called. More than one means something compares against "
-      "the magic instead of validating the CRC, and a tool would not know which copy to write")
+    message(FATAL_ERROR "the image holds ${found} copies of the ${what} and it must hold exactly one. ${why}")
   endif()
 endfunction()
 
@@ -379,9 +376,17 @@ if(NOT rc EQUAL 0)
   message(FATAL_ERROR "build failed")
 endif()
 if(SKETCH_NAME)
+  if(SKETCH_NAME STREQUAL "flash_dump")
+    check_one_copy("${BUILD}/chipsat.bin" 5AA544554D50424155445AA53C7B6E19 "console baud"
+      "None means the linker dropped it because setup() no longer reads consoleBaud, and the ground \
+software could not set the rate it pulls at")
+  endif()
   message("built ${BUILD}/chipsat.elf, which is the ${SKETCH_NAME} bench sketch, not the flight software")
 else()
-  check_settings_block("${BUILD}/chipsat.bin")
+  check_one_copy("${BUILD}/chipsat.bin" 5AA5434849505341544346475AA57B3C "settings block"
+    "None means the linker dropped it because nothing reads it any more - check that \
+ChipSatSettings::begin() is still called. More than one means something compares against \
+the magic instead of validating the CRC, and a tool would not know which copy to write")
   message("built ${BUILD}/chipsat.elf, the flight software")
 endif()
 

@@ -25,6 +25,10 @@ public:
   ChipSatPlatform::Status startTransmit(const uint8_t *data, size_t length);
   bool transmitDone();
   ChipSatPlatform::Status finishTransmit();   // clears the flags, back to standby
+
+  // Warm sleep between packets. The HAL wakes it before any command after (stm32wlxx_hal_subghz.c,
+  // SUBGHZ_CheckDeviceReady), startTransmit's standby included
+  ChipSatPlatform::Status sleep();
   uint32_t timeOnAirMs(size_t length);
   uint8_t headerType();   // explicit from SF7 up, none below: the receiver cannot read one there
 

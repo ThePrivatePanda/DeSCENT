@@ -5,6 +5,8 @@
 #include <string>
 #include "platform/I2cWatch.h"
 #include "log/Log.h"
+#include "log/SystemEvent.h"
+#include <vector>
 #include "constants.h"
 
 using namespace ChipSatPlatform;
@@ -244,6 +246,77 @@ static void testTwoParts()
   captured.clear();
 }
 
+// The IMU's NRST goes with a clear when the IMU is to blame, and only then
+static void testImuBlame()
+{
+  BusWatch w;
+  fakeNow = 300000;
+  BusClear ok;
+  ok.ok = true;
+  w.before(0x77, true, true, true, fakeNow);
+  w.after(0x77, Status::Timeout, 100, false, true, fakeNow);
+  check(w.clearDue(fakeNow) && !w.imuResetDue(fakeNow), "blame: a jam on the BME280, a clear and no IMU reset");
+  w.cleared(ok, fakeNow);
+  w.before(0x4A, true, true, true, fakeNow);
+  w.after(0x4A, Status::Timeout, 100, true, false, fakeNow);
+  check(w.imuResetDue(fakeNow), "blame: a jam on the IMU, its pin reset is due with the clear");
+  w.cleared(ok, fakeNow);
+  check(!w.imuResetDue(fakeNow + 100000), "blame: gone once a clear worked");
+
+  w.before(0x4A, true, false, true, fakeNow);
+  check(w.imuResetDue(fakeNow), "blame: lines held at an IMU transfer");
+  w.cleared(ok, fakeNow);
+  w.before(0x77, false, true, true, fakeNow);
+  w.before(0x4A, false, true, true, fakeNow);
+  check(w.clearDue(fakeNow) && !w.imuResetDue(fakeNow), "blame: held first at the BME280, the IMU's transfer after isn't blamed");
+  BusClear stuck;
+  stuck.sclBefore = false;
+  stuck.sclHeld = true;
+  w.cleared(stuck, fakeNow);
+  check(!w.imuResetDue(fakeNow + 999) && w.imuResetDue(fakeNow + 1000), "blame: SCL held through a clear, the pin before the retry, at its spacing");
+  w.cleared(stuck, fakeNow + 1000);
+  check(!w.imuResetDue(fakeNow + 2999) && w.imuResetDue(fakeNow + 3000), "blame: and again at the doubled spacing, no faster");
+  captured.clear();
+}
+
+// The quarantine story again, as the sink sees it: the flash log gets the same steps as the console
+static void testSystemEvents()
+{
+  using namespace ChipSatLog;
+  static std::vector<SystemEvent> seen;
+  seen.clear();
+  setSystemSink([](void *, const SystemEvent &e) { seen.push_back(e); }, nullptr);
+  BusWatch w;
+  fakeNow = 5000;
+  BusClear ok;
+  ok.ok = true;
+  w.before(0x77, true, true, true, fakeNow);
+  w.after(0x77, Status::Timeout, 100, false, true, fakeNow);
+  w.cleared(ok, fakeNow);
+  fakeNow += 2000;
+  w.before(0x77, true, true, true, fakeNow);
+  w.after(0x77, Status::Timeout, 100, false, true, fakeNow);
+  w.cleared(ok, fakeNow);
+  fakeNow += 30000;
+  w.before(0x77, true, true, true, fakeNow);
+  w.before(0x12, false, false, true, fakeNow);
+  setSystemSink(nullptr, nullptr);
+  captured.clear();
+
+  check(seen.size() == 7, "system events: jam, clear, jam, quarantine, clear, release, held");
+  if (seen.size() != 7) {
+    return;
+  }
+  check(seen[0].source == kSourceBus && seen[0].what == kBusJam && seen[0].part == kPartEnv && seen[0].reason == kWhySdaLow &&
+        seen[0].detail == 0x77 && seen[0].ms == 5000, "system events: the jam names the BME280, SDA low, its address");
+  check(seen[1].what == kBusClear && seen[1].part == kPartNone && seen[1].reason == kWhyClearOk, "system events: the clear that worked");
+  check(seen[3].what == kBusQuarantine && seen[3].part == kPartEnv && seen[3].detail == 30000 && seen[3].ms == 7000,
+        "system events: quarantine of the BME280 for 30 s");
+  check(seen[5].what == kBusRelease && seen[5].part == kPartEnv && seen[5].ms == 37000, "system events: release after 30 s");
+  check(seen[6].what == kBusHeld && seen[6].part == kPartBusOther && seen[6].reason == (kWhySdaLow | kWhySclLow) &&
+        seen[6].detail == 0x12, "system events: both lines held before a transfer to an address that is none of the three");
+}
+
 int main()
 {
   static Uart console(UartPort::Console);
@@ -254,6 +327,8 @@ int main()
   testQuarantine();
   testHold();
   testTwoParts();
+  testImuBlame();
+  testSystemEvents();
   printf("%s: %d checks, %d failed\n", failures == 0 ? "PASSED" : "FAILED", checks, failures);
   return failures == 0 ? 0 : 1;
 }

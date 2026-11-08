@@ -694,7 +694,7 @@ static void testRingFlush()
         "ring flush: after a reset the end is found after the flush");
 }
 
-// The trickle: one record per ground gap, its own uptime deciding. Gap 0 writes nothing at all
+// The trickle: one record per ground gap, its own uptime deciding. Gap 0 keeps every record
 static void testGroundTrickle()
 {
   wipe();
@@ -712,7 +712,7 @@ static void testGroundTrickle()
   check(spaced && read.ms.size() >= 56 && read.ms.size() <= 58 && read.strict,
         "trickle: ten minutes on the ground is a record every 10 s, the last 30 s still in the ring");
 
-  // Gap 0: only the boot event reaches the chip (decided 2026-10-22), no time anchors
+  // Gap 0: every record, as in the air (decided 2026-11-06). The ring still holds the last 29 s
   wipe();
   FlashLog none(flash, chipSystem);
   booted(none);
@@ -726,9 +726,63 @@ static void testGroundTrickle()
     fly(none, 10000, counter);
   }
   const OnChip seen = onChipByType();
-  check(seen.boot == 1 && seen.bootCsr3 == 4 && seen.packets == 0 && seen.times == 0 && seen.other == 0 &&
-        none.records() == 1 && none.dropped() == 0 && !none.holding(),
-        "gap 0: ten minutes on the ground write the boot event and nothing else, no time anchor, nothing dropped");
+  const Packets every = packetsRead(0);
+  bool fifty = every.ms.size() > 1;
+  for (size_t i = 1; i < every.ms.size(); ++i) {
+    fifty = fifty && every.ms[i] - every.ms[i - 1] == 50;
+  }
+  check(seen.boot == 1 && seen.bootCsr3 == 4 && fifty && every.strict && seen.packets >= 12000 - ChipSatConfig::kLogRingRecords &&
+        seen.packets <= 12000 && seen.times >= 57 && seen.other == 0 && none.dropped() == 0,
+        "gap 0: ten minutes on the ground keep every 50 ms record and every anchor, the last 30 s still in the ring, nothing dropped");
+}
+
+// Landed and asleep: what the ring keeps goes to the chip at once, still one per ground gap, in
+// order after the air. Without the landed mode the ground holds it in RAM
+static void testLanded()
+{
+  for (int landed = 1; landed >= 0; --landed) {
+    wipe();
+    FlashLog log(flash, chipSystem);
+    booted(log);
+    log.setGroundGapMs(10000);
+    uint16_t counter = 0;
+    fly(log, 30000, counter);   // the fall
+    log.setAir(false);
+    for (int pass = 0; pass < 100; ++pass) {   // landed, the ring catches up
+      log.ensureSpace();
+      fakeNow += 10;
+      log.busy();
+    }
+    const uint32_t landedMs = fakeNow;
+    check(!landed || (log.waiting() == 0 && log.airWritten()), "landed: the ring is on the chip after the fall");
+    log.setLanded(landed != 0);
+    bool atOnce = true;
+    for (int i = 0; i < 40; ++i) {   // a record every 5 s, the gap is 10 s from the fall's last: 19 kept
+      log.append(packetNumbered(counter++), fakeNow);
+      for (int pass = 0; pass < 10; ++pass) {
+        log.ensureSpace();
+        fakeNow += 10;
+        log.busy();
+      }
+      atOnce = atOnce && log.waiting() == 0;
+      fakeNow += 4900;
+    }
+    const Packets read = packetsRead(0);
+    uint32_t after = 0;
+    bool spaced = true;
+    for (size_t i = 1; i < read.ms.size(); ++i) {
+      if (read.ms[i - 1] >= landedMs) {
+        ++after;
+        spaced = spaced && read.ms[i] - read.ms[i - 1] == 10000;
+      }
+    }
+    if (landed) {
+      check(atOnce && read.strict && after == 18 && spaced && log.dropped() == 0,
+            "landed mode: each kept record on the chip within 100 ms, one per 10 s, in order after the fall");
+    } else {
+      check(!atOnce && log.waiting() > 0, "without it the ground holds them in the ring");
+    }
+  }
 }
 
 // boot event, then 30 s of boot-air, then ground with gap 0 or 10 s
@@ -757,8 +811,10 @@ static void testBootEvent()
     const bool firstIsBoot = first.type == ChipSatApp::kLogTypeEvent && first.eventKind == ChipSatApp::kLogEventBoot &&
                              first.eventData[3] == 0x24;
     if (gap == 0) {
-      check(firstIsBoot && seen.boot == 1 && seen.times == 1 && seen.packets >= 590 && seen.packets <= 601,
-            "boot event, gap 0: first on the chip, then the boot-air's 30 s and its one anchor, nothing from the ground");
+      // 30 s of boot-air and 300 s of ground at 20 Hz, all of it on the chip: gap 0 holds nothing back
+      check(firstIsBoot && seen.boot == 1 && seen.times >= 1 + 28 && seen.packets >= 6600 - 2 * ChipSatConfig::kLogDrainPerCall &&
+            seen.packets <= 6601,
+            "boot event, gap 0: first on the chip, then every record of the boot-air and the ground, none held back");
     } else {
       // the anchors at +280 and +290 s are still in the ring
       check(firstIsBoot && seen.boot == 1 && seen.times == 1 + 28 && seen.packets >= 590 + 27 && seen.packets <= 601 + 28,
@@ -780,8 +836,11 @@ static void testBootEvent()
   uint16_t counter = 0;
   fly(slow, 120000, counter);
   const OnChip seen = onChipByType();
-  check(seen.boot == 1 && seen.packets == 0 && slow.dropped() == 0,
-        "boot event behind a slow erase, gap 0 on the ground: it still reaches the chip, alone");
+  LogRecord first;
+  ChipSatApp::decodeRecord(&memory[0], first);
+  check(seen.boot == 1 && first.type == ChipSatApp::kLogTypeEvent && first.eventKind == ChipSatApp::kLogEventBoot &&
+        seen.packets >= 2400 - ChipSatConfig::kLogRingRecords && slow.dropped() == 0,
+        "boot event behind a slow erase, gap 0 on the ground: it still reaches the chip first, every reading after it");
 }
 
 // Back on the ground: what the air left in the ring is written first, then the trickle again
@@ -929,6 +988,183 @@ static void testWriteFailures()
   check(stuck.ensureSpace() == Status::Timeout && !stuck.ready(), "stuck erase: gives up past 1 s, logging stops");
 }
 
+// A system record as written, in write order
+struct SystemRecord
+{
+  uint32_t writtenMs;
+  uint8_t layout, source, what, part, reason;
+  uint16_t count;
+  uint32_t firstMs, lastMs, detail;
+};
+
+static std::vector<SystemRecord> systemOnChip()
+{
+  std::vector<SystemRecord> out;
+  for (uint32_t index = 0; index < kLogRecordCount; ++index) {
+    LogRecord r;
+    if (!ChipSatApp::decodeRecord(&memory[index * kLogRecordSize], r) || r.type != ChipSatApp::kLogTypeEvent ||
+        r.eventKind != ChipSatApp::kLogEventSystem) {
+      continue;
+    }
+    const uint8_t *d = r.eventData;
+    auto u32 = [d](int at) { return static_cast<uint32_t>(d[at] | d[at + 1] << 8 | d[at + 2] << 16 | static_cast<uint32_t>(d[at + 3]) << 24); };
+    out.push_back({r.uptimeMs, d[0], d[1], d[2], d[3], d[4], static_cast<uint16_t>(d[5] | d[6] << 8), u32(7), u32(11), u32(15)});
+  }
+  return out;
+}
+
+static void note(FlashLog &log, uint8_t source, uint8_t what, uint8_t part, uint8_t reason, uint32_t detail)
+{
+  log.poolSystem({source, what, part, reason, detail, fakeNow});
+}
+
+// Board 15's IMU: a retry every 300 ms for two minutes is a few records, and every retry is counted
+static void testSystemStorm()
+{
+  using namespace ChipSatLog;
+  wipe();
+  FlashLog log(flash, chipSystem);
+  booted(log);
+  const uint32_t startMs = fakeNow;
+  uint32_t lastMs = 0, noted = 0;
+  uint16_t counter = 0;
+  while (fakeNow - startMs < 120000) {
+    lastMs = fakeNow;
+    note(log, kSourceSensor, kSensorRetry, kPartImu, kWhySilent, 0x0F);
+    ++noted;
+    fly(log, 300, counter);
+  }
+  fly(log, 10000, counter);
+  const std::vector<SystemRecord> sys = systemOnChip();
+  uint32_t sum = 0;
+  bool same = true, inOrder = true;
+  for (size_t i = 0; i < sys.size(); ++i) {
+    sum += sys[i].count;
+    same = same && sys[i].layout == ChipSatApp::kLogSystemLayout && sys[i].source == kSourceSensor &&
+           sys[i].what == kSensorRetry && sys[i].part == kPartImu && sys[i].reason == kWhySilent && sys[i].detail == 0x0F &&
+           sys[i].lastMs - sys[i].firstMs <= ChipSatConfig::kLogSystemRunMs && sys[i].writtenMs >= sys[i].lastMs;
+    inOrder = inOrder && (i == 0 || sys[i].firstMs > sys[i - 1].lastMs);
+  }
+  printf("     storm: %u retries in %u records\n", static_cast<unsigned int>(noted), static_cast<unsigned int>(sys.size()));
+  check(sys.size() >= 4 && sys.size() <= 5, "storm: 400 retries in 2 min are 4 or 5 records, one per 30 s run");
+  check(sum == noted && same && inOrder && !sys.empty() && sys.front().firstMs == startMs && sys.back().lastMs == lastMs,
+        "storm: the counts add up to every retry, first and last uptimes cover it, codes as noted");
+  check(log.dropped() == 0, "storm: the packets around it lose nothing");
+}
+
+// A sensor flapping between bad and good is two runs, never one
+static void testSystemTwoEvents()
+{
+  using namespace ChipSatLog;
+  wipe();
+  FlashLog log(flash, chipSystem);
+  booted(log);
+  uint16_t counter = 0;
+  uint32_t retries = 0, oks = 0;
+  for (int i = 0; i < 60; ++i) {
+    if (i % 2 == 0) {
+      note(log, kSourceSensor, kSensorRetry, kPartImu, kWhyPartial, 0x01);
+      ++retries;
+    } else {
+      note(log, kSourceSensor, kSensorOk, kPartImu, 0, 300);
+      ++oks;
+    }
+    note(log, kSourceSensor, kSensorRetry, kPartGps, kWhyNoBytes, 0);
+    fly(log, 300, counter);
+  }
+  fly(log, 10000, counter);
+  const std::vector<SystemRecord> sys = systemOnChip();
+  uint32_t imuRetry = 0, imuOk = 0, gpsRetry = 0;
+  for (const SystemRecord &r : sys) {
+    imuRetry += r.what == kSensorRetry && r.part == kPartImu ? r.count : 0;
+    imuOk += r.what == kSensorOk && r.part == kPartImu ? r.count : 0;
+    gpsRetry += r.what == kSensorRetry && r.part == kPartGps ? r.count : 0;
+  }
+  check(sys.size() == 3 && imuRetry == retries && imuOk == oks && gpsRetry == 60,
+        "two events: IMU retry, IMU ok and GPS retry pool apart, 18 s of them is one record each");
+}
+
+// A lone event waits out the quiet window and goes on its own
+static void testSystemWindow()
+{
+  using namespace ChipSatLog;
+  wipe();
+  FlashLog log(flash, chipSystem);
+  booted(log);
+  uint16_t counter = 0;
+  const uint32_t atMs = fakeNow;
+  note(log, kSourceRadio, kRadioTxTimeout, kPartRadio, 0, 3287);
+  fly(log, ChipSatConfig::kLogSystemQuietMs - 100, counter);
+  check(systemOnChip().empty(), "window: nothing written while it may still repeat");
+  fly(log, 200, counter);
+  const std::vector<SystemRecord> sys = systemOnChip();
+  check(sys.size() == 1 && sys[0].count == 1 && sys[0].firstMs == atMs && sys[0].lastMs == atMs && sys[0].detail == 3287 &&
+        sys[0].writtenMs >= atMs + ChipSatConfig::kLogSystemQuietMs,
+        "window: written once it has been quiet 5 s, count 1, first and last the same");
+
+  // the same event after the window is a new run
+  note(log, kSourceRadio, kRadioTxTimeout, kPartRadio, 0, 3300);
+  fly(log, 6000, counter);
+  check(systemOnChip().size() == 2 && systemOnChip()[1].count == 1, "window: the same event later starts a new run");
+}
+
+// More runs open than the table holds: the oldest goes early, nothing is lost
+static void testSystemTableFull()
+{
+  using namespace ChipSatLog;
+  wipe();
+  FlashLog log(flash, chipSystem);
+  booted(log);
+  for (uint8_t i = 0; i <= ChipSatConfig::kLogSystemRuns; ++i) {
+    note(log, kSourceBus, kBusJam, kPartBusOther, static_cast<uint8_t>(i + 1), 0x40 + i);
+    fakeNow += 10;
+  }
+  log.ensureSpace();
+  const std::vector<SystemRecord> early = systemOnChip();
+  check(early.size() == 1 && early[0].reason == 1 && early[0].detail == 0x40 && early[0].count == 1,
+        "table full: the oldest run is written at once");
+  uint16_t counter = 0;
+  fly(log, 6000, counter);
+  check(systemOnChip().size() == ChipSatConfig::kLogSystemRuns + 1u, "table full: the rest follow when quiet, none lost");
+}
+
+// Kept on the ground whatever the gap, behind the ring's 29 s like any kept record
+static void testSystemOnGround()
+{
+  using namespace ChipSatLog;
+  for (uint32_t gap : {0u, 10000u}) {
+    wipe();
+    FlashLog log(flash, chipSystem);
+    booted(log);
+    log.setGroundGapMs(gap);
+    log.setAir(false);
+    uint16_t counter = 0;
+    fly(log, 1000, counter);
+    note(log, kSourceBus, kBusQuarantine, kPartEnv, 0, 30000);
+    fly(log, 40000, counter);
+    const std::vector<SystemRecord> sys = systemOnChip();
+    check(sys.size() == 1 && sys[0].what == kBusQuarantine && sys[0].detail == 30000 && log.dropped() == 0,
+          gap == 0 ? "on the ground, gap 0: the system event reaches the chip" : "on the ground, gap 10 s: the system event reaches the chip");
+  }
+}
+
+// FlashLog's own write failure is a system event of its own, written once the chip takes writes again
+static void testSystemWriteFailure()
+{
+  using namespace ChipSatLog;
+  wipe();
+  FlashLog log(flash, chipSystem);
+  booted(log);
+  uint16_t counter = 0;
+  fly(log, 1000, counter);
+  programsToFail = 1;
+  fly(log, 7000, counter);
+  const std::vector<SystemRecord> sys = systemOnChip();
+  check(sys.size() == 1 && sys[0].source == kSourceFlash && sys[0].what == kFlashWriteFail && sys[0].part == kPartFlash &&
+        sys[0].reason == static_cast<uint8_t>(Status::Failed) && sys[0].count == 1 && log.ready(),
+        "write failure: one flash writefail event on the chip, reason failed, the log goes on");
+}
+
 int main()
 {
   testRecordLayout();
@@ -946,10 +1182,17 @@ int main()
   testWriteFailures();
   testRingFlush();
   testGroundTrickle();
+  testLanded();
   testBootEvent();
   testCatchUp();
   testRingOverrun();
   testFullChipFlush();
+  testSystemStorm();
+  testSystemTwoEvents();
+  testSystemWindow();
+  testSystemTableFull();
+  testSystemOnGround();
+  testSystemWriteFailure();
 
   printf("%s: %d checks, %d failed\n", failures ? "FAILED" : "PASSED", checks, failures);
   return failures ? 1 : 0;

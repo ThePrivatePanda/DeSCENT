@@ -58,8 +58,15 @@ class HardwareSerial : public Stream {
 #define PB9 25
 #define PB13 29
 #define PB14 30
+#define PB4 20
 #define PB6 22
 #define PB7 23
 #define PB15 31
 #define PC0 32
 #define PC1 33
+
+// pin modes as in the core; a test that drives a pin defines these two
+#define INPUT 0x0
+#define OUTPUT 0x1
+void pinMode(uint32_t pin, uint32_t mode);
+void digitalWrite(uint32_t pin, uint32_t value);

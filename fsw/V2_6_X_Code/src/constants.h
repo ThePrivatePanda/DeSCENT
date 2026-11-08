@@ -17,6 +17,7 @@ constexpr uint32_t kI2cSdaPin = PA15;
 constexpr uint32_t kI2cSclPin = PB15;
 constexpr uint32_t kGpsRxPin = PC1;   // (rx, tx) is right, the core swaps the LPUART pins itself
 constexpr uint32_t kGpsTxPin = PC0;
+constexpr uint32_t kImuResetPin = PB4;   // BNO085 NRST, R15 pulls it up. Driven only during a pin reset
 
 // failed probes in a row before the bench scan gives up
 constexpr uint8_t kI2cStuckTransfers = 3;
@@ -85,6 +86,10 @@ constexpr uint8_t kImuResetComplete = 1;
 // Own driver, background restart
 constexpr uint8_t kImuRestartReads = 8;           // packets read per restart step, while there are any
 constexpr uint8_t kImuLostAfterEmptyWaits = 3;    // fresh waits in a row with no report at all, then restarted
+// NRST low 10 ns at least, then 90 ms internal initialization and about 4 ms configuration before
+// H_INTN (BNO08X datasheet 1000-3927 v1.17, 6.5.3 Figure 6-8). 2 ms so waitMs gives at least one
+// whole tick. The restart's usual reset wait covers the 94 ms
+constexpr uint32_t kImuResetHoldMs = 2;
 
 // SH-2 report ids and lengths on the control and report channels
 constexpr uint8_t kSh2SetFeature = 0xFD;
@@ -126,6 +131,10 @@ constexpr uint8_t kUbxIdNak = 0x00;
 constexpr uint8_t kUbxClassCfg = 0x06;
 constexpr uint8_t kUbxIdValset = 0x8A;
 constexpr uint8_t kUbxIdReset = 0x04;
+constexpr uint8_t kUbxClassRxm = 0x02;
+constexpr uint8_t kUbxIdPmreq = 0x41;
+constexpr uint8_t kUbxPmreqBackupForce = 0x06;   // flags: bit 1 backup, bit 2 force
+constexpr uint8_t kUbxPmreqWakeUartRx = 0x08;    // wakeupSources: bit 3 UART RX
 
 // The configuration keys we write, from the M10 interface description
 constexpr uint32_t kUbxCfgRateMeas = 0x30210001;
@@ -158,6 +167,7 @@ constexpr uint8_t kNavPvtNumSatellites = 23;
 constexpr uint8_t kNavPvtLon = 24;
 constexpr uint8_t kNavPvtLat = 28;
 constexpr uint8_t kNavPvtHeightMsl = 36;
+constexpr uint8_t kNavPvtHAcc = 40;     // uint32, the receiver's horizontal accuracy estimate, mm
 constexpr uint8_t kNavPvtFlags3 = 78;
 constexpr uint16_t kNavPvtInvalidLlh = 0x0001;   // bit 0 of flags3
 constexpr uint8_t kNavPvtGnssFixOk = 0x01;   // bit 0 of flags, the fix is within the DOP and accuracy masks
@@ -205,6 +215,7 @@ constexpr uint8_t  kRadioStandbyRc = 0x00;
 constexpr uint8_t  kRadioStandbyTries = 5;       // after a reset, begin gives up after this many
 constexpr uint32_t kRadioStandbyRetryMs = 10;   // RadioLib waits 10 ms between its tries
 constexpr uint8_t  kRadioFallbackStandbyRc = 0x20;
+constexpr uint8_t  kRadioSleepWarmStart = 0x04;   // SetSleep: warm start, settings kept, no RTC wake (DS_SX1261-2 13.1.1)
 constexpr uint8_t  kRadioPacketTypeLora = 0x01;
 constexpr uint8_t  kRadioRegulatorDcDc = 0x01;
 constexpr uint8_t  kRadioCalibrateAll = 0x7F;

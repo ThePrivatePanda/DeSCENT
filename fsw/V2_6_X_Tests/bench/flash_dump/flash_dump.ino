@@ -5,8 +5,8 @@
 // compare its own count against the "found" line. The log is a ring, so sectors print oldest first by their
 // first good record (FlashLog's headOlder) and erased ones are skipped. A chip that never wrapped prints in
 // address order as before. Send D to print it again, E then Y to erase the whole chip before a flight.
-// Console PB7/PB6 at 115200. The ground software puts this sketch on a board and reads it back itself: the
-// ChipSats screen's pull
+// Console PB7/PB6 at 115200 unless the image says otherwise, see consoleBaud. The ground software puts this
+// sketch on a board and reads it back itself: the ChipSats screen's pull
 
 #include <stdio.h>
 #include "../../../V2_6_X_Code/src/platform/arduino/SystemArduino.cpp"
@@ -26,6 +26,22 @@ ChipSatPlatform::Uart console(ChipSatPlatform::UartPort::Console);
 ChipSatDevices::Flash flash(chipSystem);
 
 constexpr uint32_t kConfirmWaitMs = 10000;
+
+// The console rate, patched into the image by the ground software before it writes the sketch, found by
+// the magic (ground/app/src/pull.rs). const volatile for the same reason as the settings block: it stays in
+// the image and is read at run time, so the patched bytes are the ones used. The build refuses an image
+// that does not hold the magic exactly once. USART1 runs off the 48 MHz MSI with 16x oversampling, so 1 M
+// and 2 M divide exactly and the others are within 0.2 %. Anything not in the list is a damaged image and
+// gets 115200
+struct ConsoleBaud
+{
+  uint8_t magic[16];
+  uint32_t baud;   // little endian, right after the magic
+};
+const volatile ConsoleBaud consoleBaud = {
+  {0x5A, 0xA5, 0x44, 0x55, 0x4D, 0x50, 0x42, 0x41, 0x55, 0x44, 0x5A, 0xA5, 0x3C, 0x7B, 0x6E, 0x19},
+  ChipSatConfig::kConsoleBaud};
+constexpr uint32_t kConsoleBauds[] = {115200, 230400, 460800, 921600, 1000000, 2000000};
 
 bool flashReady = false;
 
@@ -215,11 +231,38 @@ void prompt()
   console.write("send D to print the log again, E to erase the whole chip\r\n");
 }
 
+void sayStarted(uint32_t baud, uint32_t asked)
+{
+  LOG_I(Boot, "start") {
+    line.field("test", "flashdump");
+    line.field("baud", static_cast<unsigned long>(baud));
+    if (asked != baud) {
+      line.field("refused", static_cast<unsigned long>(asked));
+    }
+  }
+}
+
 void setup()
 {
+  const uint32_t asked = consoleBaud.baud;
+  uint32_t baud = ChipSatConfig::kConsoleBaud;
+  for (uint32_t allowed : kConsoleBauds) {
+    if (asked == allowed) {
+      baud = asked;
+    }
+  }
+  // The start line goes out at 115200 whatever the rate, then again at the rate the log prints at.
+  // The ground software checks a console at the flight software's rate before it writes anything,
+  // and a board left on this sketch at another rate would otherwise fail that check
   console.begin(ChipSatConfig::kConsoleBaud);
   ChipSatLog::begin(console, chipSystem);
-  LOG_I(Boot, "start") { line.field("test", "flashdump"); }
+  sayStarted(baud, asked);
+  if (baud != ChipSatConfig::kConsoleBaud) {
+    console.flush();
+    console.end();
+    console.begin(baud);
+    sayStarted(baud, asked);
+  }
 
   flashReady = flash.begin() == Status::Ok;
   if (!flashReady) {
