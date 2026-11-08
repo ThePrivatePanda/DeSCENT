@@ -20,7 +20,7 @@ enum ImuReport : uint8_t
 };
 
 // BNO085. Which driver is behind this is picked by CHIPSAT_IMU_DRIVER in config.h.
-// All four reports stream all the time, it only sleeps around TX on the HP module
+// All four reports stream all the time, at 20 Hz or 1 Hz on the ground
 class Imu
 {
 public:
@@ -32,12 +32,23 @@ public:
   ChipSatPlatform::Status sleep();   // Ok if already asleep
   ChipSatPlatform::Status wake();    // Ok if it wasn't asleep
 
+  // All four reports at a new interval, turned on again as a wake does, no reset. Kept for any
+  // restart or wake after; NotReady while it is down or asleep, which then start at it
+  ChipSatPlatform::Status setReportInterval(uint16_t ms);
+  uint16_t reportIntervalMs() const { return reportIntervalMs_; }
+
   // for when reports stop without any error. Only sends the soft reset. The reports come back on
   // in update() (library) or in the background from service() (own driver)
   ChipSatPlatform::Status resetHub();
 
   // watchdog's second step. Own driver: hands it to the background restart. Library: begin()
   ChipSatPlatform::Status fullRestart();
+
+  // Own driver. NRST low for kImuResetHoldMs, then let go, the board's pull-up takes it high. A hub
+  // too wedged for the I2C reset gets the whole reset. Blocks for the hold only; the reports come back
+  // in the background as after resetHub(), or in begin() when it runs next. reason: a ChipSatLog::kWhy
+  // code for the event
+  void pinReset(uint8_t reason);
 
   bool ready() const { return ready_; }
   bool sleeping() const { return sleeping_; }

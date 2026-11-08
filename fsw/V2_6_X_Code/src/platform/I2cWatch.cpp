@@ -2,12 +2,14 @@
 #include "../config.h"
 #include "../constants.h"
 #include "../log/Log.h"
+#include "../log/SystemEvent.h"
 
 namespace ChipSatPlatform
 {
 
 using namespace ChipSatConfig;
 using namespace ChipSatConstants;
+using namespace ChipSatLog;
 
 // wrap-safe
 static bool earlier(uint32_t a, uint32_t b)
@@ -31,6 +33,21 @@ const char *busPartName(uint8_t address)
     case kGaugeAddress: return "soc";
     default: return "other";
   }
+}
+
+static uint8_t eventPart(uint8_t address)
+{
+  switch (address) {
+    case kImuAddress: return kPartImu;
+    case kEnvAddress: return kPartEnv;
+    case kGaugeAddress: return kPartGauge;
+    default: return kPartBusOther;
+  }
+}
+
+static uint8_t linesLow(bool sda, bool scl)
+{
+  return static_cast<uint8_t>((sda ? 0 : kWhySdaLow) | (scl ? 0 : kWhySclLow));
 }
 
 static bool sclComesUp(BusLines &lines)
@@ -102,6 +119,7 @@ BusGate BusWatch::before(uint8_t address, bool sda, bool scl, bool wireUp, uint3
 {
   if (!sda || !scl) {
     if (!linesHeld_) {
+      noteSystem(kSourceBus, kBusHeld, eventPart(address), linesLow(sda, scl), address, nowMs);
       LOG_W(Bus, "held") {
         line.field("sda", sda);
         line.field("scl", scl);
@@ -109,6 +127,7 @@ BusGate BusWatch::before(uint8_t address, bool sda, bool scl, bool wireUp, uint3
         line.fieldHex("addr", address, 2);
         line.field("when", "before");
       }
+      imuBlamed_ = imuBlamed_ || address == kImuAddress;
     }
     linesHeld_ = true;
     clearNeeded_ = true;
@@ -127,6 +146,7 @@ BusGate BusWatch::before(uint8_t address, bool sda, bool scl, bool wireUp, uint3
     part.quarantined = false;
     part.jams = kBusJamsToQuarantine - 1;
     part.firstJamMs = nowMs;
+    noteSystem(kSourceBus, kBusRelease, eventPart(address), 0, address, nowMs);
     LOG_I(Bus, "release") {
       line.field("part", busPartName(address));
       line.fieldHex("addr", address, 2);
@@ -143,6 +163,7 @@ BusGate BusWatch::before(uint8_t address, bool sda, bool scl, bool wireUp, uint3
 
 void BusWatch::jam(uint8_t address, bool sda, bool scl, uint32_t nowMs)
 {
+  noteSystem(kSourceBus, kBusJam, eventPart(address), linesLow(sda, scl), address, nowMs);
   if (!linesHeld_) {
     LOG_W(Bus, "held") {
       line.field("sda", sda);
@@ -154,6 +175,7 @@ void BusWatch::jam(uint8_t address, bool sda, bool scl, uint32_t nowMs)
   }
   linesHeld_ = true;
   clearNeeded_ = true;
+  imuBlamed_ = imuBlamed_ || address == kImuAddress;
 
   Part &part = parts_[slot(address)];
   if (part.jams == 0 || nowMs - part.firstJamMs > kBusJamWindowMs) {
@@ -166,6 +188,7 @@ void BusWatch::jam(uint8_t address, bool sda, bool scl, uint32_t nowMs)
   part.quarantineMs = doubled(part.quarantineMs, kBusQuarantineMs, kBusQuarantineMaxMs);
   part.quarantineUntilMs = nowMs + part.quarantineMs;
   part.quarantined = true;
+  noteSystem(kSourceBus, kBusQuarantine, eventPart(address), 0, part.quarantineMs, nowMs);
   LOG_W(Bus, "quarantine") {
     line.field("part", busPartName(address));
     line.fieldHex("addr", address, 2);
@@ -200,6 +223,7 @@ void BusWatch::after(uint8_t address, Status status, uint32_t tookMs, bool sda, 
     part.holdUntilMs = nowMs + part.holdMs;
     part.held = true;
     part.timeouts = 0;
+    noteSystem(kSourceBus, kBusTimeout, eventPart(address), 0, part.holdMs, nowMs);
     LOG_W(Bus, "hold") {
       line.field("part", busPartName(address));
       line.fieldHex("addr", address, 2);
@@ -213,6 +237,7 @@ void BusWatch::after(uint8_t address, Status status, uint32_t tookMs, bool sda, 
   for (uint8_t other = 0; other < kSlots; ++other) {
     if (other != at && parts_[other].failedRecently && nowMs - parts_[other].failedMs <= kBusFaultWindowMs) {
       if (!clearNeeded_) {
+        noteSystem(kSourceBus, kBusFault, eventPart(address), 0, tookMs, nowMs);
         LOG_W(Bus, "fault") {
           line.field("why", "timeouts");
           line.field("part", busPartName(address));
@@ -243,11 +268,15 @@ void BusWatch::cleared(const BusClear &result, uint32_t nowMs)
   if (result.ok) {
     linesHeld_ = false;
     clearNeeded_ = false;
+    imuBlamed_ = false;
     clearRetryMs_ = 0;
   } else {
     linesHeld_ = true;
+    imuBlamed_ = imuBlamed_ || result.sclHeld;
     clearRetryMs_ = doubled(clearRetryMs_, kBusClearRetryMs, kBusClearRetryMaxMs);
   }
+  noteSystem(kSourceBus, kBusClear, kPartNone,
+             result.ok ? kWhyClearOk : result.sclHeld ? kWhyClearSclHeld : kWhyClearLow, result.pulses, nowMs);
   LOG_W(Bus, "clear") {
     line.field("sda", result.sdaBefore);
     line.field("scl", result.sclBefore);

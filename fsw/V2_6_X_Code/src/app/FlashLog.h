@@ -6,6 +6,7 @@
 #include "../devices/Flash.h"
 #include "../platform/Status.h"
 #include "../platform/System.h"
+#include "../log/SystemEvent.h"
 #include "Telemetry.h"
 
 namespace ChipSatApp
@@ -51,9 +52,17 @@ constexpr uint16_t kLogNoSector = 0xFFFF;
 //   2        was the flight lock, not written any more. Readers skip it
 //   dropped  0-3 records lost this boot so far (ring overran in the air, or a kept ground record
 //            couldn't be written in time). Written when it grows, at most every kLogDroppedEventMs
-// 0x10 to 0x3F are for the sensor and bus recovery events
+//   system   one pooled run of a sensor, bus, phase, radio or flash event (log/SystemEvent.h has
+//            the codes). 0 layout, kLogSystemLayout; 1 source; 2 what; 3 part; 4 reason; 5-6 how
+//            many times it happened in the run (u16); 7-10 uptime of the first (u32); 11-14 of the
+//            last (u32); 15-18 the last one's detail (u32). The record's own uptime is when it was
+//            written. Kept whatever the ground gap, like every record that isn't a packet. A
+//            reader that doesn't know the layout should keep the bytes
+// 0x11 to 0x3F are free
 constexpr uint8_t kLogEventBoot = 1;
 constexpr uint8_t kLogEventDropped = 3;
+constexpr uint8_t kLogEventSystem = 0x10;
+constexpr uint8_t kLogSystemLayout = 1;
 constexpr uint32_t kLogDroppedEventMs = 10000;
 
 struct LogRecord
@@ -92,9 +101,9 @@ bool headOlder(const SectorHead &a, const SectorHead &b);   // by boot, then ms.
 // in time order for that to work. Nothing in here erases the whole chip, the ground sketch does that
 //
 // A RAM ring of the last kLogRingRecords records sits in front of the chip. In the air it's written
-// whenever the chip is free, so an erase or the HP pause during TX only loses records if the ring
-// laps. On the ground only one packet per ground gap gets written, so the ring still holds the
-// last 30 s when the take-off comes and all of it goes onto the chip then
+// whenever the chip is free, transmissions included, so an erase only loses records if the ring
+// laps. On the ground only one packet per ground gap gets written (all of them with a gap of 0),
+// and the ring still holds the last 30 s when the take-off comes and all of it goes onto the chip then
 class FlashLog
 {
 public:
@@ -115,12 +124,21 @@ public:
   // Rest of the data zeroed
   ChipSatPlatform::Status appendEvent(uint8_t kind, uint32_t uptimeMs, const uint8_t *data, uint8_t length);
 
+  // A system event into its run (config.h kLogSystemQuietMs). Only touches RAM, so it's safe from
+  // the sink in any module. Runs are written from ensureSpace, or here when the table is full
+  void poolSystem(const ChipSatLog::SystemEvent &event);
+
   // Going to air writes the whole ring, oldest first. Starts in the air so nothing is dropped
   // before the controller says otherwise
   void setAir(bool air);
 
-  // One packet record per this many ms is kept on the ground, plus time and event records. 0 keeps
-  // only the boot event, so no time anchors either. Goes by the record's own uptime. The controller
+  // Landed and asleep, records come one per ground gap and the chip sleeps between them, so the ring
+  // writes what it keeps at once, as in the air, instead of holding the last 30 s. Still thinned
+  // to the ground gap
+  void setLanded(bool landed) { landed_ = landed; }
+
+  // One packet record per this many ms is kept on the ground, plus every time and event record. 0
+  // keeps every packet record, as in the air. Goes by the record's own uptime. The controller
   // moves it with the battery, a record already in the ring keeps the decision made for it
   void setGroundGapMs(uint32_t ms) { groundGapMs_ = ms; }
 
@@ -133,6 +151,7 @@ public:
   bool stopped() const { return began_ && !ready_; }   // stuck chip or failed writes
   bool air() const { return air_; }
   bool holding() const;                                // records in the ring still to be written
+  bool airWritten() const { return !air_ && dragging_; }   // on the ground, and everything from the air is on the chip
   uint32_t waiting() const { return ringPending_; }    // records from the cursor on, kept or not
   bool wrapped() const { return wrapped_; }            // a sector with records in it has been reused
   uint32_t records() const { return used_; }           // slots holding something, bad ones included
@@ -156,6 +175,16 @@ private:
   ChipSatPlatform::Status writeRecord(const uint8_t *bytes);
   ChipSatPlatform::Status appendBytes(const uint8_t *bytes);
   void eventBytes(uint8_t kind, uint32_t uptimeMs, const uint8_t *data, uint8_t length, uint8_t *bytes) const;
+
+  // count 0 is a free slot
+  struct SystemRun
+  {
+    ChipSatLog::SystemEvent last;
+    uint32_t firstMs;
+    uint16_t count;
+  };
+  void writeSystem(SystemRun &run);
+  bool flushSystem(uint32_t nowMs);
 
   ChipSatDevices::Flash &flash_;
   ChipSatPlatform::System &system_;
@@ -182,10 +211,12 @@ private:
   uint16_t ringNext_ = 0;                // where the next record goes
   uint16_t ringPending_ = 0;             // from the cursor to the newest
   bool air_ = true;
+  bool landed_ = false;
   bool dragging_ = false;                // on the ground and caught up, only kept records get written
   uint32_t groundGapMs_ = 0;
   bool keptAny_ = false;
   uint32_t keptMs_ = 0;                  // the uptime of the last packet record kept
+  SystemRun runs_[ChipSatConfig::kLogSystemRuns] = {};
 };
 
 } // namespace ChipSatApp

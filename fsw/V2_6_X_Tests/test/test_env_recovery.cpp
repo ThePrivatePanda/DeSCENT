@@ -40,6 +40,7 @@ void Uart::flush() {}
 Stream &Uart::arduinoStream() { static Stream s; return s; }
 uint32_t System::nowMs() const { return fakeNow; }
 void System::waitMs(uint32_t ms) const { fakeNow += ms; }
+void System::idleUntilTick() const {}
 
 Status I2cBus::write(uint8_t, const uint8_t *, size_t)
 {

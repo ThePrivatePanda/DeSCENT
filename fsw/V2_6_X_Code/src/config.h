@@ -82,14 +82,15 @@ constexpr uint32_t kGaugeIntervalMs = 1000;
 constexpr uint32_t kUtcAnchorIntervalMs = 10000;
 
 // Flash log. Every record is 64 bytes, so 20 Hz fills the 2 MB chip in about 27 minutes, which is
-// why only the air is logged at that rate. Records are made at the air's gap in every phase and go
-// into a RAM ring first; on the ground only one per ground gap reaches the chip, so a take-off still
-// writes the 30 s before it. The ring only moves at 580 pending on the ground, so while the board
-// doesn't log as air the records keep coming at the air's FIXED gap, whatever its bands say.
+// why only the air is logged at that rate by default. Records go into a RAM ring first; on the ground
+// only one per ground gap reaches the chip, so a take-off still writes the 30 s before it. The ring
+// only moves at 580 pending on the ground, so while the board doesn't log as air the records come at
+// the faster of the ground gap and the air's FIXED gap, whatever the air's bands say.
 // The gaps are in the settings block, these are what a fresh image carries, flat: the bands equal
-// the fixed gap, so a fresh image never moves with the battery. ms, ground then air. A ground gap of
-// 0 writes nothing on the ground, not even time anchors (before 2026-10-22 it meant every IMU
-// reading), an air gap of 0 still means every IMU reading
+// the fixed gap, so a fresh image never moves with the battery. ms, ground then air. A gap of 0 is
+// every IMU reading (20 Hz) in either phase, all of it kept. On the ground that fills the 2 MB chip
+// in about 27 minutes and then overwrites the oldest sectors, older flights included (decided
+// 2026-11-06; from 2026-10-22 a ground 0 wrote nothing, before that it was every reading too)
 constexpr uint32_t kLogFixedMsDefault[2] = {10000, 50};
 
 // 30 s at 50 ms, 38.4 KB of static RAM. A full chip overwrites its oldest sector, so a board nobody
@@ -98,30 +99,64 @@ constexpr uint32_t kLogRingRecords = 600;
 constexpr uint8_t  kLogDrainPerCall = 4;    // per call, so sampling and the radio keep going
 constexpr uint32_t kLogRingSlackRecords = 20;   // 1 s of margin on the ground for an erase
 
-// Flight phases (app/Phase.h): the ground, and the air from a climb until it is at rest
-// again. Falling is not detected: on the 2026-10-13 drops the IMU's linear acceleration read 0.3
-// to 28 m/s2 on the drone and the same during the release (motor vibration, and a flat sat is at
-// terminal speed in half a second), and the drone itself descended 53 m before letting go, so
-// neither a rate nor a drop from the peak tells a release from the drone
+// System events (log/SystemEvent.h) pool in RAM, one run per source, what, part and reason. A repeat
+// within kLogSystemQuietMs of the last one is counted, not written again. A run is written once it
+// has been quiet that long, or kLogSystemRunMs after it began, so a storm that never stops still
+// reaches the chip and a reset loses at most that much. Board 15's IMU retrying every 300 ms for
+// minutes is then 2 records a minute where it would be 200. Both picked, not measured
+constexpr uint32_t kLogSystemQuietMs = 5000;
+constexpr uint32_t kLogSystemRunMs = 30000;
+constexpr uint8_t  kLogSystemRuns = 8;   // runs open at once, 20 bytes each. Full, the oldest is written early
+
+// Flight phases (app/Phase.h): the ground, and the air from the IMU moving until it is quiet again.
+// The IMU decides both ways, and while an altitude is live it has to agree: a climb to go up, flat
+// to come down. The barometer alone never puts a board in the air. On 2026-11-01 barometer readings taken during 22 dBm transmits read about 46 m high, on
+// the ground, which is above the old 15 m climb: desk boards went to the air, and one stayed there
+// at least 46 minutes and wrapped its chip. Falling is not detected as its own phase: on the
+// 2026-10-13 drops the IMU read 0.3 to 28 m/s2 on the drone and the same during the release
 //
 // What decides the phase
+constexpr float    kQuietAccelMps2 = 2.0f;      // a reading under this and kQuietGyro is quiet: lying in grass in some wind is not 0.5
+constexpr float    kQuietGyroRadPerSec = 0.35f; // about 20 degrees a second
+constexpr uint32_t kMotionWindowMs = 10000;     // the air when kMotionFraction of the readings in this window moved
+constexpr uint32_t kMotionSlotMs = 50;          // one slot per IMU report
+constexpr float    kMotionFraction = 0.8f;      // so the air comes 8 s into a running drone, 5 s of handling never
+constexpr float    kMotionFilled = 0.75f;       // and this much of the window got a reading: 6 s of motion at least, after a gap too
+constexpr uint32_t kLandedMs = 30000;           // no moving reading this long, at any height, is the ground
+constexpr uint32_t kGroundQuietMs = 180000;     // instead of kLandedMs when no altitude was live all flight
+constexpr uint32_t kDescentBinMs = 1000;        // the barometer is falling when kDescentBins of these in a row
+constexpr uint8_t  kDescentBins = 4;            // each have their lowest and highest reading kDescentStepM
+constexpr float    kDescentStepM = 5.0f;        // under the bin before: 5 m/s for 3 s
+constexpr uint32_t kImuDeadMs = 60000;          // the IMU missing this long hands the phase to altitude
+constexpr uint32_t kBootAirMaxMs = 300000;      // ms of uptime, boot-air logging ends here at the latest
+constexpr uint32_t kMotionHeldMs = 60000;       // the motion window this long is the air with no climb, for a pressurised cabin
+constexpr float    kFlatAltitudeM = 3.0f;       // flat: each second's lowest and highest barometer reading both stay within this
+constexpr float    kFlatAltitudeGpsM = 15.0f;   // the same on GPS altitude
+constexpr uint32_t kLandedHighMs = 300000;      // quiet and flat this long is the ground at any height: a tree, a roof
+constexpr uint8_t  kWakeMoving = 3;             // this many of the last kWakeReadings at 1 Hz moving puts the IMU at 20 Hz
+constexpr uint8_t  kWakeReadings = 5;
+constexpr uint32_t kWakeQuietMs = 30000;        // 20 Hz on the ground this long without a moving reading is 1 Hz again
+
+// Landed after a flight, the GPS looks for a fix to hold, then everything but the IMU sleeps
+// (FlightController.h). The receiver's own hAcc on a trusted 3D fix, kFixRun in a row
+constexpr uint32_t kFixGoodMm = 10000;
+constexpr uint32_t kFixFairMm = 20000;          // what will do once kFixRelaxMs have passed since landing
+constexpr uint32_t kFixRelaxMs = 300000;
+constexpr uint8_t  kFixRun = 5;
+constexpr uint32_t kFixAfterLandingMs = 30000;  // the first of the run no sooner than this after landing
+constexpr uint32_t kLandedJitterMs = 2000;      // each transmit gap asleep moves up to this either way, so boards that landed together don't keep colliding
+
+// Altitude: the vertical rate and height in the Phase log line, the climb and the flat the IMU needs,
+// and the phase itself once the IMU is dead
 constexpr uint32_t kPhaseRateWindowMs = 800;    // the vertical rate is over at least this long
 constexpr float    kPhaseBaselineRateMps = 0.3f; // the ground baseline only follows a sat this still
 constexpr float    kPhaseBaselineGain = 0.02f;   // per altitude reading, so about 10 s to settle on the barometer
-constexpr float    kRiseGainM = 15.0f;          // climbed this far above the baseline on the barometer: the air
+constexpr float    kRiseGainM = 15.0f;          // climbed this far above the baseline on the barometer, with the IMU moving or dead, is the air
 constexpr float    kRiseGainGpsM = 30.0f;       // on GPS altitude: it drifted 13 m on the ground on 2026-10-13
 constexpr uint32_t kAltitudeStaleMs = 3000;     // an altitude source older than this is not live
-constexpr float    kQuietAccelMps2 = 2.0f;      // at rest: lying in grass in some wind is not 0.5
-constexpr float    kQuietGyroRadPerSec = 0.35f; // about 20 degrees a second
-constexpr float    kQuietAltitudeM = 4.0f;      // about half a hectopascal
+constexpr float    kQuietAltitudeM = 4.0f;      // IMU dead: still within this, about half a hectopascal
 constexpr float    kQuietAltitudeGpsM = 8.0f;   // GPS altitude wanders this much lying still
-constexpr uint32_t kLandedMs = 30000;           // this long at rest, below half of what it climbed, is the ground
-constexpr uint32_t kLandedNoImuMs = 120000;     // on altitude alone, with the IMU dead
-constexpr uint32_t kGroundQuietMs = 180000;     // the IMU quiet this long is the ground at any height
-constexpr uint32_t kMotionWindowMs = 10000;     // no altitude source: the IMU alone tells the air from the ground
-constexpr float    kMotionFraction = 0.8f;      // this much of the window not quiet is a running drone
-constexpr uint32_t kBlindLandedMs = 30000;      // and this long quiet after it is the ground
-constexpr uint32_t kBootAirMaxMs = 300000;      // ms of uptime, boot-air logging ends here at the latest
+constexpr uint32_t kLandedNoImuMs = 120000;     // IMU dead: this long still below half the climb is the ground
 
 // How often a packet goes out: the gap after each, per flight phase (app/Phase.h), as a fresh image
 // carries them in its settings block; the dashboard writes a board's own. Each phase has a fixed gap
@@ -156,6 +191,7 @@ constexpr uint16_t kInitRetryDelayMs = 500;
 
 // IMU
 constexpr uint16_t kImuReportIntervalMs = 50;   // all four reports. The library driver overflows above 65 ms
+constexpr uint16_t kImuGroundIntervalMs = 1000; // the same on the ground until something moves it, own driver only
 constexpr uint8_t  kImuEnableAttempts = 5;       // tries per report when turning them on
 constexpr uint16_t kImuEnableSpacingMs = 50;     // pause after a report turned on
 constexpr uint16_t kImuEnableRetryDelayMs = 75;  // pause after one that didn't
@@ -185,6 +221,7 @@ constexpr uint16_t kGpsAckWaitMs = 300;     // a config reply is 10 bytes, about
 constexpr uint8_t  kGpsDynamicModel = 8;    // airborne <4g
 constexpr uint16_t kGpsMeasurementIntervalMs = 1000;   // one position a second
 constexpr uint16_t kGpsNavigationRate = 1;              // a solution every measurement
+constexpr uint8_t  kGpsWakeAttempts = 3;   // out of standby the first bytes may only wake it, so a setting is sent until acked
 
 // A fix needs this many satellites before we believe the position. Three fix the position, a fourth
 // fixes the clock, so below four the receiver is still converging
@@ -233,9 +270,20 @@ constexpr uint8_t  kRadioSyncWord = 0x12;
 constexpr uint16_t kRadioPreambleLength = 8;
 constexpr float    kRadioCurrentLimitMa = 140.0f;   // 0 to 140. applyPaConfig overwrites it, see Radio.h
 
-// HP IMU wake after TX, ms, plus up to 325 ms for a try already started. Unbounded it could take
+// Imu::wake() and setReportInterval(), ms, plus up to 325 ms for a try already started. Flight no longer sleeps the IMU
+// for a transmission (the new boards run every sensor through 22 dBm SF12). Unbounded it could take
 // 9.7 s with a hub that takes writes and never answers. A guess, not measured
 constexpr uint32_t kImuWakeBudgetMs = 1500;
+
+// Sleep mode (WFI) between loop passes and in every wait of 1 ms or more. Only the core stops:
+// SysTick, the UARTs, I2C, SPI and the radio run on and SysTick wakes it each ms, so nothing waits
+// longer than it does now. Not Stop2, which stops millis() and the GPS port. The saving is not
+// measured; false builds the old spinning loop for the comparison
+constexpr bool kSleepWhenIdle = true;
+
+// Landed with a fix held, Stop2 instead of WFI between polls, packets and records; false keeps WFI, for an A/B
+constexpr bool kDeepSleepWhenLanded = true;
+constexpr uint32_t kSleepMaxMs = 4000;   // one Stop2 at most: the IWDG (kWatchdogTimeoutMs) keeps counting through it
 
 // Sensor watchdogs (app/Health.h), all ms
 constexpr uint32_t kHealthGapMs = 200;                 // between any two recovery steps

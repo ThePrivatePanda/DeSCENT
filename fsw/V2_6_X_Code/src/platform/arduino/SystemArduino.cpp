@@ -31,7 +31,82 @@ void System::waitMs(uint32_t ms) const
     if (idle_ != nullptr) {
       idle_();
     }
+    // not for 0, the IMU's read loops run it once a packet
+    if (ms > 0 && millis() - startMs < ms) {
+      idleUntilTick();
+    }
   } while (millis() - startMs < ms);
+}
+
+void System::idleUntilTick() const
+{
+  if (ChipSatConfig::kSleepWhenIdle) {
+    __WFI();
+  }
+}
+
+// LPTIM1 counts LSI / 32, so about a ms a tick (LSI's own error, a few percent, is in the uptime
+// too), and its match is the one interrupt Stop2 waits for. sleepFor clears it before interrupts are
+// back on, so this only runs if that ever misses one; the default handler would hang
+extern "C" void LPTIM1_IRQHandler(void)
+{
+  LPTIM1->ICR = LPTIM_ICR_ARRMCF;
+}
+
+uint32_t System::sleepFor(uint32_t ms) const
+{
+  static bool timerReady = false;
+  if (!timerReady) {
+    __HAL_RCC_LSI_ENABLE();   // the IWDG has it on already
+    while ((RCC->CSR & RCC_CSR_LSIRDY) == 0) {
+    }
+    __HAL_RCC_LPTIM1_CONFIG(RCC_LPTIM1CLKSOURCE_LSI);
+    __HAL_RCC_LPTIM1_CLK_ENABLE();
+    LPTIM1->CR = 0;
+    LPTIM1->CFGR = 5U << LPTIM_CFGR_PRESC_Pos;   // these two only while it's off
+    LPTIM1->IER = LPTIM_IER_ARRMIE;
+    EXTI->IMR1 |= EXTI_IMR1_IM29;   // LPTIM1's wake-up line
+    NVIC_EnableIRQ(LPTIM1_IRQn);
+    timerReady = true;
+  }
+  if (ms > ChipSatConfig::kSleepMaxMs) {
+    ms = ChipSatConfig::kSleepMaxMs;
+  }
+  const uint32_t ticks = ms * LSI_VALUE / 32000UL;
+  if (ticks < 2) {
+    return 0;
+  }
+
+  IWatchdog.reload();
+  LPTIM1->CR = LPTIM_CR_ENABLE;
+  LPTIM1->ICR = LPTIM_ICR_ARROKCF | LPTIM_ICR_ARRMCF;
+  LPTIM1->ARR = ticks;
+  while ((LPTIM1->ISR & LPTIM_ISR_ARROK) == 0) {
+  }
+  HAL_SuspendTick();
+  SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;   // a tick already pending would end the WFI at once
+
+  // With interrupts masked the match can't be taken between starting the timer and the WFI, which
+  // would sleep until the watchdog. A pending one still ends the WFI
+  __disable_irq();
+  LPTIM1->CR = LPTIM_CR_ENABLE | LPTIM_CR_SNGSTRT;
+  HAL_PWREx_EnterSTOP2Mode(PWR_STOPENTRY_WFI);
+  // Stop2 wakes on MSI, at the range MSIRANGE or MSISRANGE gives (RM0461 not checked here), so the
+  // core's own setup puts back MSI range 11, 48 MHz, and two flash wait states either way
+  SystemClock_Config();
+  uint32_t count = LPTIM1->CNT;
+  while (count != LPTIM1->CNT) {   // read twice to agree, it runs on another clock
+    count = LPTIM1->CNT;
+  }
+  const bool matched = (LPTIM1->ISR & LPTIM_ISR_ARRM) != 0;
+  LPTIM1->ICR = LPTIM_ICR_ARRMCF;
+  NVIC_ClearPendingIRQ(LPTIM1_IRQn);
+  LPTIM1->CR = 0;
+  const uint32_t slept = (matched ? ticks : count) * 32000UL / LSI_VALUE;
+  uwTick += slept;   // before the tick's own interrupt can run again
+  HAL_ResumeTick();
+  __enable_irq();
+  return slept;
 }
 
 void System::startWatchdog(uint32_t timeoutMs)

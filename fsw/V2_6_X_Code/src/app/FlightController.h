@@ -21,7 +21,10 @@
 namespace ChipSatApp
 {
 
-// Boot sequence and the telemetry cycle
+// Boot sequence and the telemetry cycle. Landed after a flight it first puts the fall on the chip and
+// looks for a fix to hold (kFixRun in a row under the hAcc limit), then sleeps: GPS in standby, the
+// barometer and gauge read once per packet or record, records at the ground gap, Stop2 between them
+// (kDeepSleepWhenLanded). The IMU stays at 1 Hz throughout, so a board that moves wakes it all
 class FlightController
 {
 public:
@@ -62,6 +65,13 @@ private:
   bool configRadio();                  // false if any step failed
   void sampleSensors();     // each sensor at its own pace, nothing waits on the radio
   void followPhase();       // hands fresh readings to the phase and acts on a change
+  void followLanding();     // the fix to hold once landed, and asleep or awake
+  void goAsleep(uint32_t nowMs);
+  void wakeUp(uint8_t part, uint8_t why);
+  void readForPacket();     // asleep: the gauge and one barometer reading, just before a packet or record
+  void expectParts();       // tells Health how the parts are run now
+  void restUntilDue();      // asleep and nothing due
+  uint32_t imuMaxAgeMs() const;
   uint32_t phaseTxIntervalMs(bool socOkay);
   void updateLogGaps(bool socOkay);
   void logIfDue();
@@ -70,6 +80,7 @@ private:
   bool transmitDue() const;
   void runCycle();
   void transmit();
+  void noteResetup();   // after configRadio() outside setup
   void logReads(const CycleReads &reads) const;
 
   ChipSatPlatform::System &system_;
@@ -112,6 +123,15 @@ private:
   uint32_t cycle_ = 0;   // for logging
   bool radioReady_ = false;
   uint32_t lastTxMs_ = 0;
+
+  bool asleep_ = false;
+  bool airWrittenSaid_ = false;   // landed: the console has said the fall is on the chip
+  uint32_t lookingSinceMs_ = 0;   // landed, or last moved since
+  uint32_t pvtSeenMs_ = 0;        // the last NAV-PVT the fix rule looked at
+  uint8_t fixRun_ = 0;
+  ChipSatSensors::GPSData bestFix_;   // of the run so far
+  ChipSatSensors::GPSData heldFix_;   // what the packets carry asleep
+  uint32_t jitter_ = 0;   // xorshift state for the landed transmit gap
 };
 
 } // namespace ChipSatApp

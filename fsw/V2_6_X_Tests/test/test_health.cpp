@@ -6,6 +6,7 @@
 #include <vector>
 #include "app/Health.h"
 #include "log/Log.h"
+#include "log/SystemEvent.h"
 
 using namespace ChipSatPlatform;
 using namespace ChipSatConfig;
@@ -20,10 +21,11 @@ struct World
 {
   bool imuReady = true, imuAsleep = false;
   uint8_t imuFlowing = 0x0F;   // reports still arriving
+  uint16_t imuIntervalMs = 50;
   bool envAlive = true, envReady = true;
   bool gaugeAlive = true;
   bool gpsTalking = true;
-  bool busFaulted = false, busClearDue = false;
+  bool busFaulted = false, busClearDue = false, busImuBlamed = false;
   bool envRestartWorks = false;
   std::vector<std::string> actions;   // with the time
 };
@@ -55,6 +57,7 @@ bool I2cBus::recover(uint32_t)
   return true;
 }
 bool I2cBus::faulted(uint32_t) const { return world.busFaulted; }
+bool I2cBus::imuResetDue(uint32_t) const { return world.busClearDue && world.busImuBlamed; }
 }
 
 // The drivers' per-pass calls, faked: they copy the world into the driver as the real ones would
@@ -65,14 +68,16 @@ void Imu::service()
 {
   ready_ = world.imuReady;
   sleeping_ = world.imuAsleep;
+  reportIntervalMs_ = world.imuIntervalMs;
   for (uint8_t i = 0; i < 4; ++i) {
-    if (ready_ && !sleeping_ && (world.imuFlowing & (1U << i))) {
+    if (ready_ && !sleeping_ && (world.imuFlowing & (1U << i)) && fakeNow % world.imuIntervalMs == 0) {
       ++events_[i];
     }
   }
 }
 Status Imu::resetHub() { did("imu.softreset"); world.imuReady = false; return Status::Ok; }
 Status Imu::fullRestart() { did("imu.restart"); world.imuReady = false; return Status::Ok; }
+void Imu::pinReset(uint8_t reason) { did(("imu.pinreset/" + std::to_string(reason)).c_str()); world.imuReady = false; }
 
 EnvSensor::EnvSensor(ChipSatPlatform::I2cBus &bus, ChipSatPlatform::System &system) : bus_(bus), system_(system) {}
 Status EnvSensor::read()
@@ -298,6 +303,19 @@ static void testBusFirst()
   world.busFaulted = false;
   run(h, 300, false);
   check(countOf("env.restart") == 1, "bus back: the baro's reset that was due goes ahead");
+
+  Health &b = *fresh();
+  world.busFaulted = true;
+  world.busClearDue = true;
+  world.busImuBlamed = true;
+  run(b, 1000, false);
+  check(world.actions.size() == 2 && world.actions[0].rfind("imu.pinreset/9@", 0) == 0 &&
+        world.actions[1].rfind("busclear", 0) == 0 && world.actions[0].substr(world.actions[0].find('@')) ==
+        world.actions[1].substr(world.actions[1].find('@')), "bus clear the IMU is blamed for: the pin reset first, the same pass");
+  world.busClearDue = true;
+  world.busImuBlamed = false;
+  run(b, 1000, false);
+  check(countOf("busclear") == 2 && countOf("imu.pinreset") == 1, "a clear the IMU isn't blamed for: no pin reset");
 }
 
 static void testImu()
@@ -312,7 +330,7 @@ static void testImu()
     world.imuReady = true;
     world.imuFlowing = 0x0F;
     run(h, 3000, true);
-    check(logged("I IMU") && logged("recover step=ok") && countOf("imu.restart") == 0, "and back: ok, no full restart");
+    check(logged("I IMU") && logged("recover step=ok") && countOf("imu.pinreset") == 0, "and back: ok, no pin reset");
   }
   // one report silent in the air: partly working, held for the ground
   {
@@ -323,38 +341,88 @@ static void testImu()
     run(h, 300, false);
     check(countOf("imu.softreset") == 1, "on the ground: the deferred reset goes ahead");
   }
-  // reset doesn't help: soft reset, full restart, aside
+  // reset doesn't help: soft reset, pin reset, aside
   {
     Health &h = *fresh();
     world.imuFlowing = 0;
     run(h, 3500, false);
     world.imuReady = true;   // comes back up but stays silent
     run(h, 6000, false);
-    check(countOf("imu.restart") == 1, "still silent after the soft reset: full restart");
+    check(countOf("imu.pinreset/2") == 1 && logged("how=pinreset") && countOf("imu.restart") == 0,
+          "still silent after the soft reset: pin reset, reason silent");
     world.imuReady = true;
     run(h, 8000, false);
-    check(logged("recover step=aside reason=silent backoffms=1000 attempts=2") && countOf("imu.restart") == 1 &&
+    check(logged("recover step=aside reason=silent backoffms=1000 attempts=2") && countOf("imu.pinreset") == 1 &&
           countOf("imu.softreset") == 2, "still silent: set aside 1 s, then the soft reset again");
+    check(world.actions.size() == 3 && world.actions[0].rfind("imu.softreset", 0) == 0 &&
+          world.actions[1].rfind("imu.pinreset", 0) == 0 && world.actions[2].rfind("imu.softreset", 0) == 0,
+          "IMU ladder in order: soft, pin, aside, soft");
   }
-  // HP: asleep for a TX then woken, reports back within the grace: nothing said
-  {
-    Health &h = *fresh();
-    run(h, 3000, false);
-    world.imuFlowing = 0;
-    run(h, 200, false);   // a TX without the controller knowing would not look like this; the wake does
-    h.imuWoke();
-    run(h, 900, false);
-    world.imuFlowing = 0x0F;
-    run(h, 5000, false);
-    check(captured.empty() && world.actions.empty(), "wake: reports back within the grace, nothing said");
-  }
-  // asleep in the loop: the wake failed, counts as dead
+  // nothing puts the IMU to sleep in flight, so one found asleep counts as dead
   {
     Health &h = *fresh();
     world.imuAsleep = true;
     run(h, 3500, false);
-    check(logged("reason=asleep") && countOf("imu.softreset") == 1, "asleep outside a TX: soft reset");
+    check(logged("reason=asleep") && countOf("imu.softreset") == 1, "asleep: soft reset");
   }
+}
+
+// Landed and asleep: the IMU at 1 Hz, the barometer and gauge read once a packet, the GPS in
+// standby. None of it is a fault. Woken, the GPS is judged again after its own grace
+static void testExpected()
+{
+  Health &h = *fresh();
+  world.imuIntervalMs = 1000;
+  world.gpsTalking = false;
+  h.expect(32000, false);
+  const uint32_t until = fakeNow + 600000;
+  while (fakeNow < until) {
+    imu.service();
+    gps.service();
+    if (fakeNow % 30000 == 0) {
+      env.read();
+      gauge.read();
+    }
+    h.service(false);
+    fakeNow += 10;
+  }
+  check(world.actions.empty() && captured.empty(), "asleep ten minutes: IMU at 1 Hz, readings a packet apart, GPS in standby, nothing done");
+  h.expect(0, true);
+  run(h, 9000, false);
+  check(world.actions.empty(), "awake, the GPS still quiet 9 s: its grace");
+  run(h, 2000, false);
+  check(countOf("gps.port") == 1, "and past 10 s it is the GPS's ladder again");
+  world.imuIntervalMs = 1000;
+  world.imuFlowing = 0;
+  run(h, 15000, false);
+  check(countOf("imu") == 0, "1 Hz, silent 15 s: not yet, 20 reports is the line");
+  run(h, 8000, false);
+  check(countOf("imu.softreset") == 1, "silent past 20 s at 1 Hz: soft reset");
+}
+
+// Each step of the ladder goes to the sink with its codes, in the order the console says them
+static void testSystemEvents()
+{
+  using namespace ChipSatLog;
+  static std::vector<SystemEvent> seen;
+  seen.clear();
+  setSystemSink([](void *, const SystemEvent &e) { seen.push_back(e); }, nullptr);
+  Health &h = *fresh();
+  run(h, 5000, false);
+  world.envAlive = false;
+  run(h, 6500, false);
+  world.envRestartWorks = true;
+  run(h, 3000, false);
+  setSystemSink(nullptr, nullptr);
+  std::string steps;
+  for (const SystemEvent &e : seen) {
+    check(e.source == kSourceSensor && e.part == kPartEnv, "system events: a sensor event, on the BME280");
+    steps += std::to_string(e.what) + "/" + std::to_string(e.reason) + "/" + std::to_string(e.detail) + " ";
+  }
+  // retry stale, reset (failed), aside 1 s, reset (failed), aside 2 s, reset (worked), ok
+  printf("     %s\n", steps.c_str());
+  check(steps.rfind("1/4/0 3/4/0 5/5/1000 3/5/0 5/5/2000 3/5/1 6/0/", 0) == 0 && seen.size() == 7 && seen[6].detail > 0,
+        "system events: retry, reset that failed, aside 1 s, again, aside 2 s, reset that worked, ok with its down time");
 }
 
 int main()
@@ -369,6 +437,8 @@ int main()
   testGps();
   testBusFirst();
   testImu();
+  testExpected();
+  testSystemEvents();
   printf("%s: %d checks, %d failed\n", failures == 0 ? "PASSED" : "FAILED", checks, failures);
   return failures == 0 ? 0 : 1;
 }

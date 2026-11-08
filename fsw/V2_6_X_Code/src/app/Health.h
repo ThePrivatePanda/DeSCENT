@@ -15,7 +15,7 @@ namespace ChipSatApp
 // Per-sensor and bus watchdogs. One step a pass at most, bus first, no sensor step while the bus
 // is faulted. GPS goes first on the ground since its position is what finds the sat.
 // Worst cost per step, from reading the code, not measured: bus clear <12 ms, baro restart ~70 ms,
-// gauge a few ms, IMU and GPS steps only queue work
+// gauge a few ms, IMU pin reset kImuResetHoldMs, the other IMU and GPS steps only queue work
 class Health
 {
 public:
@@ -27,7 +27,10 @@ public:
   // never from inside the TX wait. air includes the boot-air
   void service(bool air);
 
-  void imuWoke();   // HP: reports get kImuGraceMs to come back
+  // How the controller runs the parts now: the longest it leaves the barometer and the gauge between
+  // readings (0 at their own pace), and whether the GPS is meant to be talking (not in standby). A
+  // change starts that part's limits again. The IMU's pace comes from the IMU itself
+  void expect(uint32_t readGapMs, bool gpsOn);
 
   const SensorWatch &imuWatch() const { return imu_; }
   const SensorWatch &envWatch() const { return env_; }
@@ -44,7 +47,7 @@ private:
   void report(Part part, WatchChange change, uint32_t nowMs);
   bool act(Part part, uint32_t nowMs);
   SensorWatch &watch(Part part);
-  const char *reason(Part part, uint32_t nowMs) const;
+  uint8_t reason(Part part, uint32_t nowMs) const;   // a ChipSatLog::kWhy code
 
   ChipSatPlatform::System &system_;
   ChipSatPlatform::I2cBus &bus_;
@@ -59,11 +62,16 @@ private:
   SensorWatch gps_;
 
   uint32_t beganMs_ = 0;
+  uint32_t readGapMs_ = 0;
+  bool gpsOn_ = true;
+  uint32_t readsSinceMs_ = 0;   // the barometer's and gauge's limits count from here
+  uint32_t gpsSinceMs_ = 0;
   uint32_t lastActionMs_ = 0;
   bool actedAny_ = false;
 
   bool imuUp_ = false;
   uint32_t imuUpMs_ = 0;
+  uint16_t imuIntervalMs_ = 0;   // the report interval the counts were judged at
   uint32_t imuCounts_[4] = {0, 0, 0, 0};
   uint32_t imuMovedMs_[4] = {0, 0, 0, 0};
   uint8_t imuMoved_ = 0;    // since it came up

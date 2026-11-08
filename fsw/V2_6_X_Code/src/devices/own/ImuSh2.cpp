@@ -7,6 +7,7 @@
 
 #include "../Imu.h"
 #include "../../log/Log.h"
+#include "../../log/SystemEvent.h"
 
 namespace ChipSatDevices
 {
@@ -16,6 +17,7 @@ using ChipSatPlatform::Status;
 using ChipSatPlatform::System;
 using namespace ChipSatConfig;
 using namespace ChipSatConstants;
+using namespace ChipSatLog;
 
 // In the order of the ImuReport bits in Imu.h
 static const uint8_t kReportIds[4] = {kSh2LinearAcceleration, kSh2Gyroscope, kSh2Magnetometer,
@@ -452,6 +454,32 @@ enum class Restart : uint8_t { Idle, ResetSent, Enabling };
 static Restart restart = Restart::Idle;
 static uint32_t restartMs = 0;   // when this step started, or the last try
 static uint8_t restartIndex = 0;
+static uint8_t restartFailures = 0;   // in a row. Any at all and the next try is the pin
+static uint8_t restartWhy = 0;        // the last failure's kWhy code
+
+// A hub that doesn't ACK or never says reset complete may be stuck past where the I2C reset reaches
+// (boards 15 and 18, 2026-11: only a power-on brought theirs back). A held bus or a quarantined IMU
+// is the bus watchdog's and isn't counted
+static bool unanswered(Status status)
+{
+  return status == Status::NoAck || status == Status::Timeout;
+}
+
+static void restartFailed(uint32_t now, uint8_t why, const char *step)
+{
+  restart = Restart::Idle;
+  restartMs = now;
+  if (restartFailures < 0xFF) {
+    ++restartFailures;
+  }
+  restartWhy = why;
+  noteSystem(kSourceSensor, kSensorDriverRestart, kPartImu, why, 0, now);
+  LOG_W(Imu, "restart") {
+    line.field("ok", false);
+    line.field("step", step);
+    line.field("failures", static_cast<unsigned int>(restartFailures));
+  }
+}
 
 Imu::Imu(ChipSatPlatform::I2cBus &bus, ChipSatPlatform::System &system)
   : bus_(bus), system_(system)
@@ -467,6 +495,8 @@ Status Imu::begin(uint16_t reportIntervalMs)
   const uint32_t startMs = system_.nowMs();
   const char *reason = "noack";
   Status failure = Status::NoAck;
+  // pinReset() just before, the hub is already starting and its reset complete is the one to wait for
+  const bool pinned = restart == Restart::ResetSent;
 
   // Every attempt starts from nothing, so a retry really is one
   for (uint8_t attempt = 0; attempt < kImuInitAttempts; ++attempt) {
@@ -478,19 +508,21 @@ Status Imu::begin(uint16_t reportIntervalMs)
     resetSeen = false;
     sh2InitSeen = false;
 
-    if (bus_.probe(kImuAddress) != Status::Ok) {
-      reason = "noack";
-      failure = Status::NoAck;
-      continue;
-    }
+    if (!pinned || attempt > 0) {
+      if (bus_.probe(kImuAddress) != Status::Ok) {
+        reason = "noack";
+        failure = Status::NoAck;
+        continue;
+      }
 
-    // 05 00 01 00 01, the same reset SparkFun sends at boot. The IMU answers with its advertisement,
-    // then reset complete on the executable channel
-    const uint8_t reset = kImuCommandReset;
-    if (sendPacket(bus_, kShtpChannelExecutable, &reset, 1) != Status::Ok) {
-      reason = "write";
-      failure = Status::Failed;
-      continue;
+      // 05 00 01 00 01, the same reset SparkFun sends at boot. The IMU answers with its advertisement,
+      // then reset complete on the executable channel
+      const uint8_t reset = kImuCommandReset;
+      if (sendPacket(bus_, kShtpChannelExecutable, &reset, 1) != Status::Ok) {
+        reason = "write";
+        failure = Status::Failed;
+        continue;
+      }
     }
     if (!pollUntil(bus_, system_, kImuResetWaitMs, [] { return resetSeen; })) {
       reason = "reset";
@@ -512,6 +544,7 @@ Status Imu::begin(uint16_t reportIntervalMs)
     if (configureReports(0)) {
       ready_ = true;
       restart = Restart::Idle;
+      restartFailures = 0;
       emptyWaits_ = 0;
       LOG_I(Imu, "init") {
         line.field("ok", true);
@@ -555,7 +588,15 @@ void Imu::restartStep()
         return;
       }
       restartMs = now;
-      if (bus_.probe(kImuAddress) != Status::Ok) {
+      if (restartFailures > 0) {
+        pinReset(restartWhy);
+        return;
+      }
+      const Status probed = bus_.probe(kImuAddress);
+      if (probed != Status::Ok) {
+        if (unanswered(probed)) {
+          restartFailed(now, kWhyNoAck, "probe");
+        }
         return;
       }
       invalidate();
@@ -563,9 +604,12 @@ void Imu::restartStep()
       resetSeen = false;
       sh2InitSeen = false;
       const uint8_t reset = kImuCommandReset;
-      if (sendPacket(bus_, kShtpChannelExecutable, &reset, 1) == Status::Ok) {
+      const Status sent = sendPacket(bus_, kShtpChannelExecutable, &reset, 1);
+      if (sent == Status::Ok) {
         restart = Restart::ResetSent;
         LOG_I(Imu, "restart") { line.field("step", "reset"); }
+      } else if (unanswered(sent)) {
+        restartFailed(now, kWhyNoAck, "write");
       }
       return;
     }
@@ -588,24 +632,14 @@ void Imu::restartStep()
         restartIndex = 0;
         restartMs = now;
       } else if (elapsed >= kImuResetWaitMs + kImuBootSettleMs) {
-        restart = Restart::Idle;
-        restartMs = now;
-        LOG_W(Imu, "restart") {
-          line.field("ok", false);
-          line.field("step", resetSeen ? "sh2" : "reset");
-        }
+        restartFailed(now, kWhyNoReset, resetSeen ? "sh2" : "reset");
       }
       return;
 
     case Restart::Enabling:
       // one enable per call, not confirmed. The reports showing up in update() are the check
       if (sendSetFeature(bus_, restartIndex, static_cast<uint32_t>(reportIntervalMs_) * 1000UL) != Status::Ok) {
-        restart = Restart::Idle;
-        restartMs = now;
-        LOG_W(Imu, "restart") {
-          line.field("ok", false);
-          line.field("step", "enable");
-        }
+        restartFailed(now, kWhyNoEnable, "enable");
         return;
       }
       if (++restartIndex < 4) {
@@ -615,6 +649,8 @@ void Imu::restartStep()
       resetSeen = false;
       sleeping_ = false;
       ready_ = true;
+      restartFailures = 0;
+      noteSystem(kSourceSensor, kSensorDriverRestart, kPartImu, 0, 1, now);
       LOG_I(Imu, "restart") { line.field("ok", true); }
       return;
   }
@@ -885,6 +921,15 @@ Status Imu::wake()
   return Status::Ok;
 }
 
+Status Imu::setReportInterval(uint16_t ms)
+{
+  reportIntervalMs_ = ms;
+  if (!ready_ || sleeping_) {
+    return Status::NotReady;
+  }
+  return configureReports(0, kImuWakeBudgetMs) ? Status::Ok : Status::Failed;
+}
+
 Status Imu::fullRestart()
 {
   if (!ready_) {
@@ -910,6 +955,19 @@ Status Imu::resetHub()
 
   LOG_W(Imu, "softreset") { line.field("ok", status == Status::Ok); }
   return status;
+}
+
+void Imu::pinReset(uint8_t reason)
+{
+  pinMode(kImuResetPin, OUTPUT);
+  digitalWrite(kImuResetPin, LOW);
+  system_.waitMs(kImuResetHoldMs);
+  pinMode(kImuResetPin, INPUT);   // never left driven, so nothing that stops after this can hold the IMU in reset
+  noteSystem(kSourceSensor, kSensorPinReset, kPartImu, reason, restartFailures, system_.nowMs());
+  LOG_W(Imu, "pinreset") { line.field("failures", static_cast<unsigned int>(restartFailures)); }
+  resetSeen = false;
+  sh2InitSeen = false;
+  lose(true);   // the hub sends its advertisement and reset complete by itself after a pin reset
 }
 
 // Hands the IMU to restartStep(), starting on the next service(). resetSent: a reset is already on

@@ -47,6 +47,7 @@ struct GPSData
   int32_t latitudeE7 = 0;
   int32_t longitudeE7 = 0;
   int32_t altitudeMSLmm = 0;
+  uint32_t horizontalAccuracyMm = 0;   // the receiver's own estimate for this position
 
   bool valid = false;
   uint32_t updatedMs = 0;

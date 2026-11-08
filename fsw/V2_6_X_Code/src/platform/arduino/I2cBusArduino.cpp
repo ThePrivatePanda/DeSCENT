@@ -202,6 +202,11 @@ bool I2cBus::faulted(uint32_t nowMs) const
   return watch.faulted(nowMs);
 }
 
+bool I2cBus::imuResetDue(uint32_t nowMs) const
+{
+  return watch.imuResetDue(nowMs);
+}
+
 TwoWire &I2cBus::arduinoWire()
 {
   return Wire;

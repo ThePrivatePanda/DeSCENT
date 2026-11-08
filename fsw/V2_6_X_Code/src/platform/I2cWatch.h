@@ -51,6 +51,10 @@ public:
   bool clearDue(uint32_t nowMs) const;
   void cleared(const BusClear &result, uint32_t nowMs);
 
+  // a due clear the IMU may be behind: lines held at its address or jammed by it, or SCL held through
+  // the last clear. Its NRST goes low first, a part in reset should let go of the lines
+  bool imuResetDue(uint32_t nowMs) const { return imuBlamed_ && clearDue(nowMs); }
+
   // also true for kBusSettleMs after a clear, so the parts get a chance before their own resets
   bool faulted(uint32_t nowMs) const;
 
@@ -79,6 +83,7 @@ private:
   Part parts_[kSlots];
   bool linesHeld_ = false;
   bool clearNeeded_ = false;
+  bool imuBlamed_ = false;
   bool clearedAny_ = false;
   uint32_t clearedMs_ = 0;
   uint32_t clearRetryMs_ = 0;

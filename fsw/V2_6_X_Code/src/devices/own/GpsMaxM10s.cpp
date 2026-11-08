@@ -377,6 +377,7 @@ void Gps::takePvt()
     data_.longitudeE7 = longitudeE7;
     data_.latitudeE7 = latitudeE7;
     data_.altitudeMSLmm = altitudeMm;
+    data_.horizontalAccuracyMm = static_cast<uint32_t>(readS32(&frame[kNavPvtHAcc]));
     data_.updatedMs = lastPvtMs_;
   }
   data_.valid = trustworthy;
@@ -447,10 +448,44 @@ void Gps::hotStart()
   sendUbx(kUbxClassCfg, kUbxIdReset, payload, sizeof payload);
 }
 
+// Duration 0 is until woken. V_BCKP is tied to VCC, so it keeps its ephemeris for a hot start. Not
+// acknowledged. Flushed so a Stop2 straight after can't cut the frame off
+void Gps::standby()
+{
+  const uint8_t payload[16] = {0, 0, 0, 0, 0, 0, 0, 0, kUbxPmreqBackupForce, 0, 0, 0, kUbxPmreqWakeUartRx, 0, 0, 0};
+  sendUbx(kUbxClassRxm, kUbxIdPmreq, payload, sizeof payload);
+  port_.flush();
+  standby_ = true;
+  data_.valid = false;
+  utcValid_ = false;
+  LOG_I(Gps, "standby");
+}
+
+// The byte that wakes it is probably lost and the receiver takes a while to come up (not measured),
+// so the setting after it, acked, is what shows it is up
+Status Gps::wake()
+{
+  standby_ = false;
+  const uint8_t poke = 0xFF;
+  port_.write(&poke, 1);
+  bool answered = false;
+  for (uint8_t attempt = 0; attempt < kGpsWakeAttempts && !answered; ++attempt) {
+    answered = setKey(kUbxCfgPmOperateMode, kGpsOperateModeFull, 1);
+  }
+  resendConfig();
+  lastConfigMs_ = system_.nowMs();
+  clearCounts();
+  LOG_I(Gps, "wake") { line.field("ok", answered); }
+  return answered ? Status::Ok : Status::Timeout;
+}
+
 // Never waits
 Status Gps::read()
 {
   service();
+  if (standby_) {
+    return Status::NotReady;
+  }
 
   // A receiver that browned out is back on factory settings. It still answers our polls, so positions
   // alone may keep looking fresh, but its NMEA gives it away

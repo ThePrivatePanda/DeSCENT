@@ -9,8 +9,8 @@
 namespace ChipSatDevices
 {
 
-// MAX-M10S on LPUART1. Configured at boot and again when the settings look lost, never put to sleep.
-// Which driver is behind this is picked by CHIPSAT_GPS_DRIVER in config.h
+// MAX-M10S on LPUART1. Configured at boot and again when the settings look lost, in software standby
+// once landed with a fix held. Which driver is behind this is picked by CHIPSAT_GPS_DRIVER in config.h
 class Gps
 {
 public:
@@ -51,6 +51,13 @@ public:
   uint32_t lastByteMs() const { return lastByteMs_; }
   void restartPort();   // UART closed and opened, settings resent without waiting for acks
   void hotStart();      // UBX-CFG-RST, nothing cleared, not acknowledged
+
+  // UBX-RXM-PMREQ: software standby until a byte on its RX. From then on nothing is written to it,
+  // read() only listens, until wake(). Positions and time go invalid
+  void standby();
+  // A byte to wake it, then one setting until it is acked, then all of them. Ok once it answered,
+  // and back to normal either way
+  ChipSatPlatform::Status wake();
 
 private:
   bool configureAirborne();
@@ -94,6 +101,7 @@ private:
   uint8_t satellites_ = 0;
   bool llhChecked_ = false;
   bool invalidLlh_ = false;
+  bool standby_ = false;
 };
 
 } // namespace ChipSatDevices
