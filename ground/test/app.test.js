@@ -123,7 +123,7 @@ test('a spreading factor counts only when the board\'s own header says so', asyn
   await p.settle();
   const ws = p.net.last().open();
   const rxRow = (sf) => ({ kind: 'receiver', id: 'rx1', name: 'Mast', sf, packets: 12, dups: 0, badCrc: 0, errors: 0, lastLine: Date.now() });
-  const header = (sf) => '#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf=' + sf + ',cr=7,sync=0x12,pre=8,name=Mast,fw=1.5.0';
+  const header = (sf) => '#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf=' + sf + ',cr=7,sync=0x12,pre=8,name=Mast,fw=1.2.2,sfchip=' + sf + ',rx=1';
   ws.send(numbered([rxRow(7), { kind: 'snapshot-end' }]));
   await p.every(250);
   let seq = 10;
@@ -157,6 +157,19 @@ test('a spreading factor counts only when the board\'s own header says so', asyn
   await p.every(250);
   assert.strictEqual(p.$('toast').textContent, 'No header from Mast in 4 s, so SF10 is not confirmed');
   assert.match(rows(), /Mast SF9 .*SF10 not confirmed/);
+  // the chip on the factor but out of receive is not listening, whatever was asked
+  await p.fire('receivers', 'change', { dataset: { sf: 'rx1' }, value: '11' });
+  send({ kind: 'line', rx: 'rx1', t: Date.now(), text: header(11).replace('rx=1', 'rx=0') });
+  p.net.runTimers();
+  await p.every(250);
+  assert.strictEqual(p.$('toast').textContent, 'Mast is on SF11 but its radio is not in receive');
+  // firmware before 1.2.2 has no chip fields: its word, said as such
+  await p.fire('receivers', 'change', { dataset: { sf: 'rx1' }, value: '8' });
+  send({ kind: 'line', rx: 'rx1', t: Date.now(), text: '#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf=8,cr=7,sync=0x12,pre=8,name=Mast,fw=1.2.1' });
+  send(rxRow(8));
+  await p.every(250);
+  assert.strictEqual(p.$('toast').textContent, 'Mast says it is on SF8; its firmware does not read the radio chip back');
+  assert.match(rows(), /Mast SF8 .*SF8 said, chip not read/);
 });
 
 test('the replay bar drives the replay in the app', async () => {

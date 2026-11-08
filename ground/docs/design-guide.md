@@ -106,7 +106,7 @@ The floors: nothing is under 12.5 px except the 11 px group (kickers and table h
 
 The chrome, on every screen:
 
-- The bar is 68 px. Left: the brand, then the screens as pill tabs, each one plain word: ChipSats, T-Beams, Live, Replay, Data (the boards first, 2026-10-31). The picked one is sage-200 on sage-800. Replay is disabled until a log is open. The app serves the page, so all five screens are always there.
+- The bar is 68 px. Left: the brand, then the screens as pill tabs, each one plain word: ChipSats, T-Beams, Live, Replay, Data, Analysis (the boards first, 2026-10-31). The picked one is sage-200 on sage-800. Replay is disabled until a log is open. The app serves the page, so all six screens are always there.
 - Right of the bar: the strip (the receivers button, the file being logged to in bold with Save a copy and New file, a chip for a running job that goes to its screen, the build and release notices), then Open a file, Settings and the sun and moon button. Under 1640 px the bar drops two things it says elsewhere, so it keeps one row at 1440: the replayed file's name in the Replay tab (the replay bar names it) and "Logging to" before the log's name (its title says it). Under 1420 px it also drops Save a copy (the Data screen's row for the log being written saves it), so Replay keeps one row on a Surface. Two or three receivers stack inside their button. A job, build or release chip takes a second row.
 - Under the bar, on Replay, a white pill bar with Play, speed, the scrubber, the time and Save log, Save CSV, Save raw, Close log. The toast is a dark pill at the bottom centre.
 - Frame padding is 20 px and the gap between panels 16 px. Panels are `--radius-lg` (28 px), cards `--radius-md` (16 px). There are no rules between panels; a hairline is allowed inside a card between rows.
@@ -130,6 +130,12 @@ Data (`data.css`):
 - One white pane. The head: "Data", where the folder is, a search box, Open a file…, Look again. Then the filter row: groups of pills (kind, from, when), each with a kicker and counts that follow the other filters.
 - The table, newest first, each row a rounded bar: what it is, where it came from, when, size, then its actions as small accent-100 pills at the end. The picked row is surface-coloured. Below 700 px each row is a small card with its actions under it.
 - A pull's report opens under the table in a surface panel: the boot table on the left and where it is on disk with its actions on the right. With no report the panel is one line.
+
+Analysis (`analysis.css`), the 340 px list and a sheet:
+
+- The list is every pull folder and session log, newest first, as `.item` rows: the board's name, then "Pull" and the folder's minute. A pull that read nothing says `empty` or `no dump.txt` (warn).
+- The sheet's head: the board, `complete`, `incomplete` or `nothing read`, Open in Replay, then a line each for the slots read, the firmware from report.json and the settings line with the note that it is the restart for the pull. Under it the boots in chip order as a plain grid; a boot opens as its own pane below, the newest open at first.
+- A boot pane is Phases, System events, Validity flags, Readings, Gaps and Not in the log, each under an 11 px sage heading. The phase lane is a 34 px bar cut only where a phase event cut it, neutral fills with the phase named inside, a hatched fill for the held fix, and a 2 px tick for an IMU rate change. A validity flag is a 12 px neutral track with its clear spells in neutral-700. No state colour on any of it: a phase is not a state of health.
 
 The settings drawer: 560 px from the right edge with `--shadow-lg`, over whichever screen is up. A white card per section with its title; a field is its label with the hint under it on the left and its control in one 150 px column on the right. The Status section says its settings are kept in the app, the same on every screen. The foot says where the display settings are kept and holds Reset to defaults.
 

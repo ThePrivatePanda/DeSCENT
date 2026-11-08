@@ -199,10 +199,14 @@ test('Radio card: the spreading factor row hands the ask to the app and says wha
   await p.ticks(1);
   assert.match(p.text('tb-sheet'), /asked for SF9 Asked for SF9 at \d\d:\d\d:\d\d\. Waiting for the board's header\./);
   // the board's header said 9: the fleet's receiver now reports it too
-  p.sfAsks.set('rx1', { sf: 9, at: NOW, state: 'heard', heardAt: NOW + 400 });
+  p.sfAsks.set('rx1', { sf: 9, at: NOW, state: 'heard', heardAt: NOW + 400, chip: true });
   rx('rx1', 9);
   await p.ticks(1);
-  assert.match(p.text('tb-sheet'), /confirmed The board's header confirmed SF9 at \d\d:\d\d:\d\d\./);
+  assert.match(p.text('tb-sheet'), /confirmed The board's radio chip confirmed SF9 at \d\d:\d\d:\d\d\./);
+  // firmware before 1.2.2 only says what it set, not what the chip is on
+  p.sfAsks.set('rx1', { sf: 9, at: NOW, state: 'heard', heardAt: NOW + 400, chip: false });
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /said, chip not read The board's header said SF9 at \d\d:\d\d:\d\d; its firmware does not read the radio chip back\./);
   p.sfAsks.set('rx1', { sf: 12, at: NOW, state: 'refused', said: 'Mast refused SF12 and stays on SF9' });
   await p.ticks(1);
   assert.match(p.text('tb-sheet'), /refused SF12 Mast refused SF12 and stays on SF9\. The board answered #DG,ERR,sf\./);
@@ -210,6 +214,19 @@ test('Radio card: the spreading factor row hands the ask to the app and says wha
   await p.ticks(1);
   assert.match(p.text('tb-sheet'), /SF10 not confirmed No header from Mast in 4 s, so SF10 is not confirmed\./);
   assert.doesNotMatch(p.text('tb-sheet'), /settles when its next header/);
+});
+
+test('Radio card: the radio chip\'s own report outranks the firmware and any ask', async () => {
+  const { p, rx } = rig();
+  rx('rx1', 9, { info: { id: 'x', f: '915.0', bw: '125.0', sf: '9', cr: '7', sync: '0x12', pre: '8', sfchip: '9', rx: '0' } });
+  p.sfAsks.set('rx1', { sf: 9, at: NOW, state: 'heard', heardAt: NOW + 400, chip: true });
+  p.parts.tbeams.show();
+  await p.settle();
+  assert.match(p.text('tb-sheet'), /not listening The board's radio chip says it is not in receive\./);
+  assert.doesNotMatch(p.text('tb-sheet'), /confirmed/);
+  rx('rx1', 9, { info: { id: 'x', f: '915.0', bw: '125.0', sf: '9', cr: '7', sync: '0x12', pre: '8', sfchip: '7', rx: '1' } });
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /radio on SF7 The firmware says SF9 but its radio chip is on SF7\./);
 });
 
 test('a header that has not come yet is said, not guessed', async () => {
@@ -286,7 +303,9 @@ test('flashing: one press of the button named for the board writes; the card say
 
 // The user, 2026-11-03: the page said one factor and the board kept another, and they could
 // not tell which one it was on. A flash's factor is an ask until the board's header says it.
-const HEADER = (sf) => '#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf=' + sf + ',cr=7,sync=0x12,pre=8,name=,fw=1.2.1';
+const HEADER = (sf, chip, listening) => '#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf=' + sf + ',cr=7,sync=0x12,pre=8,name=,fw=1.2.2,sfchip=' +
+  (chip === undefined ? sf : chip) + ',rx=' + (listening === false ? 0 : 1);
+const OLD_HEADER = (sf) => '#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf=' + sf + ',cr=7,sync=0x12,pre=8,name=,fw=1.2.1';
 async function flashed(sf) {
   const r = rig();
   r.rx('rx1', 7);
@@ -334,6 +353,26 @@ test('a board whose header never shows the asked factor is not confirmed, with w
   feed(HEADER(12));
   await p.ticks(1);
   assert.match(p.text('tb-sheet'), /SF12 not confirmed/);
+});
+
+test('after a flash, firmware that does not read the chip back is taken at its word, and says so', async () => {
+  const { p, feed } = await flashed(12);
+  feed(OLD_HEADER(9));
+  feed(OLD_HEADER(12), NOW + 2500);
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /Flashed\. SF12 said by the board at \d\d:\d\d:\d\d; its firmware does not read the radio chip back\./);
+  assert.equal(p.toasts[p.toasts.length - 1], 'Mast says it is on SF12');
+});
+
+test('after a flash, a chip not in receive or on another factor is not confirmed', async () => {
+  const { p, feed } = await flashed(12);
+  feed(HEADER(12, 12, false), NOW - 31000);
+  await p.every(1000, 1);
+  assert.match(p.text('tb-sheet'), /Flashed\. SF12 not confirmed: the board's radio is not in receive\./);
+  const again = await flashed(12);
+  again.feed(HEADER(12, 9), NOW - 31000);
+  await again.p.every(1000, 1);
+  assert.match(again.p.text('tb-sheet'), /Flashed\. SF12 not confirmed: the board's header still says SF9\./);
 });
 
 test('a board that refuses the factor says so', async () => {

@@ -13,6 +13,8 @@
   if (!hub.native) return;
 
   const CANNOT = 'This build of the app cannot do that yet.';
+  // what the dump firmware's console takes, slowest first (pull.rs BAUDS)
+  const BAUDS = [115200, 230400, 460800, 921600, 1000000, 2000000];
   const ANY = 'any';   // the one row an older build gets: whatever is on the probe
 
   const state = {
@@ -530,7 +532,6 @@ async function buildAndFlash() {
     const numBox = (field, value, label, unit, size) => '<input type="text" inputmode="numeric" data-keep="build:' + field + '" data-build="' + field + '"' +
       ' value="' + esc(String(value)) + '" placeholder="' + unit + '" aria-label="' + label + '" size="' + size + '">';
     const WHAT = ['Switched on, on the bench or the drone, and again once landed.', 'From the climb through the release and the fall.'];
-    const LOG_ZERO = ['Log: the gap between records, 0 writes nothing, not even the time anchors.', 'Log: the gap between records, 0 is every reading.'];
     const subs = B.PHASES.map((ph, n) => {
       const follow = !!d['p' + n + 'f'];
       const percent = [0, 1, 2, 3].map((k) => d['p' + n + 'soc' + k]);
@@ -546,7 +547,7 @@ async function buildAndFlash() {
       const rows = B.phaseRows(settings, d, n).map((row) => {
         const fixed = row.key === B.FIXED;
         return '<tr><th scope="row">' + label(row.key) + '</th>' +
-          cell(fixed ? 'p' + n + 'l' : 'p' + n + 'lms' + row.key, row.log, B.logZero(ph.key), ph.label + ' log gap') +
+          cell(fixed ? 'p' + n + 'l' : 'p' + n + 'lms' + row.key, row.log, B.logZero(), ph.label + ' log gap') +
           cell(fixed ? 'p' + n + 's' : 'p' + n + 'ms' + row.key, row.transmit, 'back to back', ph.label + ' transmit gap') +
           (settings ? '<td class="board">' + board('log', row.log) + board('transmit', row.transmit) + '</td>' : '') + '</tr>';
       }).join('');
@@ -557,7 +558,7 @@ async function buildAndFlash() {
         '<label class="check"><input type="checkbox" data-build="p' + n + 'f"' + (follow ? ' checked' : '') + '> Set by battery level (changes both columns)</label>' +
         '<div class="ratewrap"><table class="rates"><thead><tr><th scope="col">Battery</th><th scope="col">Log every</th><th scope="col">Transmit every</th>' +
           (settings ? '<th scope="col">On the board</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
-        '<p class="hint">' + LOG_ZERO[n] + ' Transmit: the gap after a packet, 0 is back to back.</p>' +
+        '<p class="hint">Log: the gap between records, 0 is every reading (20 Hz). Transmit: the gap after a packet, 0 is back to back.</p>' +
         (said.apart ? '<p class="hint">' + esc(said.apart) + '</p>' : '') +
         (said.older.length ? onBoard(said.older.join('; '), true) : '') + '</div>';
     });
@@ -665,7 +666,13 @@ async function buildAndFlash() {
     const rep = s.report || {};
     const n = (v) => COUNT.format(Number(v));
     const rows = [];
-    if (Number.isFinite(rep.read)) rows.push(['Records', n(rep.read) + (Number.isFinite(rep.found) ? ' of ' + n(rep.found) : '')]);
+    if (Number.isFinite(rep.read)) {
+      rows.push(['Records', n(rep.read) + (Number.isFinite(rep.found) ? ' of ' + n(rep.found) : '')]);
+      // the app's own count as the lines arrived when it has one, else the report's failed checks
+      const invalid = s.stats ? s.stats.badCrc + s.stats.garbled : (rep.failedCheck || 0);
+      rows.push(['Valid', n(s.stats ? s.stats.good : rep.read)]);
+      rows.push(['Invalid', n(invalid)]);
+    }
     else if (s.log) rows.push(['Log', esc(s.log)]);
     if (Array.isArray(rep.boots)) {
       rows.push(['Boots', n(rep.boots.length)]);
@@ -699,7 +706,7 @@ async function buildAndFlash() {
     const cardRows = [];
     if (fwr.dump && fwr.dump.words) cardRows.push(['Read with', esc('the ' + fwr.dump.words)]);
     if (fwr.onBoard && fwr.onBoard.built && fwr.onBoard.built.words) cardRows.push(['On the board was', esc('the ' + fwr.onBoard.built.words)]);
-    const acts = '<div class="acts">' +
+    const acts = !s.log ? '' : '<div class="acts">' +
       '<button data-openlog="' + esc(s.log) + '" class="primary">Open</button>' +
       '<a class="button" download="' + esc(flatName(s.log)) + '" href="' + logUrl(s.log) + '">Save log</a>' +
       '<button data-csv="' + esc(s.log) + '">Save CSV</button>' +
@@ -748,9 +755,11 @@ async function buildAndFlash() {
         alerts: [['', esc((j.wipe ? 'The chip was not erased: ' : '') + j.error)]]
           .concat(dump ? [['bad', 'The board is left on the dump firmware' + left(j.savedFsw) + '.']] : [], parts ? parts.alerts : []) });
     }
+    const down = slower(j, r);
     if (j.error) {
       return Object.assign(out, { title: what + ' failed', more: steps(j), alerts: [['bad', esc(j.error)]]
-        .concat(j.keepFsw && !j.restored ? [['bad', 'The flight software was not put back. The board is still running the dump firmware' + left(j.savedFsw) + '.']] : []) });
+        .concat(j.keepFsw && !j.restored ? [['bad', 'The flight software was not put back. The board is still running the dump firmware' + left(j.savedFsw) + '.']] : [])
+        .concat(down ? [down.alert] : []), acts: down ? down.acts : '' });
     }
     if (j.wipe && j.pct === 100) {
       return Object.assign(out, { title: 'Flash cleared', status: j.restored ? mark('good', 'flight software back') : '',
@@ -758,8 +767,46 @@ async function buildAndFlash() {
         alerts: j.restored ? [] : [['bad', !j.keepFsw ? 'The board is on the dump firmware: write a flight image next.'
           : 'The board was already on the dump firmware and still is: write the flight image and its settings before it flies.']] });
     }
-    if (j.log) return Object.assign(out, pullParts(j, csid), { title: 'Flight log pulled' });
+    // A chip with nothing on it, or only boot events and time anchors, is a whole pull too,
+    // with a report and no log to open
+    if (j.log || j.report) {
+      const parts = pullParts(j, csid);
+      const title = j.log ? 'Flight log pulled' : j.report.found === 0 ? 'Flight log pulled: the chip is empty' : 'Flight log pulled: no packets on the chip';
+      return Object.assign(out, parts, { title },
+        down ? { alerts: [down.alert].concat(parts.alerts), acts: down.acts + parts.acts } : {});
+    }
     return null;
+  }
+
+  // What has come off the chip so far, counted by the app as it arrives. Nothing before the
+  // first raw line, and nothing from an app too old to count.
+  function counted(j) {
+    const c = j.stats;
+    if (!c || !c.rawLines) return '';
+    const n = (v) => COUNT.format(v);
+    const wrong = c.badCrc + c.garbled;
+    const all = c.good + wrong;
+    // Invalid is said even at 0: a count that only appears when something went wrong can't
+    // be told from one the page never showed
+    const why = [c.badCrc ? n(c.badCrc) + ' failed the CRC' : '', c.garbled ? n(c.garbled) + ' garbled' : ''].filter(Boolean).join(', ');
+    return '<p class="note counted">' + n(c.good) + ' valid, ' + n(wrong) + ' invalid (' + (100 * wrong / all).toFixed(1) + ' %' +
+      (why ? ': ' + why : '') + '), ' + (c.bytesPerSec / 1024).toFixed(1) + ' kB/s' + (j.baud && j.baud !== BAUDS[0] ? ' at ' + j.baud + ' baud' : '') + '</p>';
+  }
+
+  // A pull that read slots with a bad CRC or lines that did not arrive whole says how many,
+  // and offers the same pull one rate down. At 115200 there is nothing slower to offer.
+  function slower(j, r) {
+    const c = j.stats;
+    if (j.wipe || !c || !(c.badCrc + c.garbled)) return null;
+    const words = [c.badCrc ? COUNT.format(c.badCrc) + (c.badCrc === 1 ? ' record' : ' records') + ' failed the CRC' : '',
+      c.garbled ? COUNT.format(c.garbled) + (c.garbled === 1 ? ' line' : ' lines') + ' arrived garbled' : ''].filter(Boolean).join(' and ');
+    const at = BAUDS.indexOf(j.baud || BAUDS[0]);
+    const down = at > 0 ? BAUDS[at - 1] : 0;
+    const ready = r && (r.onProbe || r.id === ANY) && !busy() && !!consoleFor(r);
+    return {
+      alert: ['warn', esc(words + ' at ' + (j.baud || BAUDS[0]) + ' baud.') + (down ? '' : ' That is the slowest rate.')],
+      acts: down ? '<div class="acts"><button data-pullat="' + down + '"' + (ready ? '' : ' disabled') + '>Pull again at ' + down + ' baud</button></div>' : '',
+    };
   }
 
   // One card under the head for the job on this board (2026-10-31: the user asked for one
@@ -778,7 +825,7 @@ async function buildAndFlash() {
       const stop = kind !== 'pull' ? '' : '<div class="acts"><button data-pullstop="1"' + (j.stopping ? ' disabled>Stopping…' : '>Stop') + '</button>' +
         '<span class="note">' + (j.stopping ? 'Stopping after the step in hand.' : 'Keeps what has arrived.') +
           (j.keepFsw ? ' The flight software goes back on.' : ' The board stays on the dump firmware: its flight software is not being kept.') + '</span></div>';
-      return '<div class="pane now">' + jobBlock(j, title) +
+      return '<div class="pane now">' + jobBlock(j, title) + (kind === 'pull' && !j.wipe ? counted(j) : '') +
         (to ? '<p class="note">Saving to <span class="path">' + esc(to) + '</span></p>' : '') + stop +
         '<p class="note">Leave the board plugged in.</p></div>';
     }
@@ -807,6 +854,12 @@ async function buildAndFlash() {
     if (talking) return talking;
     const free = usable.find((b) => b.state !== 'receiver');
     return free ? free.port : '';
+  }
+
+  // The rate a pull or a clear reads this board at, as last chosen for it.
+  function baudFor(r) {
+    const kept = Number(store.get('dg-baud-' + (r.uid || ANY)));
+    return BAUDS.includes(kept) ? kept : BAUDS[0];
   }
 
   // One chooser per sheet: in Sensor bench on a bench board, in Flight log otherwise.
@@ -912,6 +965,9 @@ async function buildAndFlash() {
     return '<div class="pane logs"><div class="logs-top"><h3>Flight logs</h3><span class="sum">' + summary + '</span>' + acts + '</div>' + list +
       '<div class="rows kvrows">' +
         '<div><span class="l">Console port</span>' + chooser + '</div>' +
+        '<div><span class="l">Baud</span><select data-baud="' + esc(r.uid || ANY) + '" aria-label="Rate the dump firmware prints the log at">' +
+          BAUDS.map((b) => '<option value="' + b + '"' + (b === baudFor(r) ? ' selected' : '') + '>' + b + '</option>').join('') + '</select>' +
+          '<span class="note">The dump firmware\'s console, for a pull and a clear. Faster reads a full chip sooner; go down if records come back bad.</span></div>' +
         '<div><span class="l">Flight software</span><label class="check"><input type="checkbox" data-keepfsw="1"' + (state.keepFsw ? ' checked' : '') +
             '> Save the flight software that is on it and put it back</label>' +
           (state.keepFsw ? '' : mark('warn', 'the board will be left on the dump firmware')) +
@@ -933,7 +989,7 @@ async function buildAndFlash() {
     if (!port) return;
     if (state.peek) { await state.peek; if (busy()) return; }
     try {
-      const more = { uid: r.uid, wipe: 1 };
+      const more = { uid: r.uid, wipe: 1, baud: baudFor(r) };
       if (anyConsole) more.anyConsole = 1;
       if (r.probe && r.probe.serial) more.probe = r.probe.serial;
       await hub.pull(port, state.keepFsw, more);
@@ -1045,14 +1101,17 @@ async function buildAndFlash() {
     render();
   }
 
-async function pull(anyConsole) {
+async function pull(anyConsole, baud) {
     const r = rows().find((x) => x.id === state.sel);
     if (!r || busy()) return;
     const port = consoleFor(r);
     if (!port) return;
     if (state.peek) { await state.peek; if (busy()) return; }
+    // a pull asked for one rate down becomes this board's rate
+    if (baud) store.set('dg-baud-' + (r.uid || ANY), String(baud));
     try {
       const more = anyConsole ? { anyConsole: 1 } : {};
+      more.baud = baudFor(r);
       if (r.uid) more.uid = r.uid;
       if (r.probe && r.probe.serial) more.probe = r.probe.serial;
       await hub.pull(port, state.keepFsw, more);
@@ -1168,6 +1227,7 @@ async function pull(anyConsole) {
     } else if (at('data-flashgo')) { flash(false); return; }
     else if (at('data-flashforce')) { flash(true); return; }
     else if (at('data-pull')) { pull(); return; }
+    else if (at('data-pullat')) { pull(false, Number(at('data-pullat'))); return; }
     else if (at('data-anyconsole')) {
       const s = jobs.pull;
       if (s && s.wipe) wipe(true); else pull(true);
@@ -1252,6 +1312,9 @@ async function pull(anyConsole) {
     } else if (t.getAttribute('data-console')) {
       store.set('dg-console-' + t.getAttribute('data-console'), t.value);
       toast('Console port ' + t.options[t.selectedIndex].text.split(',')[0]);
+      t.blur();
+    } else if (t.getAttribute('data-baud')) {
+      store.set('dg-baud-' + t.getAttribute('data-baud'), t.value);
       t.blur();
     } else if (t.getAttribute('data-keepfsw')) {
       state.keepFsw = t.checked;

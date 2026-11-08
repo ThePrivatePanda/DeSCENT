@@ -112,19 +112,29 @@ in it.
 
 For a pull it gives the board, the settings line, how much of the log was read, whether the log
 wrapped, and for each boot its reset cause, records, dropped count, gaps, and which of the
-firmware's own validity flags went clear, when and for how long. Each boot gets a one-line verdict
-built from those facts and nothing else. For a ground log it gives each board's packets, missed,
-restarts, RSSI and SNR range, last heard and which receivers heard it, then each receiver.
+firmware's own validity flags went clear, when and for how long. It lists the system events the
+firmware wrote as runs in the order they began, each with its words and what they stand for, the
+phases those events cut the boot into, how the boot ended (the next boot's reset cause, or the
+restart for the pull), and the lowest and highest of each reading looked at after a drop, counting
+only readings whose valid bit is set. Each boot gets a one-line verdict built from those facts and
+nothing else. For a ground log it gives each board's packets, missed, restarts, RSSI and SNR range,
+last heard and which receivers heard it, then each receiver.
+
+The Analysis tab shows the same from `/api/check`, for every pull folder (`/api/pulls` lists the
+ones that read nothing too) and every session log, without the verdict line.
 
 Values are never judged, only the flags are read. Anything it could not read is counted and the
 first few lines are shown. Some things it cannot know, and it says so:
 
-- flash has no sensor recovery, BUS or phase lines, those only go to the console. A pull has none
-  of them unless a console was caught, and a ground log has them only if a ChipSat was on a port
-- no record says its phase, so a pull gives ground and air by spacing: records under 1.5 s apart
-  are the air rate, and three or more steady slower ones in a row are the ground rate. Picked, not
-  measured. A boot too short to have three shows them as gaps, and going to air writes the ring
-  first, so the fast spacing starts about 30 s before take-off
+- sensor recovery, bus and phase events reach flash only from firmware of 2026-11-06 on, each a
+  pooled run with a count. An older pull has none unless a console was caught, and a ground log has
+  them only if a ChipSat was on a port. Up to about 30 s before every reset can be missing: what was
+  still in the RAM ring and the runs still pooling
+- no record says its phase. The phases come from the phase events alone, and a boot without any
+  says so. The record spacing is shown as spacing: records under 1.5 s apart are fast, and three or
+  more steady slower ones in a row are steady. Picked, not measured. A boot too short to have three
+  shows them as gaps, and going to air writes the ring first, so the fast spacing starts about 30 s
+  before take-off
 - the settings and RST lines in a dump.txt are the board restarting for the pull. They say what
   it was set to then, not what an older boot ran with, and the log gaps are not on that line
 - a dropped event is written at most every 10 s, so a boot can have lost more than its last count

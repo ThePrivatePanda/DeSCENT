@@ -61,8 +61,9 @@
       setTimeout(() => {
         if (ask.state !== 'asked') return;
         ask.state = 'silent';
-        ask.said = Number.isFinite(ask.heardSf) ? rxName(k) + ' answered with SF' + ask.heardSf + ', not SF' + sf
-          : 'No header from ' + rxName(k) + ' in ' + (SF_WAIT_MS / 1000) + ' s, so SF' + sf + ' is not confirmed';
+        ask.said = ask.deaf ? rxName(k) + ' is on SF' + sf + ' but its radio is not in receive'
+          : Number.isFinite(ask.heardSf) ? rxName(k) + ' answered with SF' + ask.heardSf + ', not SF' + sf
+            : 'No header from ' + rxName(k) + ' in ' + (SF_WAIT_MS / 1000) + ' s, so SF' + sf + ' is not confirmed';
         toast(ask.said);
         renderReceivers();
       }, SF_WAIT_MS);
@@ -80,23 +81,29 @@
       ask.state = 'refused';
       ask.said = rxName(rx) + ' refused SF' + ask.sf + (Number.isFinite(ask.was) ? ' and stays on SF' + ask.was : '');
     } else if (text.startsWith('#DG,RX,')) {
-      const m = /,sf=(\d+)/.exec(text);
-      const sf = m ? Number(m[1]) : NaN;
+      const said = DG.boardmodel.headerSf(text);
       // A header printed before the command landed still says the old value; the answer
       // itself follows at once, so a header that disagrees is left to the wait to judge.
-      if (sf !== ask.sf) { ask.heardSf = sf; return; }
-      ask.state = 'heard'; ask.heardAt = t;
-      ask.said = rxName(rx) + ' is listening on SF' + sf;
+      if (said.sf !== ask.sf || !said.listening) { ask.heardSf = said.sf; ask.deaf = !said.listening; return; }
+      ask.state = 'heard'; ask.heardAt = t; ask.chip = said.chip;
+      ask.said = said.chip ? rxName(rx) + ' is listening on SF' + said.sf
+        : rxName(rx) + ' says it is on SF' + said.sf + '; its firmware does not read the radio chip back';
     } else return;
     toast(ask.said);
     renderReceivers();
   });
   // The mark a receiver row carries for its last ask; none once the board has said the same
   function sfMark(k, r) {
+    // the chip's own report outranks any ask: a radio out of receive hears nothing
+    if (r && String(r.info.rx) === '0') return V.mark('bad', 'not listening');
+    if (r && r.info.sfchip !== undefined && Number(r.info.sfchip) !== Number(r.info.sf)) return V.mark('bad', 'radio on SF' + r.info.sfchip);
     const ask = sfAsks.get(k);
     if (!ask) return '';
     if (ask.state === 'asked') return V.mark('warn', 'asked for SF' + ask.sf);
-    if (ask.state === 'heard') return r && Number(r.info.sf) === ask.sf ? V.mark('good', 'SF' + ask.sf + ' confirmed') : '';
+    if (ask.state === 'heard') {
+      if (!r || Number(r.info.sf) !== ask.sf) return '';
+      return ask.chip ? V.mark('good', 'SF' + ask.sf + ' confirmed') : V.mark('warn', 'SF' + ask.sf + ' said, chip not read');
+    }
     return V.mark('bad', ask.state === 'refused' ? 'refused SF' + ask.sf : ask.state === 'failed' ? 'SF' + ask.sf + ' not sent' : 'SF' + ask.sf + ' not confirmed');
   }
 

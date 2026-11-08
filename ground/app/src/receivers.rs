@@ -25,6 +25,10 @@ pub struct Header {
     pub fw: Option<String>,
     // The spreading factor it is listening on, from sf=. None on a line where it does not read.
     pub sf: Option<u8>,
+    // From 1.2.2 on, read off the SX1276 after the radio is back in receive: its own spreading
+    // factor, and whether it is really in continuous receive. None from older firmware.
+    pub sfchip: Option<u8>,
+    pub rx: Option<bool>,
 }
 
 // What a version looks like, and short: digits and dots, starting with a digit, 16
@@ -53,16 +57,24 @@ pub fn header(line: &str) -> Option<Header> {
     let mut name = None;
     let mut fw = None;
     let mut sf = None;
+    let mut sfchip = None;
+    let mut rx = None;
     for field in fields.split(',') {
         match field.split_once('=') {
             Some(("id", v)) => id = an_id(v),
             Some(("name", v)) => name = Some(v.trim().to_string()),
             Some(("fw", v)) => fw = a_version(v),
             Some(("sf", v)) => sf = v.parse::<u8>().ok().filter(|n| (6..=12).contains(n)),
+            Some(("sfchip", v)) => sfchip = v.parse::<u8>().ok().filter(|n| (6..=12).contains(n)),
+            Some(("rx", v)) => rx = match v {
+                "1" => Some(true),
+                "0" => Some(false),
+                _ => None,
+            },
             _ => {}
         }
     }
-    Some(Header { id: id?, name, fw, sf })
+    Some(Header { id: id?, name, fw, sf, sfchip, rx })
 }
 
 // A name as it can be kept here and sent to a board: one line, no commas, because a
@@ -177,12 +189,12 @@ mod tests {
     #[test]
     fn a_header_line_says_which_receiver_it_is() {
         let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8").unwrap();
-        assert_eq!(h, Header { id: "A4C1F3".into(), name: None, fw: None, sf: Some(9) });
+        assert_eq!(h, Header { id: "A4C1F3".into(), name: None, fw: None, sf: Some(9), sfchip: None, rx: None });
         // Newer firmware says what it is called, or that it is called nothing yet.
         let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8,name=Left one").unwrap();
         assert_eq!(h.name.as_deref(), Some("Left one"));
         let h = header("#DG,RX,v1,id=a4c1f3,name=,f=915.0").unwrap();
-        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some(String::new()), fw: None, sf: None });
+        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some(String::new()), fw: None, sf: None, sfchip: None, rx: None });
 
         for no in [
             "PKT,55,00FF,-50.0,13.75,-12",
@@ -201,9 +213,20 @@ mod tests {
     }
 
     #[test]
+    fn from_1_2_2_a_header_says_what_the_chip_is_on_and_whether_it_listens() {
+        let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=12,cr=7,sync=0x12,pre=8,name=,fw=1.2.2,sfchip=12,rx=1").unwrap();
+        assert_eq!((h.sfchip, h.rx), (Some(12), Some(true)));
+        let h = header("#DG,RX,v1,id=A4C1F3,sf=12,fw=1.2.2,sfchip=9,rx=0").unwrap();
+        assert_eq!((h.sf, h.sfchip, h.rx), (Some(12), Some(9), Some(false)));
+        // a garbled field is not reported, not "not listening"
+        let h = header("#DG,RX,v1,id=A4C1F3,sfchip=99,rx=x").unwrap();
+        assert_eq!((h.sfchip, h.rx), (None, None));
+    }
+
+    #[test]
     fn a_header_says_which_firmware_it_runs_from_1_2_1_on() {
         let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8,name=Left one,fw=1.2.1").unwrap();
-        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some("Left one".into()), fw: Some("1.2.1".into()), sf: Some(9) });
+        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some("Left one".into()), fw: Some("1.2.1".into()), sf: Some(9), sfchip: None, rx: None });
         assert_eq!(header("#DG,RX,v1,id=A4C1F3,name=,fw=1.10.0\r").unwrap().fw.as_deref(), Some("1.10.0"));
         assert_eq!(header("#DG,RX,v1,id=A4C1F3,fw=2").unwrap().fw.as_deref(), Some("2"));
         assert_eq!(header("#DG,RX,v1,id=A4C1F3,fw=1234567.123456.1").unwrap().fw.as_deref(), Some("1234567.123456.1"));

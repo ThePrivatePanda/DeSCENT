@@ -12,6 +12,7 @@
 <link rel="stylesheet" href="css/chipsats.css">
 <link rel="stylesheet" href="css/tbeams.css">
 <link rel="stylesheet" href="css/data.css">
+<link rel="stylesheet" href="css/analysis.css">
 </head>
 <body data-screen="live">
 <!-- No icon sprite: the replay Play button's word is set in app.js and the select chevron is a CSS background. -->
@@ -24,6 +25,7 @@
     <button id="view-live" role="tab" aria-selected="true" data-screen="live">Live</button>
     <button id="view-replay" role="tab" aria-selected="false" data-screen="replay" disabled title="Open a log, or pull one off a ChipSat">Replay</button>
     <button id="view-data" role="tab" aria-selected="false" data-screen="data" title="Everything the app has written to disk" hidden>Data</button>
+    <button id="view-analysis" role="tab" aria-selected="false" data-screen="analysis" title="What a pulled flight log or a session log says, boot by boot" hidden>Analysis</button>
   </nav>
   <div class="bar-right">
     <div id="strip" class="strip" hidden>
@@ -183,6 +185,18 @@
   <div id="data-detail" class="two" hidden></div>
 </section>
 
+<section id="screen-analysis" class="screen" hidden>
+  <div class="pane picklist">
+    <div class="pane-head">
+      <span class="kicker">Analysis · pulls and logs</span>
+      <span class="spacer"></span>
+      <button id="an-look" class="ghost" title="Read the folder again">Look again</button>
+    </div>
+    <div id="an-list" class="scroll"></div>
+  </div>
+  <div id="an-sheet" class="sheet"></div>
+</section>
+
 <aside id="settings" class="drawer" hidden>
   <div class="drawer-head">
     <h2>Settings</h2>
@@ -224,5 +238,6 @@
 <script src="js/chipsats.js"></script>
 <script src="js/benchpane.js"></script>
 <script src="js/datascreen.js"></script>
+<script src="js/analysis.js"></script>
 </body>
 </html>

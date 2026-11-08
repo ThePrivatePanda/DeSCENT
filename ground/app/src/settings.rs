@@ -305,7 +305,7 @@ fn decode_rate(b: &[u8], layout: u8, slot: usize, words: &str) -> Result<Rate, S
 
 // The rule the firmware's usable() applies to a log gap.
 pub fn log_trouble(ms: u32) -> Option<String> {
-    // 0 is fine in any phase (every IMU reading in the air, nothing on the ground)
+    // 0 is fine in any phase, every IMU reading
     if ms != 0 && ms < LOG_MIN_MS {
         return Some(format!("{} ms, which has to be 0 or at least {}", ms, LOG_MIN_MS));
     }
@@ -506,10 +506,8 @@ pub fn patch(image: &[u8], at: usize, asked: &Asked) -> Result<Vec<u8>, String> 
     Ok(out)
 }
 
-// What 0 means for a log slot. On the ground that is no time anchors either.
-pub fn log_zero_words(phase: usize) -> &'static str {
-    if phase == 0 { "nothing written" } else { "every reading" }
-}
+// What 0 means for a log slot, in either phase: every IMU reading, 20 Hz
+pub const LOG_ZERO_WORDS: &str = "every reading";
 pub const TRANSMIT_ZERO_WORDS: &str = "back to back";
 
 fn rates_json(rates: &Option<[Rate; PHASES]>) -> String {
@@ -774,8 +772,7 @@ mod tests {
         assert_eq!(by_battery.words(TRANSMIT_ZERO_WORDS), "by battery: 5 s above 90 %, 20 s to 60 %, 60 s to 30 %, 90 s to 5 %, then 200 s (300 s when the gauge cannot be read)");
         assert_eq!(rate(1_000, false).words(TRANSMIT_ZERO_WORDS), "every 1 s");
         assert_eq!(rate(0, false).words(TRANSMIT_ZERO_WORDS), "back to back");
-        assert_eq!(flat(0).words(log_zero_words(0)), "nothing written");
-        assert_eq!(flat(0).words(log_zero_words(1)), "every reading");
+        assert_eq!(flat(0).words(LOG_ZERO_WORDS), "every reading");
 
         // What a build with fixed settings carries.
         let built = find(&image(&[(2048, block4(255, 1, 7, 14, 1, &transmit(1000), &log()))])).unwrap();

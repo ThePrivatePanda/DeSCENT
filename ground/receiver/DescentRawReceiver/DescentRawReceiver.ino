@@ -65,11 +65,13 @@ constexpr uint32_t kHeartbeatMs     = 5000;
 constexpr uint32_t kHeaderMs        = 30000;
 constexpr uint32_t kSerialBaud      = 115200;
 
-SX1276 radio = new Module(
+// Named, so chipSf() and chipListening() can read the chip's registers: SX127x::getMod() is protected
+Module radioModule(
   RADIO_CS_PIN,
   RADIO_DI0_PIN,
   RADIO_RST_PIN,
   RADIO_DIO1_PIN);
+SX1276 radio = &radioModule;
 
 volatile bool receivedFlag = false;
 volatile bool receiveInterruptEnabled = true;
@@ -83,7 +85,7 @@ char deviceId[7] = "000000";
 // partition at 0x9000, so writing one wipes the name and every radio setting with it
 // Bumped with every shipped image, and the same three numbers as the file in firmware/. A receiver
 // reports it so nothing has to be guessed from which keys its header happens to carry
-constexpr char kFirmwareVersion[] = "1.2.1";
+constexpr char kFirmwareVersion[] = "1.2.2";
 
 constexpr size_t kNameMax = 24;
 char receiverName[kNameMax + 1] = "";
@@ -152,16 +154,27 @@ void saveSettings() {
   prefs.end();
 }
 
+// What the SX1276 itself holds, not what was asked of it: SF is RegModemConfig2 bits 7-4 (masked,
+// not shifted, by SPIgetRegValue), and RegOpMode bits 2-0 read RXCONTINUOUS only while it listens
+uint8_t chipSf() {
+  return radioModule.SPIgetRegValue(RADIOLIB_SX127X_REG_MODEM_CONFIG_2, 7, 4) >> 4;
+}
+
+bool chipListening() {
+  return radioModule.SPIgetRegValue(RADIOLIB_SX127X_REG_OP_MODE, 2, 0) == RADIOLIB_SX127X_RXCONTINUOUS;
+}
+
 // Every parameter in use, not just the id: a receiver on the wrong spreading
 // factor hears nothing at all, which looks exactly like a satellite that never
 // powered up. This line is how the two are told apart.
 void printHeader() {
   const int n = snprintf(
     lineBuffer, sizeof(lineBuffer),
-    "#DG,RX,v1,id=%s,f=%.1f,bw=%.1f,sf=%u,cr=%u,sync=0x%02X,pre=%u,name=%s,fw=%s\n",
+    "#DG,RX,v1,id=%s,f=%.1f,bw=%.1f,sf=%u,cr=%u,sync=0x%02X,pre=%u,name=%s,fw=%s,sfchip=%u,rx=%u\n",
     deviceId, settings.freqMHz, settings.bwKHz,
     (unsigned)settings.sf, (unsigned)settings.cr,
-    (unsigned)settings.sync, (unsigned)settings.pre, receiverName, kFirmwareVersion);
+    (unsigned)settings.sync, (unsigned)settings.pre, receiverName, kFirmwareVersion,
+    (unsigned)chipSf(), chipListening() ? 1u : 0u);
   Serial.write(reinterpret_cast<const uint8_t*>(lineBuffer), n);
 }
 
@@ -405,13 +418,19 @@ void applySetting(char* arg) {
   } else {
     settings = wanted;
     saveSettings();
-    printHeader();
   }
 
   // A packet that arrived during the change was never read out, and its length
   // register means nothing after the restart.
   receivedFlag = false;
   startListening();
+  if (state == RADIOLIB_ERR_NONE) {
+    if (which == kSetSf && (chipSf() != settings.sf || !chipListening())) {
+      printCommandError(key);   // the chip didn't take it, whatever RadioLib returned
+    } else {
+      printHeader();
+    }
+  }
 }
 
 void handleCommand(char* line) {
@@ -479,12 +498,11 @@ void setup() {
   radio.setPacketReceivedAction(setFlag);
 
   const uint32_t now = millis();
+  startListening();
   printHeader();
   lastHeaderMs = now;
   lastHeartbeatMs = now;
   updateDisplay();
-
-  startListening();
 }
 
 void handlePacket() {

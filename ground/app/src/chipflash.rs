@@ -191,11 +191,13 @@ pub struct FlightImage {
     pub block_at: Option<usize>,
 }
 
-// flash_dump.bin as it was: before 2026-10-04, when it printed record and time lines, and
-// before 2026-10-13, when it could not be interrupted while printing.
+// flash_dump.bin as it was: before 2026-10-04, when it printed record and time lines, before
+// 2026-10-13, when it could not be interrupted while printing, and before 2026-11-06, when it
+// always printed at 115200.
 const OLDER_DUMPS: &[(usize, &str)] = &[
     (31224, "4a5f0ead87429a51d9c84757c8be07058b58ed14ac885e25b9f48ca3f8c531a6"),
     (31008, "25118bdfafab456c2bbe94260bfbdbb333318f676d95c2b0599648f6cf789d41"),
+    (31900, "78026fa2b57aaeedf89d2f7caf29e66046b1ccc5e255f4c4e3b9d93b2dee7ea1"),
 ];
 
 impl Known {
@@ -337,7 +339,12 @@ fn recognise_carried(image: &[u8], known: &Known) -> Firmware {
     let sha256 = |bytes: &[u8]| -> String { Sha256::digest(bytes).iter().map(|b| format!("{:02x}", b)).collect() };
     // An image is named by the start of its sha256, the way /api/health names the ones carried.
     let id = |hex: &str| Some(hex.chars().take(16).collect::<String>().to_ascii_lowercase());
-    if let Some(carried) = known.dump.filter(|d| !d.is_empty() && image.starts_with(d)) {
+    // A pull writes the dump firmware with its console rate patched in, so those four bytes
+    // are no part of telling which image it is
+    let as_carried = |d: &[u8]| {
+        image.get(..d.len()).is_some_and(|head| head == d || crate::pull::dump_at_baud(head, 115200).is_ok_and(|b| b == d))
+    };
+    if let Some(carried) = known.dump.filter(|d| !d.is_empty() && as_carried(d)) {
         return Firmware { kind: "dump", current: true, id: id(&sha256(carried)), ..Firmware::unknown() };
     }
     // Earlier dump images are not carried, only their hashes, so the same number of

@@ -180,8 +180,8 @@ test('each phase has one table: a switch and thresholds for both columns, a log 
   assert.match(h, /data-build="p1l" value="0.05"/);
   assert.doesNotMatch(h, /No altitude source|blind|data-build="lb"/);
   assert.match(h, /30 m on GPS/);
-  assert.match(h, /0 writes nothing, not even the time anchors/);
-  assert.match(h, /0 is every reading/);
+  assert.doesNotMatch(h, /writes nothing/);
+  assert.equal((h.match(/0 is every reading \(20 Hz\)/g) || []).length, 2, 'the same words under both phases');
   assert.match(h, /On the ground the readings mostly stay in the board's RAM, and only one per ground log gap reaches flash\./);
   assert.match(h, /the air's battery bands apply only while the board logs as air/);
   assert.equal((h.match(/Set by battery level \(changes both columns\)/g) || []).length, 2, 'a switch per phase');
@@ -254,10 +254,10 @@ test('the write step lists what changes row by row, and beside a 0 the box says 
   assert.match(w, /Air, log by battery level off → on/);
   assert.match(w, /Air, transmit by battery level off → on/);
   assert.match(w, /Air, to 50 %, transmit 10 s → 30 s/);
-  assert.match(w, /Ground, always, log 1 s → nothing written/);
+  assert.match(w, /Ground, always, log 1 s → every reading/);
   assert.doesNotMatch(w, /Air, to 50 %, log/, 'a row that gives the same gap is not a change');
   assert.match(p.sheet(), /<span class="zero">every reading<\/span>/);
-  assert.match(p.sheet(), /<span class="zero">nothing written<\/span>/);
+  assert.equal((p.sheet().match(/<span class="zero">every reading<\/span>/g) || []).length, 2, 'ground and air both say every reading');
   // A band threshold moved is one change, the page writes it to both columns.
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1soc3' }, { tagName: 'INPUT', value: '25' });
   assert.equal((p.words().match(/Air, threshold 4 20 % → 25 %/g) || []).length, 1);
@@ -346,8 +346,8 @@ test('a failed flash says why in the same box, and a pull or a clear opens it to
   // the head: the board's name, the title and the state on one line, the time small beside them
   assert.match(p.html('flash-done-body'), /<h2 id="flash-done-title"><span>CS9 · Flight log pulled<\/span><span class="mark good">complete<\/span><span class="note">\d\d:\d\d:\d\d<\/span><\/h2>/);
   // then a label and a value a line, not sentences
-  assert.match(tidy(p.text('flash-done-body')), /Records 6,301 of 6,301 Boots 2 GPS time none Board ids 15 and 17 Folder \/home\/op\/DeSCENT\/2026-10-22\/pulls\/1402-CS9 Flight software put back/);
-  assert.match(p.html('flash-done-body'), /<dl class="kv"><dt>Records<\/dt><dd>6,301 of 6,301<\/dd><dt>Boots<\/dt><dd>2<\/dd>/);
+  assert.match(tidy(p.text('flash-done-body')), /Records 6,301 of 6,301 Valid 6,301 Invalid 0 Boots 2 GPS time none Board ids 15 and 17 Folder \/home\/op\/DeSCENT\/2026-10-22\/pulls\/1402-CS9 Flight software put back/);
+  assert.match(p.html('flash-done-body'), /<dl class="kv"><dt>Records<\/dt><dd>6,301 of 6,301<\/dd><dt>Valid<\/dt><dd>6,301<\/dd><dt>Invalid<\/dt><dd>0<\/dd><dt>Boots<\/dt><dd>2<\/dd>/);
   assert.doesNotMatch(p.text('flash-done-body'), /dump firmware|Last pull:/);
   assert.doesNotMatch(p.html('flash-done-body'), /data-openlog/, 'the box reports; the sheet has the actions');
   await p.fire('flash-done-ok', 'click');
@@ -938,7 +938,7 @@ test('a pull the app calls complete says so', async () => {
   p.jobs.pull = { running: false, board: '/dev/ttyUSB0', steps: ['done'], keepFsw: true, restored: true, error: null, uid: UID9,
     log: '2026-10-22/pulls/1402-CS9/ground.log', report: { read: 12480, found: 12480, complete: true, boots: [{ timeSource: 'anchor' }] } };
   p.jobs.heard.forEach((fn) => fn([]));
-  assert.match(p.words(), /Flight log pulled complete .*Records 12,480 of 12,480 Boots 1 GPS time 1 boot/);
+  assert.match(p.words(), /Flight log pulled complete .*Records 12,480 of 12,480 Valid 12,480 Invalid 0 Boots 1 GPS time 1 boot/);
 });
 
 // The user's 2026-10-31 example: four lines with space between each, where one block will do
@@ -953,7 +953,7 @@ test('a pull\'s result is a labelled list in the card under the head, said once,
   const w = p.words();
   assert.equal((w.match(/Records 6,301/g) || []).length, 1);
   assert.ok(w.search(/Flight log pulled/) < w.search(/Identity and radio/), 'under the head, before the steps');
-  assert.match(w, /Flight log pulled complete Close Records 6,301 of 6,301 Boots 27 GPS time none Board ids 15, 16 and 17 Folder \/home\/cats\/DeSCENT\/2026-10-31\/pulls\/2121-board17 Read with the dump firmware built here 21:21 from 09589b7 \+ Settings.cpp, Settings.h and 11 more changed The records carry board ids 15, 16 and 17, not 9\. The board is still running the dump firmware, not flight software\. Open Save log Save CSV Save raw/);
+  assert.match(w, /Flight log pulled complete Close Records 6,301 of 6,301 Valid 6,301 Invalid 0 Boots 27 GPS time none Board ids 15, 16 and 17 Folder \/home\/cats\/DeSCENT\/2026-10-31\/pulls\/2121-board17 Read with the dump firmware built here 21:21 from 09589b7 \+ Settings.cpp, Settings.h and 11 more changed The records carry board ids 15, 16 and 17, not 9\. The board is still running the dump firmware, not flight software\. Open Save log Save CSV Save raw/);
   assert.equal((h.match(/<dl class="kv">/g) || []).length, 1, 'one list');
   assert.doesNotMatch(h, /<p class="(outcome|step) inpane">/);
   assert.match(h, /data-openlog="2026-10-31\/pulls\/2121-board17\/ground.log"[^>]*>Open</);
@@ -981,4 +981,101 @@ test('a running pull is one job card under the head, and the flight logs card ke
   assert.match(w, /Flight logs .* Console port .* Pull the flight log/);
   assert.match(p.sheet(), /data-pull="1"[^>]*disabled/);
   assert.match(p.sheet(), /data-buildembed="1"[^>]*disabled/);
+});
+
+test('the pull baud is chosen per board, kept across a reload, and sent with a pull and a clear', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], boards: CONSOLE_PORT });
+  assert.match(p.sheet(), /<select data-baud="2032374555435010002C002E"[^>]*><option value="115200" selected>115200<\/option><option value="230400">/);
+  assert.match(p.words(), /Console port .* Baud .* Flight software .* Pull the flight log/);
+  await p.fire('screen-chipsats', 'click', { 'data-pull': '1' });
+  assert.equal(p.o.pulled.more.baud, 115200, 'the default when nothing was chosen');
+  await p.fire('screen-chipsats', 'change', { 'data-baud': UID9 }, { tagName: 'SELECT', value: '921600' });
+  assert.equal(p.storage['dg-baud-' + UID9], '921600');
+  await p.fire('screen-chipsats', 'click', { 'data-pull': '1' });
+  assert.equal(p.o.pulled.more.baud, 921600);
+
+  const again = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], boards: CONSOLE_PORT, storage: p.storage });
+  assert.match(again.sheet(), /<option value="921600" selected>921600<\/option>/);
+  await again.fire('screen-chipsats', 'click', { 'data-wipe': '1' });
+  await again.fire('screen-chipsats', 'click', { 'data-wipego': '1' });
+  assert.equal(again.o.pulled.more.wipe, 1);
+  assert.equal(again.o.pulled.more.baud, 921600, 'a clear reads at the same rate');
+
+  // a rate kept from some other build is not offered back
+  const odd = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], boards: CONSOLE_PORT, storage: { ['dg-baud-' + UID9]: '9600' } });
+  assert.match(odd.sheet(), /<option value="115200" selected>/);
+});
+
+test('a running pull counts the valid and invalid records and the rate as they arrive', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], boards: CONSOLE_PORT });
+  const pulling = (stats, baud) => {
+    p.jobs.pull = { running: true, board: '/dev/ttyUSB0', seconds: 30, pct: 45, steps: [], dir: '/home/op/DeSCENT/x', raw: null, uid: UID9, baud, stats };
+    p.jobs.heard.forEach((fn) => fn([]));
+  };
+  pulling({ rawLines: 0, good: 0, badCrc: 0, garbled: 0, bytesPerSec: 0 }, 115200);
+  assert.doesNotMatch(p.words(), /\d valid/, 'nothing before the first raw line');
+  pulling({ rawLines: 1234, good: 1231, badCrc: 3, garbled: 0, bytesPerSec: 11674 }, 115200);
+  assert.match(p.words(), /1,231 valid, 3 invalid \(0\.2 %: 3 failed the CRC\), 11\.4 kB\/s(?! at)/);
+  pulling({ rawLines: 5000, good: 5000, badCrc: 0, garbled: 0, bytesPerSec: 90000 }, 921600);
+  assert.match(p.words(), /5,000 valid, 0 invalid \(0\.0 %\), 87\.9 kB\/s at 921600 baud/, 'invalid is said at 0 too');
+  pulling({ rawLines: 5003, good: 4990, badCrc: 6, garbled: 4, bytesPerSec: 90000 }, 921600);
+  assert.match(p.words(), /4,990 valid, 10 invalid \(0\.2 %: 6 failed the CRC, 4 garbled\), 87\.9 kB\/s at 921600 baud/);
+});
+
+test('a pull that read bad records says how many and offers the same pull one rate down', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], boards: CONSOLE_PORT });
+  const ended = (more) => {
+    p.jobs.pull = Object.assign({ running: false, board: '/dev/ttyUSB0', steps: ['done'], keepFsw: true, restored: true, error: null, uid: UID9,
+      log: '2026-11-06/pulls/1902-CS9/ground.log', report: { read: 4990, found: 5000, complete: false, failedCheck: 10, boots: [] } }, more);
+    p.jobs.heard.forEach((fn) => fn([]));
+  };
+  ended({ baud: 921600, stats: { rawLines: 5003, good: 4990, badCrc: 6, garbled: 4, bytesPerSec: 90000 } });
+  assert.match(p.words(), /6 records failed the CRC and 4 lines arrived garbled at 921600 baud\./);
+  assert.match(p.sheet(), /<button data-pullat="460800">Pull again at 460800 baud<\/button>/);
+  await p.fire('screen-chipsats', 'click', { 'data-pullat': '460800' });
+  assert.equal(p.o.pulled.more.baud, 460800);
+  assert.equal(p.o.pulled.keepFsw, false, 'the same pull: what the keep box says');
+  assert.equal(p.storage['dg-baud-' + UID9], '460800', 'and that rate is kept for the board');
+
+  // a failed pull with garbled lines gets it too
+  ended({ log: null, report: null, error: 'nothing that reads as a log came off the board', restored: true, baud: 2000000,
+    stats: { rawLines: 40, good: 0, badCrc: 0, garbled: 1, bytesPerSec: 150000 } });
+  assert.match(p.words(), /Pull failed .*1 line arrived garbled at 2000000 baud\./);
+  assert.match(p.sheet(), /data-pullat="1000000"[^>]*>Pull again at 1000000 baud</);
+
+  // nothing slower than 115200
+  ended({ baud: 115200, stats: { rawLines: 10, good: 9, badCrc: 1, garbled: 0, bytesPerSec: 11000 } });
+  assert.match(p.words(), /1 record failed the CRC at 115200 baud\. That is the slowest rate\./);
+  assert.doesNotMatch(p.sheet(), /data-pullat/);
+
+  // a clean pull says nothing about rates
+  ended({ baud: 921600, stats: { rawLines: 5000, good: 5000, badCrc: 0, garbled: 0, bytesPerSec: 90000 }, report: { read: 5000, found: 5000, complete: true, boots: [] } });
+  assert.doesNotMatch(p.words(), /failed the CRC|garbled|Pull again/);
+});
+
+// User, 2026-11-06: "I pulled the log from the current CS and it just exited with no message".
+// The board printed its whole log, one boot event and no packets, and the page drew nothing.
+test('a pull with only boot events and no packets ends in the box and the card, not in silence', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], boards: CONSOLE_PORT });
+  p.jobs.pull = { running: false, board: '/dev/ttyACM0', steps: ['done'], keepFsw: false, restored: false, error: null, uid: UID9, pct: 100,
+    log: null, dir: '/home/op/DeSCENT/2026-11-06/pulls/1935-2-CS9', raw: '2026-11-06/pulls/1935-2-CS9/dump.txt',
+    report: { read: 1, found: 1, complete: true, boots: [{ n: 1, records: 0 }] }, baud: 2000000, stats: { rawLines: 1, good: 1, badCrc: 0, garbled: 0, bytesPerSec: 2259 } };
+  await p.jobEnded('pull');
+  assert.equal(p.el('flash-done').hidden, false, 'the box opens');
+  assert.match(tidy(p.text('flash-done-body')), /Flight log pulled: no packets on the chip .*Records 1 of 1 Valid 1 Invalid 0/);
+  assert.match(p.words(), /Flight log pulled: no packets on the chip/);
+  assert.doesNotMatch(p.words(), /failed/);
+  assert.doesNotMatch(p.sheet(), /data-openlog="null"|data-csv="null"/);
+});
+
+test('a pull of an empty chip ends as a pulled log that says the chip is empty, with nothing to open', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT_CS9], boards: CONSOLE_PORT });
+  p.jobs.pull = { running: false, board: '/dev/ttyUSB0', steps: ['done'], keepFsw: true, restored: true, error: null, uid: UID9, pct: 100,
+    log: null, dir: '/home/op/DeSCENT/2026-11-06/pulls/1902-CS9', raw: '2026-11-06/pulls/1902-CS9/dump.txt',
+    report: { read: 0, found: 0, complete: true, boots: [] }, baud: 115200, stats: { rawLines: 0, good: 0, badCrc: 0, garbled: 0, bytesPerSec: 9000 } };
+  p.jobs.heard.forEach((fn) => fn([]));
+  const w = p.words();
+  assert.match(w, /Flight log pulled: the chip is empty complete .*Records 0 of 0 Valid 0 Invalid 0/);
+  assert.doesNotMatch(w, /failed/);
+  assert.doesNotMatch(p.sheet(), /data-openlog="null"|data-csv="null"/);
 });

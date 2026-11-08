@@ -276,10 +276,13 @@ fn notice(
         news
     };
     let mut set_sf = None;
-    if let (Some((wants, port)), Some(on)) = (want, header.sf) {
+    // The chip's own spreading factor from 1.2.2 on, the firmware's copy before that. A board that
+    // says it is not in receive is not on any factor yet
+    let listening = header.rx != Some(false);
+    if let (Some((wants, port)), Some(on)) = (want, header.sfchip.or(header.sf)) {
         let mut wants = wants.lock().unwrap();
         if let Some(w) = wants.get_mut(port) {
-            if w.sf == on {
+            if w.sf == on && listening {
                 println!("{}: receiver {} is on SF{}, as asked after the flash", port, id, on);
                 wants.remove(port);
             } else if w.sent >= WANT_SF_TRIES || now_ms().saturating_sub(w.since_ms) > WANT_SF_FOR_MS {
@@ -1265,6 +1268,25 @@ mod tests {
         // A garbled line whose name could not have been set here changes nothing kept.
         said(&hub, "rx1", &NAMED.replace("name=01", "name=Ma\u{7f}st"));
         assert_eq!(hub.rx_names.lock().unwrap().get("A4C1F3"), Some("Mast"));
+    }
+
+    #[test]
+    fn from_1_2_2_the_chip_has_to_be_on_the_factor_and_listening() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut hub = Hub::new(tx);
+        let wire = wired(&mut hub, "rx1", "/dev/ttyUSB0");
+        hub.want_sf("/dev/ttyUSB0", 12);
+        let header = UNNAMED.replace("fw=1.2.1", "fw=1.2.2,sfchip=12,rx=0").replace("sf=9", "sf=12");
+        // the firmware's copy says 12, but the radio is not in receive: asked again
+        said(&hub, "rx1", &header);
+        assert_eq!(text(&wire), "#SET,sf,12\n");
+        // the chip itself still on 9, whatever the copy says: asked again
+        said(&hub, "rx1", &header.replace("sfchip=12,rx=0", "sfchip=9,rx=1"));
+        assert_eq!(text(&wire), "#SET,sf,12\n#SET,sf,12\n");
+        // on 12 and listening: done, later headers are not a reason to ask
+        said(&hub, "rx1", &header.replace("rx=0", "rx=1"));
+        said(&hub, "rx1", UNNAMED);
+        assert_eq!(text(&wire), "#SET,sf,12\n#SET,sf,12\n");
     }
 
     #[test]

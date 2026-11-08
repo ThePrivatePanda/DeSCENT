@@ -312,6 +312,43 @@ pub fn logs_json(dir: &Path, chips: &crate::chips::Registry) -> String {
     format!("{{\"logs\":[{}]}}", items.join(","))
 }
 
+// Every pull folder, newest first. /api/logs names a pull by its ground.log, and a pull that read
+// nothing has none, so this is how the page finds the empty and failed ones too
+pub fn pulls_json(dir: &Path) -> String {
+    let mut folders: Vec<(String, PathBuf)> = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if crate::layout::is_day(&name) {
+            for p in std::fs::read_dir(e.path().join(crate::layout::PULLS)).into_iter().flatten().flatten() {
+                folders.push((format!("{}/{}/{}", name, crate::layout::PULLS, p.file_name().to_string_lossy()), p.path()));
+            }
+        } else if name.starts_with(PULL_FOLDER) {
+            folders.push((name, e.path()));
+        }
+    }
+    let mut rows: Vec<(u64, String)> = folders
+        .iter()
+        .filter(|(_, path)| path.is_dir())
+        .map(|(name, path)| {
+            let dump = std::fs::metadata(path.join("dump.txt")).ok();
+            let when = dump.as_ref().map(modified_secs).or_else(|| std::fs::metadata(path).ok().map(|m| modified_secs(&m))).unwrap_or(0);
+            let uid = crate::layout::board_in(path).map_or(String::from("null"), |u| format!("\"{}\"", esc(&u)));
+            let row = format!(
+                "{{\"name\":\"{}\",\"when\":{},\"dumpBytes\":{},\"log\":{},\"report\":{},\"uid\":{}}}",
+                esc(name),
+                when,
+                dump.map_or(String::from("null"), |m| m.len().to_string()),
+                path.join("ground.log").is_file(),
+                path.join("report.json").is_file(),
+                uid
+            );
+            (when, row)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    format!("{{\"pulls\":[{}]}}", rows.into_iter().map(|(_, r)| r).collect::<Vec<String>>().join(","))
+}
+
 const PULL_FOLDER: &str = "descent-pull-";
 
 // Bytes, because a name can hold anything once it is decoded and has to be whole UTF-8
@@ -575,11 +612,11 @@ fn settings_asked(q: &[(String, String)]) -> Result<Option<crate::radio::Request
 // "set for board 9, SF12 at 15 dBm; ground transmit every 60 s, log every 10 s; air transmit
 // every 1 s, log by battery: ..."
 fn settings_words(asked: &crate::settings::Asked) -> String {
-    use crate::settings::{log_zero_words, TRANSMIT_ZERO_WORDS};
+    use crate::settings::{LOG_ZERO_WORDS, TRANSMIT_ZERO_WORDS};
     let phases: Vec<String> = crate::settings::PHASE_WORDS
         .iter()
         .enumerate()
-        .map(|(p, name)| format!("{} transmit {}, log {}", name, asked.transmit[p].words(TRANSMIT_ZERO_WORDS), asked.log[p].words(log_zero_words(p))))
+        .map(|(p, name)| format!("{} transmit {}, log {}", name, asked.transmit[p].words(TRANSMIT_ZERO_WORDS), asked.log[p].words(LOG_ZERO_WORDS)))
         .collect();
     format!("set for board {}, SF{} at {} dBm; {}", asked.csid, asked.sf, asked.dbm, phases.join("; "))
 }
@@ -1321,6 +1358,11 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
         return;
     }
 
+    if path == "/api/pulls" {
+        let _ = request.respond(Response::from_string(pulls_json(&ctx.data)).with_header(header("Content-Type", "application/json")));
+        return;
+    }
+
     // A log off the data folder, so the page can replay what was written there without
     // anyone standing up a second web server to hand it over. Read-only, that folder and
     // the pull folders in it only, no walking out of it.
@@ -1376,6 +1418,13 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
         let probe = crate::json::str_field(&body, "probe").filter(|p| !p.is_empty());
         // anyConsole is Pull anyway
         let check_console = crate::json::int_field(&body, "anyConsole").unwrap_or(0) == 0;
+        // the dump firmware's console, 115200 unless asked
+        let baud = match crate::json::int_field(&body, "baud") {
+            None if !body.contains("\"baud\"") => 115200,
+            Some(b) if crate::pull::BAUDS.iter().any(|&x| i64::from(x) == b) => b as u32,
+            Some(b) => return answer(request, failed(&crate::pull::baud_refused(b))),
+            None => return answer(request, failed("baud has to be a number")),
+        };
         // board the page thinks is on the probe. The pull checks it and names saves after it
         let asked_uid = crate::json::str_field(&body, "uid").filter(|u| !u.is_empty());
         let uid = asked_uid.as_deref().and_then(crate::stm32::a_uid);
@@ -1427,6 +1476,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
                                 uid,
                                 name,
                                 check_console,
+                                baud,
                             },
                             held,
                         )
@@ -1846,7 +1896,7 @@ mod tests {
             zeros.rates[2] = flat(0);
             zeros.rates[3] = flat(0);
             assert_eq!(set_for(image.bytes, image.module, &radio, &zeros).unwrap().1,
-                format!("set for board 9, SF12 at {} dBm; ground transmit every 60 s, log nothing written; air transmit back to back, log every reading", power));
+                format!("set for board 9, SF12 at {} dBm; ground transmit every 60 s, log every reading; air transmit back to back, log every reading", power));
         }
     }
 
@@ -1921,6 +1971,31 @@ mod tests {
         std::fs::write(path, body).unwrap();
         let f = std::fs::File::options().write(true).open(path).unwrap();
         f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
+    }
+
+    #[test]
+    fn the_pull_list_has_every_pull_folder_the_empty_ones_too() {
+        let dir = scratch("pulls");
+        let day = dir.join("2026-11-07").join("pulls");
+        let good = day.join("1813-board15");
+        std::fs::create_dir_all(&good).unwrap();
+        written(&good.join("dump.txt"), "raw", 1_794_093_000);
+        std::fs::write(good.join("ground.log"), "x").unwrap();
+        std::fs::write(good.join("report.json"), "{}").unwrap();
+        std::fs::write(good.join("board.txt"), "203237455543500D00060024\n").unwrap();
+        let empty = day.join("1742-board15");
+        std::fs::create_dir_all(&empty).unwrap();
+        written(&empty.join("dump.txt"), "", 1_794_091_300);
+        std::fs::create_dir_all(dir.join("descent-pull-2026-09-26T17-00-00-ttyACM1")).unwrap();
+        std::fs::create_dir_all(dir.join("2026-11-07").join("logs")).unwrap();
+
+        let json = pulls_json(&dir);
+        let good = json.find("{\"name\":\"2026-11-07/pulls/1813-board15\",\"when\":1794093000,\"dumpBytes\":3,\"log\":true,\"report\":true,\"uid\":\"203237455543500D00060024\"}");
+        let empty = json.find("{\"name\":\"2026-11-07/pulls/1742-board15\",\"when\":1794091300,\"dumpBytes\":0,\"log\":false,\"report\":false,\"uid\":null}");
+        assert!(good.is_some() && empty.is_some() && good < empty, "newest first: {}", json);
+        assert!(json.contains("{\"name\":\"descent-pull-2026-09-26T17-00-00-ttyACM1\","), "{}", json);
+        assert!(json.contains("\"dumpBytes\":null,\"log\":false"), "{}", json);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2309,6 +2384,21 @@ mod tests {
     fn call_text(port: u16, method: &str, path: &str, body: &str) -> (u16, String) {
         let (s, b) = call(port, method, path, body.as_bytes());
         (s, String::from_utf8(b).unwrap())
+    }
+
+    #[test]
+    fn a_pull_at_a_rate_the_dump_firmware_does_not_take_is_refused_before_anything_starts() {
+        let data = std::env::temp_dir().join(format!("dg-pull-baud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let ctx = quiet_ctx(&data);
+        let port = serving(ctx.clone());
+        let (_, body) = call_text(port, "POST", "/api/pull", "{\"port\":\"/dev/ttyUSB0\",\"keepFsw\":1,\"baud\":9600}");
+        assert_eq!(body, "{\"ok\":false,\"error\":\"9600 baud is not a rate the dump firmware takes. It takes 115200, 230400, 460800, 921600, 1000000, 2000000\"}");
+        let (_, body) = call_text(port, "POST", "/api/pull", "{\"port\":\"/dev/ttyUSB0\",\"baud\":\"fast\"}");
+        assert!(body.contains("baud has to be a number"), "{}", body);
+        assert!(!ctx.pull.lock().unwrap().running);
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

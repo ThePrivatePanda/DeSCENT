@@ -246,10 +246,10 @@
   // A block from before the phases (layout 1) has one gap, used from switch-on to the end.
   const NO_PHASES = 'no phases in this firmware';
 
-  // 0 means every IMU reading in the air, nothing written on the ground
-  function logZero(phase) { return phase === 'ground' ? 'nothing written' : 'every reading'; }
-  function logWords(ms, phase) {
-    return Number(ms) === 0 ? logZero(phase) : 'every ' + intervalWords(ms);
+  // 0 means every IMU reading (20 Hz), on the ground as in the air
+  function logZero() { return 'every reading'; }
+  function logWords(ms) {
+    return Number(ms) === 0 ? logZero() : 'every ' + intervalWords(ms);
   }
 
   // One rate as the page says it: "every 60 s", or what it follows on the battery and what it
@@ -275,7 +275,7 @@
   // What one cell holds: the gap the rate gives in that row.
   const gapIn = (r, k) => (k === FIXED || !r.follow ? r.fixedMs : r.intervalMs[k]);
   const secsOr = (ms, zero) => (Number(ms) === 0 ? zero : intervalWords(ms));
-  const zeroOf = (column, phase) => (column === 'log' ? logZero(phase) : 'back to back');
+  const zeroOf = (column) => (column === 'log' ? logZero() : 'back to back');
   const typed = (v) => (/^\s*-?\d+(\.\d+)?\s*$/.test(String(v)) ? Number(v) : NaN);
   const toMs = (v) => Math.round(typed(v) * 1000);
 
@@ -356,8 +356,8 @@
       const log = s && s.log ? s.log[n] : null;
       const words = (rate, logMs) => rateWords(rate) + (logMs == null ? '' : ', log ' + logMs);
       const older = (s && s.olderSlots || []).filter((o) => o.phase === n)
-        .map((o) => o.name + ' slot ' + words(o.rate, o.logMs == null ? null : logWords(o.logMs, ph.key)));
-      const onBoard = !s ? '—' : tx ? [words(tx, log ? rateWords(log, logZero(ph.key)) : null)].concat(older).join('; ')
+        .map((o) => o.name + ' slot ' + words(o.rate, o.logMs == null ? null : logWords(o.logMs)));
+      const onBoard = !s ? '—' : tx ? [words(tx, log ? rateWords(log, logZero()) : null)].concat(older).join('; ')
         : ph.key === 'air' ? 'every ' + intervalWords(s.txIntervalMs) + ' (' + NO_PHASES + ')' : NO_PHASES;
       rows.push({ key: ph.key, label: ph.label, onBoard, older, apart: columnsApart(tx, log) });
     });
@@ -389,7 +389,7 @@
     const ph = PHASES[n];
     const out = [];
     const want = { transmit: draftRate(draft, n, 'transmit'), log: draftRate(draft, n, 'log') };
-    const sayRate = (column) => rateWords(want[column], zeroOf(column, ph.key));
+    const sayRate = (column) => rateWords(want[column], zeroOf(column));
     if (!s.transmit) {
       return [[ph.label, ph.key === 'air' ? 'every ' + intervalWords(s.txIntervalMs) + ' (' + NO_PHASES + ')' : NO_PHASES,
         sayRate('transmit') + ', log ' + sayRate('log')]];
@@ -419,7 +419,7 @@
     columns.forEach((c) => {
       const was = board[c];
       if (!was) return;
-      const zero = zeroOf(c, ph.key);
+      const zero = zeroOf(c);
       const row = (what, a, b) => { if (Number(a) !== b) out.push([ph.label + ', ' + what + ', ' + c, secsOr(a, zero), secsOr(b, zero)]); };
       row(want[c].follow ? 'gauge unread' : 'always', was.fixedMs, want[c].fixedMs);
       for (let k = 0; k < BANDS; k++) {
@@ -438,7 +438,6 @@
   function phaseRows(settings, draft, n) {
     const follow = !!draft['p' + n + 'f'];
     const keys = follow ? [0, 1, 2, 3, 4, FIXED] : [FIXED];
-    const phase = PHASES[n].key;
     const board = settings && settings.transmit
       ? { transmit: settings.transmit[n], log: settings.log ? settings.log[n] : null } : null;
     return keys.map((k) => {
@@ -447,7 +446,7 @@
         if (!was) return { was: '', changed: !!settings };
         const want = draftRate(draft, n, column);
         if (!follow && was.follow) return { was: 'by battery', changed: true };
-        return { was: secsOr(gapIn(was, k), zeroOf(column, phase)), changed: Number(gapIn(was, k)) !== gapIn(want, k) };
+        return { was: secsOr(gapIn(was, k), zeroOf(column)), changed: Number(gapIn(was, k)) !== gapIn(want, k) };
       };
       return { key: k, log: cell('log'), transmit: cell('transmit') };
     });
@@ -541,6 +540,18 @@
     });
   }
 
+  // From receiver firmware 1.2.2 a header also carries what the SX1276 itself is on (sfchip=) and
+  // whether it is in continuous receive (rx=). Older firmware has only its own copy of the
+  // setting (sf=), so a factor it reports is its word, not the chip's
+  function headerSf(text) {
+    const field = (key) => {
+      const m = new RegExp(',' + key + '=(\\d+)').exec(text);
+      return m ? Number(m[1]) : NaN;
+    };
+    const chip = field('sfchip');
+    return { sf: Number.isFinite(chip) ? chip : field('sf'), chip: Number.isFinite(chip), listening: field('rx') !== 0 };
+  }
+
   // The app refuses to write an image that was read off another board unless told to.
   // Any other refusal has no override, so the two have to be told apart.
   function isOtherBoardRefusal(message) {
@@ -549,6 +560,6 @@
 
   return {
     MODULE, uidWords, sameBoard, chipName, firmwareWords, stillOnProbe, probesChanged, probeToRead, probeToAutoRead, swapSeen, readButton, readToast, dropChoice, chipList, stepList, powerOptions, sfOptions, dbmWords,
-    flashWay, settingsTable, buildDiffers, phaseChanges, phaseRows, draftRate, draftStop, INERT_PERCENT, bandLabel, rateWords, logWords, logZero, LAYOUT, PHASES, BANDS, FIXED, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal,
+    flashWay, settingsTable, buildDiffers, phaseChanges, phaseRows, draftRate, draftStop, INERT_PERCENT, bandLabel, rateWords, logWords, logZero, LAYOUT, PHASES, BANDS, FIXED, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal, headerSf,
   };
 });

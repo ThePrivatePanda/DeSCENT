@@ -40,8 +40,8 @@ it is the one row, Always. Log gaps are 0 or at least 20 ms, in every box. Ticki
 change logging until a box is edited. A fresh image transmits every 60 s on the ground and every
 second in the air, logs
 every 50 ms in the air and keeps one record per 10 s on the ground, about two days of ground before
-the chip goes round. A ground log gap of 0 keeps nothing from the ground, time anchors included;
-an air log gap of 0 is every reading. The board holds the last 30 s in RAM, so a take-off writes the
+the chip goes round. A log gap of 0 is every reading (20 Hz) on the ground as in the air, which
+fills the chip in about 27 minutes. The board holds the last 30 s in RAM, so a take-off writes the
 30 s before it too. That is why the air's battery bands only apply while the board logs as air: the
 rest of the time the RAM fills at the air's Gauge unread gap. Every setting goes into the image's
 settings block and the board reads it at boot.

@@ -98,7 +98,7 @@ test('the bar names the screens plainly, ChipSats and T-Beams first', () => {
   const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
   const nav = html.match(/<nav class="views"[\s\S]*?<\/nav>/)[0];
   const tabs = [...nav.matchAll(/<button id="view-([a-z]+)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2].trim()]);
-  assert.deepStrictEqual(tabs, [['chipsats', 'ChipSats'], ['tbeams', 'T-Beams'], ['live', 'Live'], ['replay', 'Replay'], ['data', 'Data']]);
+  assert.deepStrictEqual(tabs, [['chipsats', 'ChipSats'], ['tbeams', 'T-Beams'], ['live', 'Live'], ['replay', 'Replay'], ['data', 'Data'], ['analysis', 'Analysis']]);
   assert.doesNotMatch(nav, /<small/);
 });
 

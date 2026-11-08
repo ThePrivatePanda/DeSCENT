@@ -21,7 +21,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
+// The flight software's console, so the check before the dump goes on is always at this rate.
+// The dump firmware prints at it too unless the pull asks for another
 const BAUD: u32 = 115200;
+// What flash_dump.ino takes, slowest first. USART1 runs off the 48 MHz MSI, so 1 M and 2 M
+// divide exactly and the rest are within 0.2 %
+pub const BAUDS: [u32; 6] = [115200, 230400, 460800, 921600, 1_000_000, 2_000_000];
+// consoleBaud in flash_dump.ino: this, then the rate as a little endian u32
+const BAUD_MAGIC: [u8; 16] = [0x5A, 0xA5, 0x44, 0x55, 0x4D, 0x50, 0x42, 0x41, 0x55, 0x44, 0x5A, 0xA5, 0x3C, 0x7B, 0x6E, 0x19];
 const QUIET_MS: u128 = 8_000;      // silence after the last line before giving up on more
 // From the reset to the end of the printing, and nothing else: saving and writing firmware
 // are not on this clock. A full chip is 32768 slots at about 147 characters a line, 4.8 MB,
@@ -49,6 +56,64 @@ pub struct Pull {
     pub restored: bool,
     // Stop pressed. Ends like a failed pull: what arrived is kept, the flight software goes back
     pub stop: bool,
+    pub baud: u32,   // the dump firmware's console
+    pub stats: Stats,
+}
+
+// Counted off the printing as it arrives, from the reset on.
+#[derive(Clone, Default)]
+pub struct Stats {
+    pub raw_lines: u64,
+    pub good: u64,       // passed their CRC
+    pub bad_crc: u64,
+    pub garbled: u64,    // dump::LineKind::Garbled
+    pub bytes_per_s: u64,
+    scanned: usize,      // where the next count starts
+}
+
+impl Stats {
+    fn count(&mut self, heard: &[u8]) {
+        let at = self.scanned.min(heard.len());
+        let Some(end) = heard[at..].iter().rposition(|b| *b == b'\n') else { return };
+        for line in String::from_utf8_lossy(&heard[at..at + end]).lines() {
+            if line.trim_start().starts_with("raw") {
+                self.raw_lines += 1;
+            }
+            match crate::dump::line_kind(line) {
+                crate::dump::LineKind::Good => self.good += 1,
+                crate::dump::LineKind::BadCrc => self.bad_crc += 1,
+                crate::dump::LineKind::Garbled => self.garbled += 1,
+                crate::dump::LineKind::Other => {}
+            }
+        }
+        self.scanned = at + end + 1;
+    }
+}
+
+// The dump firmware with its console rate set. Nothing is written unless the magic is there
+// exactly once, as for the settings block. A dump image from before the rate could be set
+// prints at 115200, so it can still be used at that rate
+pub fn dump_at_baud(image: &[u8], baud: u32) -> Result<Vec<u8>, String> {
+    if !BAUDS.contains(&baud) {
+        return Err(baud_refused(baud));
+    }
+    let at: Vec<usize> = image.windows(BAUD_MAGIC.len()).enumerate().filter(|(_, w)| *w == BAUD_MAGIC).map(|(i, _)| i).collect();
+    match at[..] {
+        [] if baud == BAUD => Ok(image.to_vec()),
+        [] => Err(format!("this dump firmware is older than the baud setting and only prints at {}: pull at {}", BAUD, BAUD)),
+        [at] if image.len() >= at + BAUD_MAGIC.len() + 4 => {
+            let mut out = image.to_vec();
+            out[at + BAUD_MAGIC.len()..at + BAUD_MAGIC.len() + 4].copy_from_slice(&baud.to_le_bytes());
+            Ok(out)
+        }
+        [_] => Err(String::from("the dump firmware ends inside its baud setting")),
+        _ => Err(format!("the dump firmware holds its baud setting {} times, and there is no saying which one it reads", at.len())),
+    }
+}
+
+pub fn baud_refused(baud: impl std::fmt::Display) -> String {
+    let said: Vec<String> = BAUDS.iter().map(|b| b.to_string()).collect();
+    format!("{} baud is not a rate the dump firmware takes. It takes {}", baud, said.join(", "))
 }
 
 impl Pull {
@@ -71,6 +136,8 @@ impl Pull {
             error: None,
             restored: false,
             stop: false,
+            baud: BAUD,
+            stats: Stats::default(),
         }
     }
 }
@@ -97,7 +164,7 @@ pub fn state_json(p: &Pull, now_ms: u128) -> String {
     };
     let steps: Vec<String> = p.steps.iter().map(|l| format!("\"{}\"", esc(l))).collect();
     format!(
-        "{{\"ok\":true,\"running\":{},\"wipe\":{},\"keepFsw\":{},\"board\":\"{}\",\"seconds\":{},\"pct\":{},\"note\":\"{}\",\"steps\":[{}],\"savedFsw\":{},\"log\":{},\"dir\":{},\"raw\":{},\"report\":{},\"restored\":{},\"stopping\":{},\"error\":{}}}",
+        "{{\"ok\":true,\"running\":{},\"wipe\":{},\"keepFsw\":{},\"board\":\"{}\",\"seconds\":{},\"pct\":{},\"note\":\"{}\",\"steps\":[{}],\"savedFsw\":{},\"log\":{},\"dir\":{},\"raw\":{},\"report\":{},\"restored\":{},\"stopping\":{},\"error\":{},\"baud\":{},\"stats\":{{\"rawLines\":{},\"good\":{},\"badCrc\":{},\"garbled\":{},\"bytesPerSec\":{}}}}}",
         p.running,
         p.wipe,
         p.keep_fsw,
@@ -115,6 +182,12 @@ pub fn state_json(p: &Pull, now_ms: u128) -> String {
         p.restored,
         p.running && p.stop,
         quoted(&p.error),
+        p.baud,
+        p.stats.raw_lines,
+        p.stats.good,
+        p.stats.bad_crc,
+        p.stats.garbled,
+        p.stats.bytes_per_s,
     )
 }
 
@@ -144,7 +217,20 @@ struct Listener {
     // waits out its limits, but a failure says this as well.
     lost: Arc<Mutex<Option<String>>>,
     // The same port for writing, when there is one: a clear talks to the dump firmware.
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    writer: Mutex<Option<Box<dyn Console>>>,
+}
+
+// The writing half of the port, which also sets the rate the reading half hears at. The rate
+// belongs to the device and not to the handle: a termios setting on Linux and macOS, the
+// comm state of the one device a duplicated handle points at on Windows. Only tried on Linux
+trait Console: Write + Send {
+    fn set_baud(&mut self, baud: u32) -> Result<(), String>;
+}
+
+impl Console for Box<dyn serialport::SerialPort> {
+    fn set_baud(&mut self, baud: u32) -> Result<(), String> {
+        self.set_baud_rate(baud).map_err(|e| e.to_string())
+    }
 }
 
 impl Listener {
@@ -155,7 +241,7 @@ impl Listener {
             .map_err(|e| format!("{}: {}", port_name, e))?;
         let writer = port.try_clone().map_err(|e| format!("{}: cannot open it for writing: {}", port_name, e))?;
         let l = Listener::on(port);
-        *l.writer.lock().unwrap() = Some(writer);
+        *l.writer.lock().unwrap() = Some(Box::new(writer));
         Ok(l)
     }
 
@@ -201,6 +287,16 @@ impl Listener {
     fn send(&self, bytes: &[u8]) -> Result<(), String> {
         if let Some(w) = self.writer.lock().unwrap().as_mut() {
             w.write_all(bytes).and_then(|_| w.flush()).map_err(|e| format!("cannot write to the console: {}", e))?;
+        }
+        Ok(())
+    }
+
+    // Changed on the open port rather than by closing and opening it again, so nothing that
+    // arrives in between is lost and what was heard so far stays in one buffer. A port with
+    // no writer (a test's) keeps its rate.
+    fn set_baud(&self, baud: u32) -> Result<(), String> {
+        if let Some(w) = self.writer.lock().unwrap().as_mut() {
+            w.set_baud(baud).map_err(|e| format!("cannot set the console to {} baud: {}", baud, e))?;
         }
         Ok(())
     }
@@ -385,15 +481,6 @@ fn with_firmware(report: &str, dump: &str, on_board: Option<&str>) -> String {
     }
 }
 
-// The board's last count, when it gave one. A wiped chip prints its count and no records.
-fn board_count(text: &str) -> Option<u64> {
-    text.lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| l.starts_with("found "))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|n| n.parse().ok())
-}
 
 pub struct Job {
     pub shared: Shared,
@@ -413,6 +500,7 @@ pub struct Job {
     pub uid: Option<String>,
     pub name: Option<String>,
     pub check_console: bool,   // reset once and wait for the boot line before writing anything. Off for Pull anyway
+    pub baud: u32,   // the dump firmware's console, one of BAUDS
 }
 
 // -> (dump bytes, dump_from, optional line for the steps)
@@ -434,6 +522,7 @@ pub fn start(job: Job, held: crate::stm32::Held) -> Result<(), String> {
         p.keep_fsw = job.keep_fsw;
         p.board = job.port_name.clone();
         p.started_ms = crate::logfile::now_ms();
+        p.baud = job.baud;
     }
     std::thread::spawn(move || {
         run(job);
@@ -544,7 +633,7 @@ fn run(mut job: Job) {
 }
 
 fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
-    let Job { shared, broadcast, dir, port_name, keep_fsw, dump_image, uid, name: board_name, wipe, check_console, dump_from, known, .. } = job;
+    let Job { shared, broadcast, dir, port_name, keep_fsw, dump_image, uid, name: board_name, wipe, check_console, dump_from, known, baud, .. } = job;
     // a clear keeps the flight software only when asked, same as a pull
     let wipe = *wipe;
     let keep_fsw = *keep_fsw;
@@ -595,7 +684,11 @@ fn pull(job: &Job, bench: &dyn Bench, listener: Listener, limits: &Limits) {
     let mut wrote_dump = false;
     let mut reset_at = 0usize;   // how much the port had carried when the board was reset
     let mut stopped = false;     // stopped by the operator once the board was printing
+    // nothing counts until the reset says where the printing starts
+    let mut stats = Stats { scanned: usize::MAX, ..Default::default() };
     let read = (|| -> Result<(), String> {
+        // before the board is touched, so a rate this image cannot take changes nothing
+        let image = dump_at_baud(dump_image, *baud)?;
         // The page read a board a while ago and the clip has been in somebody's hand
         // since, so the board is asked again before it is saved or written.
         if let Some(meant) = uid {
@@ -657,14 +750,21 @@ Pick the board's console port, or Pull anyway if the software on the board print
         if dump_image.is_empty() {
             return Err(String::from("there was no dump firmware to write"));
         }
-        say(shared, broadcast, 30, "writing the dump firmware");
+        say(shared, broadcast, 30, &if *baud == BAUD {
+            String::from("writing the dump firmware")
+        } else {
+            format!("writing the dump firmware, its console at {} baud", baud)
+        });
         wrote_dump = true;
-        bench.write(dump_image)?;
+        bench.write(&image)?;
+        // Before the reset, or its first lines go by at a rate nobody is listening at
+        listener.set_baud(*baud)?;
         // Whatever the port carried before the reset is not this printing, even if it
         // holds a found line: a board already on the dump firmware has printed one.
         let mut at = listener.len();
         let before = at;
         reset_at = before;
+        stats.scanned = before;
         bench.reset()?;
 
         if wipe {
@@ -733,6 +833,11 @@ Pick the board's console port, or Pull anyway if the software on the board print
                     }
                 }
             }
+            stats.count(&listener.heard.lock().unwrap());
+            // from the reset, so the dump firmware's own start counts against it. Short, not timed
+            let ms = listener.last_ms().saturating_sub(reset_ms).max(1);
+            stats.bytes_per_s = (listener.len().saturating_sub(before) as u128 * 1000 / ms) as u64;
+            shared.lock().unwrap().stats = stats.clone();
             let (whole, next) = listener.found_line_after(at);
             at = next;
             if whole {
@@ -762,6 +867,10 @@ Pick the board's console port, or Pull anyway if the software on the board print
     listener.done();
     let heard = listener.take();
     let mut error = read.err();
+    if !wipe {
+        stats.count(&heard);
+        shared.lock().unwrap().stats = stats.clone();
+    }
 
     // Before anything is made of it. Whatever happens next, this is the evidence, and
     // getting it again means doing the whole pull again. A clear read nothing worth it.
@@ -783,11 +892,29 @@ Pick the board's console port, or Pull anyway if the software on the board print
         // as well as the real ones. They stay in dump.txt, which is the whole capture.
         let text = String::from_utf8_lossy(&heard[reset_at.min(heard.len())..]);
         let parsed = crate::dump::parse_what_arrived(&text);
-        if parsed.records.is_empty() && board_count(&text) == Some(0) {
-            error = Some(format!(
-                "the log on the chip is empty: the board counted 0 records. What it printed is in {}",
-                raw.display()
-            ));
+        // parse_what_arrived drops a printing without packets, so take the last one the board
+        // finished: its count, and whether every slot it counted came through clean
+        let whole = crate::dump::last_whole(&text);
+        let no_packets = parsed.records.is_empty()
+            && whole.found.is_some()
+            && whole.good == Some(whole.read_slots)
+            && whole.failed == 0
+            && whole.missing == 0
+            && stats.garbled == 0;
+        if no_packets {
+            // A whole log without a packet in it: a chip cleared before a flight holds
+            // nothing, or only the boot events and time anchors of boards that never got
+            // as far as a packet. A report says so; there is no ground.log, nothing to open
+            let report = crate::dump::report(&whole, heard.len(), listener.longest_gap_ms());
+            let json = with_firmware(&report.json(), dump_from, None);
+            if let Err(e) = std::fs::write(folder.join("report.json"), &json) {
+                also(&mut error, format!("could not write report.json: {}", e));
+            }
+            shared.lock().unwrap().report = Some(json);
+            read_as = Some(match whole.read_slots {
+                0 => String::from("the chip is empty: the board counted 0 records"),
+                n => format!("no packets on the chip: the board counted {} {}, all boot events or time anchors", n, if n == 1 { "record" } else { "records" }),
+            });
         } else if parsed.records.is_empty() {
             // The board's own word on its chip, when it gave one: "init ok=0 id=0xFFFFFF
             // reason=noack" is a chip that did not answer, and that is the whole story
@@ -1118,6 +1245,7 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
     struct Script {
         steps: std::vec::IntoIter<Step>,
         over: std::sync::mpsc::Sender<()>,
+        rate: Arc<std::sync::atomic::AtomicU32>,   // what the port is set to, by a Wire
     }
 
     enum Step {
@@ -1125,6 +1253,7 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
         Silence(u64),
         Wait(std::sync::mpsc::Receiver<()>),
         Gone(&'static str),   // the port fails the way a pulled cable does
+        At(u32, Vec<u8>),     // sent at this rate: noise unless the port is set to it
     }
 
     impl Read for Script {
@@ -1143,6 +1272,14 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
                     Ok(0)
                 }
                 Some(Step::Gone(why)) => Err(std::io::Error::other(why)),
+                Some(Step::At(sent, b)) => {
+                    if self.rate.load(Ordering::Relaxed) == sent {
+                        buf[..b.len()].copy_from_slice(&b);
+                    } else {
+                        buf[..b.len()].fill(0xF8);
+                    }
+                    Ok(b.len())
+                }
                 None => {
                     let _ = self.over.send(());
                     Err(std::io::ErrorKind::BrokenPipe.into())
@@ -1153,7 +1290,61 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
 
     fn played(steps: Vec<Step>) -> (Listener, std::sync::mpsc::Receiver<()>) {
         let (over, ended) = std::sync::mpsc::channel();
-        (Listener::on(Script { steps: steps.into_iter(), over }), ended)
+        let rate = Arc::new(std::sync::atomic::AtomicU32::new(BAUD));
+        (Listener::on(Script { steps: steps.into_iter(), over, rate }), ended)
+    }
+
+    // The port's writing half in a test: it drops what is sent and sets the rate the script is
+    // heard at, saying so in `did` so it can be put in order with what the bench did
+    struct Wire {
+        rate: Arc<std::sync::atomic::AtomicU32>,
+        did: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Write for Wire {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Console for Wire {
+        fn set_baud(&mut self, baud: u32) -> Result<(), String> {
+            self.rate.store(baud, Ordering::Relaxed);
+            self.did.lock().unwrap().push(format!("baud {}", baud));
+            Ok(())
+        }
+    }
+
+    // A Desk whose steps go in the same list as the Wire's, and which keeps the dump image it was given
+    struct Logged {
+        desk: Desk,
+        did: Arc<Mutex<Vec<String>>>,
+        dump: Mutex<Vec<u8>>,
+    }
+
+    impl Bench for Logged {
+        fn uid(&self) -> Result<String, String> {
+            self.desk.uid()
+        }
+        fn save(&self, dir: &Path, file: &str) -> Result<PathBuf, String> {
+            self.did.lock().unwrap().push("save".into());
+            self.desk.save(dir, file)
+        }
+        fn write(&self, image: &[u8]) -> Result<(), String> {
+            let dump = image.starts_with(DUMP);
+            if dump {
+                *self.dump.lock().unwrap() = image.to_vec();
+            }
+            self.did.lock().unwrap().push(if dump { "write dump firmware" } else { "write flight software" }.into());
+            self.desk.write(image)
+        }
+        fn reset(&self) -> Result<(), String> {
+            self.did.lock().unwrap().push("reset".into());
+            self.desk.reset()
+        }
     }
 
     #[test]
@@ -1268,6 +1459,7 @@ flight software back on the board; saved in /home/op/DeSCENT/descent-pull-x"
             uid: None,
             name: None,
             check_console: false,
+            baud: BAUD,
         };
         job.shared.lock().unwrap().running = true;
         job.shared.lock().unwrap().keep_fsw = keep_fsw;
@@ -1413,6 +1605,7 @@ erase ok after 5012 ms\r\n";
             uid: None,
             name: None,
             check_console: false,
+            baud: BAUD,
         };
         job.shared.lock().unwrap().running = true;
         pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
@@ -1522,6 +1715,7 @@ record 1 boot 0 ms 2567\r\n\
             uid: None,
             name: None,
             check_console: false,
+            baud: BAUD,
         };
         job.shared.lock().unwrap().running = true;
         pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
@@ -1555,6 +1749,7 @@ record 1 boot 0 ms 2567\r\n\
             uid: None,
             name: None,
             check_console: false,
+            baud: BAUD,
         };
         job.shared.lock().unwrap().running = true;
         let shared = job.shared.clone();
@@ -1623,17 +1818,53 @@ record 1 boot 0 ms 2567\r\n\
     }
 
     #[test]
-    fn an_empty_chip_is_said_to_be_empty_and_the_board_is_still_put_back() {
+    fn a_whole_log_with_only_a_boot_event_is_a_pull_not_a_failure() {
+        // What board 18 printed on 2026-11-06 after a clear and one boot that never sent a
+        // packet: its count, and the one slot, a boot event, passing its check
+        let printed = b"I BOOT 0 c0: start test=flashdump baud=115200\r\nI FLASH 0 c0: start\r\nI FLASH 7 c0: init ok=1 id=0xEF4015\r\n\
+raw 0 000000 A70000010200000100C601140000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000C9C7\r\n\
+found 1 records, 1 good (0 time anchors), 0 bad, from 1 boots, log ends at address 0x000040\r\n";
+        let (p, _did, dir) = pulled("events-only", printed, true, None);
+        assert_eq!(p.error, None);
+        assert!(p.note.starts_with("no packets on the chip: the board counted 1 record, all boot events or time anchors"), "{}", p.note);
+        assert_eq!(p.log, None);
+        let report = p.report.unwrap();
+        assert!(report.contains("\"found\":1,") && report.contains("\"complete\":true"), "{}", report);
+        // the same count with a slot that did not arrive clean is still not a whole log
+        let cut = b"I BOOT 0 c0: start test=flashdump baud=115200\r\nraw 0 000000 A7000001020000\r\n\
+found 1 records, 1 good (0 time anchors), 0 bad, from 1 boots, log ends at address 0x000040\r\n";
+        let (q, _, dir2) = pulled("events-cut", cut, true, None);
+        assert!(q.error.as_deref().unwrap_or("").contains("nothing that reads as a log"), "{:?}", q.error);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn an_empty_chip_is_a_whole_pull_that_says_so_and_the_board_is_still_put_back() {
         // A wiped chip before a flight is an ordinary thing to pull, and "nothing that
-        // reads as a log" would send someone looking for a fault that is not there.
-        let empty = b"found 0 records, 0 good (0 time anchors), 0 bad, from 0 boots, log ends at address 0x000000\r\n";
+        // reads as a log" would send someone looking for a fault that is not there. Nor is
+        // it a failure: the board printed its whole log, which holds nothing.
+        let empty = b"I BOOT 0 c0: start test=flashdump baud=115200\r\nfound 0 records, 0 good (0 time anchors), 0 bad, from 0 boots, log ends at address 0x000000\r\n";
         let (p, did, dir) = pulled("empty", empty, true, None);
         assert_eq!(did, vec!["save", "write dump firmware", "reset", "write flight software", "reset"]);
         assert!(p.restored);
-        let e = p.error.unwrap();
-        assert!(e.contains("the log on the chip is empty"), "{}", e);
-        assert!(!e.contains("nothing that reads as a log"), "{}", e);
+        assert_eq!(p.error, None);
+        assert_eq!(p.pct, 100);
+        assert!(p.note.starts_with("the chip is empty: the board counted 0 records, flight software back on the board; saved in "), "{}", p.note);
+        assert!(!p.note.contains("nothing that reads as a log"), "{}", p.note);
         assert_eq!(p.log, None);
+        let report = p.report.unwrap();
+        assert!(report.contains("\"found\":0,") && report.contains("\"complete\":true"), "{}", report);
+        assert!(PathBuf::from(p.dir.unwrap()).join("report.json").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_count_of_0_after_raw_lines_that_did_not_read_is_not_an_empty_chip() {
+        let garbled = format!("raw 0 000000 A5{}\r\nfound 0 records, 0 good (0 time anchors), 0 bad, from 0 boots, log ends at address 0x000000\r\n", "Z".repeat(126));
+        let (p, _, dir) = pulled("garbled-empty", garbled.as_bytes(), true, None);
+        assert!(p.error.unwrap().contains("nothing that reads as a log"));
+        assert_eq!(p.stats.garbled, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1744,6 +1975,7 @@ record 1 boot 0 ms 2567\r\n\
             uid: Some(uid.into()),
             name: name.map(String::from),
             check_console: false,
+            baud: BAUD,
         };
         pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
         let state = job.shared.lock().unwrap().clone();
@@ -1811,6 +2043,7 @@ record 1 boot 0 ms 2567\r\n\
             uid: None,
             name: None,
             check_console: false,
+            baud: BAUD,
         };
         pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
         assert!(!desk.did.lock().unwrap().contains(&"uid".to_string()));
@@ -1848,6 +2081,7 @@ record 1 boot 0 ms 2567\r\n\
             uid: None,
             name: None,
             check_console: false,
+            baud: BAUD,
         };
         pull(&job, &desk, listener, &Limits { quiet_ms: 400, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
         let state = job.shared.lock().unwrap().clone();
@@ -1966,6 +2200,7 @@ record 3113 boot 6 ms 23302\r\n\
             uid: None,
             name: None,
             check_console: false,
+            baud: BAUD,
         };
         pull(&job, &desk, listener, &Limits { quiet_ms: 2_000, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
         let p = job.shared.lock().unwrap().clone();
@@ -2004,6 +2239,7 @@ record 3113 boot 6 ms 23302\r\n\
             uid: None,
             name: None,
             check_console: false,
+            baud: BAUD,
         };
         job.shared.lock().unwrap().running = true;
         // None: stop already asked for when the job starts
@@ -2133,6 +2369,7 @@ record 3113 boot 6 ms 23302\r\n\
             uid: None,
             name: None,
             check_console: true,
+            baud: BAUD,
         };
         job.shared.lock().unwrap().running = true;
         // longer than the gap between the check's boot line and the dump's printing
@@ -2187,5 +2424,170 @@ record 3113 boot 6 ms 23302\r\n\
         assert!(p.steps.iter().any(|s| s.contains("already running the dump firmware")), "{:?}", p.steps);
         assert!(p.note.contains("the board is still running the dump firmware"), "{}", p.note);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // DUMP as the build makes it now, with its rate at 115200
+    fn dump_with_baud() -> Vec<u8> {
+        let mut image = DUMP.to_vec();
+        image.extend_from_slice(&BAUD_MAGIC);
+        image.extend_from_slice(&115200u32.to_le_bytes());
+        image.extend_from_slice(b" and the rest of it");
+        image
+    }
+
+    #[test]
+    fn the_dump_firmware_gets_its_rate_in_the_four_bytes_after_its_magic() {
+        let image = dump_with_baud();
+        let at = DUMP.len() + BAUD_MAGIC.len();
+        for baud in BAUDS {
+            let out = dump_at_baud(&image, baud).unwrap();
+            assert_eq!(out.len(), image.len());
+            assert_eq!(out[at..at + 4], baud.to_le_bytes());
+            assert_eq!(out[..at], image[..at]);
+            assert_eq!(out[at + 4..], image[at + 4..]);
+        }
+        let e = dump_at_baud(&image, 9600).unwrap_err();
+        assert_eq!(e, "9600 baud is not a rate the dump firmware takes. It takes 115200, 230400, 460800, 921600, 1000000, 2000000");
+        assert!(dump_at_baud(&image, 1_500_000).is_err());
+        // a dump image from before the setting prints at 115200 and nothing else
+        assert_eq!(dump_at_baud(DUMP, 115200).unwrap(), DUMP);
+        assert!(dump_at_baud(DUMP, 460800).unwrap_err().contains("older than the baud setting"));
+        let twice = [image.clone(), image.clone()].concat();
+        assert!(dump_at_baud(&twice, 230400).unwrap_err().contains("2 times"));
+        assert!(dump_at_baud(&image[..at + 2], 230400).unwrap_err().contains("ends inside"));
+    }
+
+    #[test]
+    fn the_carried_dump_firmware_has_its_rate_once_and_at_115200() {
+        let Some(dump) = crate::flash::CHIPSAT_DUMP else { return };
+        let at: Vec<usize> = dump.windows(16).enumerate().filter(|(_, w)| *w == BAUD_MAGIC).map(|(i, _)| i).collect();
+        assert_eq!(at.len(), 1, "fsw/firmware/flash_dump.bin is older than the baud setting: run fsw/tools/emit_firmware.sh");
+        assert_eq!(dump[at[0] + 16..at[0] + 20], 115200u32.to_le_bytes());
+        // a board left on it at another rate is still the carried dump
+        let fast = dump_at_baud(dump, 921600).unwrap();
+        let known = crate::chipflash::Known::carried();
+        assert_eq!(crate::chipflash::recognise(&fast, &known).kind, "dump");
+        assert!(crate::chipflash::recognise(&fast, &known).current);
+    }
+
+    // The pull with a console check, on a port whose rate a Wire sets. The board answers the
+    // check at 115200 as flight software does, and once the dump firmware is on it says it
+    // started at 115200 and again at `prints_at`, then prints three slots there
+    fn pulled_at(what: &str, baud: u32, prints_at: u32) -> (Pull, Vec<String>, Vec<u8>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dg-pull-{}-{}", what, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (go, wait) = std::sync::mpsc::channel();
+        let slots: String = (0..3).map(|n| raw_packet(n, 1, 1000 + 50 * n as u32, 0x22)).collect();
+        let started = |rate: u32| format!("I BOOT 0 c0: start test=flashdump baud={}\r\n", rate);
+        let steps = vec![
+            Step::At(BAUD, b"I TX 1 c1: flight software talking\r\n".to_vec()),
+            Step::Wait(wait),
+            Step::At(BAUD, b"\xFFI BOOT 0 c0: start log=4\r\n".to_vec()),
+            Step::Silence(1500),   // the save, and the write that takes 500 ms here
+            Step::At(BAUD, started(prints_at).into_bytes()),
+            Step::At(prints_at, started(prints_at).into_bytes()),
+            Step::At(prints_at, format!("{}found 3 records, 3 good (0 time anchors), 0 bad, from 1 boots, log ends at address 0x0000C0\r\n", slots).into_bytes()),
+        ];
+        let (over, _ended) = std::sync::mpsc::channel();
+        let rate = Arc::new(std::sync::atomic::AtomicU32::new(BAUD));
+        let listener = Listener::on(Script { steps: steps.into_iter(), over, rate: rate.clone() });
+        let did = Arc::new(Mutex::new(Vec::new()));
+        *listener.writer.lock().unwrap() = Some(Box::new(Wire { rate, did: did.clone() }));
+        let bench = Logged {
+            desk: Desk { did: Mutex::new(Vec::new()), named: Mutex::new(Vec::new()), go: Mutex::new(Some(go)), fail_write: None },
+            did: did.clone(),
+            dump: Mutex::new(Vec::new()),
+        };
+        let job = Job {
+            shared: shared(),
+            broadcast: crate::ws::Broadcast::new(),
+            dir: dir.clone(),
+            port_name: "/dev/ttyUSB0".into(),
+            probe: None,
+            wipe: false,
+            keep_fsw: true,
+            dump_image: dump_with_baud(),
+            dump_from: String::new(),
+            prepare: None,
+            known: None,
+            uid: None,
+            name: None,
+            check_console: true,
+            baud,
+        };
+        job.shared.lock().unwrap().running = true;
+        job.shared.lock().unwrap().baud = baud;
+        pull(&job, &bench, listener, &Limits { quiet_ms: 2_000, read_ms: 5_000, ask_ms: 3_000, erase_ms: 3_000, boot_ms: 600 });
+        let state = job.shared.lock().unwrap().clone();
+        let did = did.lock().unwrap().clone();
+        let dump = bench.dump.lock().unwrap().clone();
+        (state, did, dump, dir)
+    }
+
+    #[test]
+    fn the_console_is_checked_at_115200_and_the_dump_is_heard_at_its_own_rate_from_its_reset_on() {
+        let (p, did, dump, dir) = pulled_at("at-921600", 921600, 921600);
+        assert_eq!(p.error, None, "{}", p.note);
+        assert_eq!(did, vec!["reset", "save", "write dump firmware", "baud 921600", "reset", "write flight software", "reset"]);
+        let at = DUMP.len() + BAUD_MAGIC.len();
+        assert_eq!(dump[at..at + 4], 921600u32.to_le_bytes(), "the image written carries the rate");
+        assert!(p.steps.iter().any(|s| s == "writing the dump firmware, its console at 921600 baud"), "{:?}", p.steps);
+        assert_eq!(p.baud, 921600);
+        assert_eq!((p.stats.good, p.stats.bad_crc, p.stats.garbled), (3, 0, 0));
+        let log = std::fs::read_to_string(PathBuf::from(p.dir.unwrap()).join("ground.log")).unwrap();
+        assert_eq!(log.matches("PKT,").count(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // and the scripted port does garble a printing heard at the wrong rate
+        let (p, did, _, dir) = pulled_at("at-wrong", 115200, 921600);
+        assert_eq!(did, vec!["reset", "save", "write dump firmware", "baud 115200", "reset", "write flight software", "reset"]);
+        assert!(p.error.unwrap().contains("nothing that reads as a log"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pull_counts_good_bad_and_garbled_lines_as_they_arrive() {
+        let good = |n: u64| raw_packet(n, 2, 500 + n as u32, 0x11);
+        // a hex digit turned into another one: whole, and its CRC fails
+        let spoiled = |n: u64| {
+            let mut line = good(n).into_bytes();
+            let at = line.iter().rposition(|b| *b == b' ').unwrap() + 21;
+            line[at] = if line[at] == b'2' { b'3' } else { b'2' };
+            String::from_utf8(line).unwrap()
+        };
+        let joined = format!("{}{}", good(3).trim_end(), good(4));   // a line end lost
+        let cut = good(6);
+        let cut = format!("{}\r\n", &cut[..cut.len() - 30]);
+        let printed = [
+            String::from("\u{fffd}I BOOT 0 c0: start test=flashdump baud=115200\r\n"),
+            good(0), good(1), spoiled(2), joined, good(5), cut, spoiled(7), good(8),
+            String::from("found 9 records, 9 good (0 time anchors), 0 bad, from 1 boots, log ends at address 0x000240\r\n"),
+        ]
+        .concat();
+        let (p, _, dir) = pulled("counted", printed.as_bytes(), true, None);
+        let s = &p.stats;
+        assert_eq!((s.raw_lines, s.good, s.bad_crc, s.garbled), (8, 4, 2, 2));
+        assert!(s.bytes_per_s > 0);
+        let j = state_json(&p, 0);
+        assert!(j.contains(&format!("\"baud\":115200,\"stats\":{{\"rawLines\":8,\"good\":4,\"badCrc\":2,\"garbled\":2,\"bytesPerSec\":{}}}}}", s.bytes_per_s)), "{}", j);
+        // the report still reads what passed
+        assert!(p.report.unwrap().contains("\"read\":4,"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_counts_are_live_while_the_printing_arrives() {
+        let shared = shared();
+        let mut stats = Stats::default();
+        let first = raw_packet(0, 1, 10, 0x33);
+        let heard = format!("{}{}", first, &raw_packet(1, 1, 60, 0x33)[..40]);
+        stats.count(heard.as_bytes());
+        assert_eq!((stats.raw_lines, stats.good), (1, 1), "half a line waits for its end");
+        let heard = format!("{}{}", first, raw_packet(1, 1, 60, 0x33));
+        stats.count(heard.as_bytes());
+        assert_eq!((stats.raw_lines, stats.good), (2, 2), "and is counted once it has one");
+        shared.lock().unwrap().stats = stats;
+        assert!(state_json(&shared.lock().unwrap(), 0).contains("\"stats\":{\"rawLines\":2,\"good\":2,"));
     }
 }

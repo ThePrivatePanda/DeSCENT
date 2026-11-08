@@ -33,7 +33,10 @@
 // address than the oldest. Sectors are sorted by the boot and ms of their first good record,
 // same rule as headOlder in FlashLog.cpp, so a printing in address order reads right too.
 // Slot type 0xA7 is an event, byte 7 its kind. Lock events came from an older ring version
-// and are only counted
+// and are only counted. Kind 0x10 is a system event: one pooled run of a sensor, bus, phase,
+// radio or flash event, its codes in the flight repo's log/SystemEvent.h. A layout or a code this
+// build does not know is kept as it came, numbers and bytes, never dropped. Each one goes into
+// ground.log as a #DG,SYS line among the boot's rows, and system_from_line reads it back
 //
 // Everything else on that port is console chatter and is ignored.
 use crate::json::esc;
@@ -54,6 +57,8 @@ const SLOT_EVENT: u8 = 0xA7;
 const EVENT_BOOT: u8 = 1;
 const EVENT_LOCK: u8 = 2;
 const EVENT_DROPPED: u8 = 3;
+const EVENT_SYSTEM: u8 = 0x10;
+const SYSTEM_LAYOUT: u8 = 1;
 const SECTOR_SLOTS: u64 = 4096 / SLOT_BYTES as u64;
 const BOOT_GAP_MS: u64 = 1000;
 // How far one anchor may sit from the middle of the anchors written around it and still be
@@ -87,8 +92,135 @@ pub enum EventKind {
     Boot { csr: u32 },
     // dropped so far this boot, waiting on an erase
     Dropped { count: u32 },
-    // 0x10-0x3F are reserved for sensor and bus events
+    // kind 0x10 in layout 1
+    System(SystemEvent),
+    // kind 0x10 in a layout this build does not know: its first data byte and all 54 of them
+    SystemRaw { layout: u8, data: Vec<u8> },
     Other(u8),
+}
+
+// One run of the same event, as FlashLog.cpp writeSystem lays it out. ms on the board's own clock
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemEvent {
+    pub source: u8,
+    pub what: u8,
+    pub part: u8,
+    pub reason: u8,
+    pub count: u16,       // how many times it happened in the run
+    pub first_ms: u32,
+    pub last_ms: u32,
+    pub detail: u32,      // the last one's
+}
+
+// The words are the codes' names in log/SystemEvent.h, lowercase and without their prefix, which
+// the test below holds them to. None for a code this build does not know
+pub fn source_word(source: u8) -> Option<&'static str> {
+    ["sensor", "bus", "phase", "radio", "flash"].get((source as usize).checked_sub(1)?).copied()
+}
+
+pub fn part_word(part: u8) -> Option<&'static str> {
+    ["none", "imu", "env", "gauge", "gps", "radio", "flash", "busother"].get(part as usize).copied()
+}
+
+pub fn what_word(source: u8, what: u8) -> Option<&'static str> {
+    let words: &[&str] = match source {
+        1 => &["retry", "defer", "reset", "restart", "aside", "ok", "pinreset", "driverrestart"],
+        2 => &["held", "jam", "timeout", "fault", "clear", "quarantine", "release"],
+        3 => &["toair", "toground", "descent", "bootairend", "imufast", "imuslow", "asleep", "awake"],
+        4 => &["txfail", "txtimeout", "resetup"],
+        5 => &["writefail", "erasestuck", "stopped"],
+        _ => &[],
+    };
+    words.get((what as usize).checked_sub(1)?).copied()
+}
+
+// Bus held and jam give the low lines as bits, sdalow+scllow for both. A flash write failure
+// gives the driver's Status, named as statusName in platform/Status.h does
+pub fn reason_word(source: u8, what: u8, reason: u8) -> Option<String> {
+    if reason == 0 {
+        return Some(String::from("none"));
+    }
+    let words: &[&str] = match (source, what) {
+        (1, _) => &["asleep", "silent", "partial", "stale", "notready", "nopvt", "nobytes", "boot", "busstuck", "noack", "noreset", "noenable"],
+        (2, 1 | 2) if reason <= 3 => {
+            let lines: Vec<&str> = [(1, "sdalow"), (2, "scllow")].iter().filter(|(bit, _)| reason & bit != 0).map(|(_, w)| *w).collect();
+            return Some(lines.join("+"));
+        }
+        (2, 5) => &["clearok", "clearlow", "clearsclheld"],
+        (3, _) => &["imumotion", "quiet", "quietnoalt", "barodescent", "imudead", "bootairlimit", "motionheld", "quiethigh", "moving", "goodfix"],
+        (4, 1) => &["startrefused", "finishfailed"],
+        (4, 3) => &["setupok", "setupfailed"],
+        (5, 1) => &["notready", "timeout", "buserror", "noack", "baddata", "failed"],
+        _ => &[],
+    };
+    words.get(reason as usize - 1).map(|w| w.to_string())
+}
+
+impl SystemEvent {
+    // The radio's codes are int16 sign extended, the rest are counts, ms and addresses
+    fn signed_detail(&self) -> bool {
+        self.source == 4 && self.what != 2
+    }
+
+    fn line(&self, ms: u64) -> String {
+        let word = |w: Option<&str>, n: u8| w.map_or_else(|| n.to_string(), str::to_string);
+        format!(
+            "#DG,SYS,v1,up={},source={},what={},part={},reason={},count={},first_ms={},last_ms={},detail={}",
+            ms,
+            word(source_word(self.source), self.source),
+            word(what_word(self.source, self.what), self.what),
+            word(part_word(self.part), self.part),
+            reason_word(self.source, self.what, self.reason).unwrap_or_else(|| self.reason.to_string()),
+            self.count,
+            self.first_ms,
+            self.last_ms,
+            if self.signed_detail() { (self.detail as i32).to_string() } else { self.detail.to_string() }
+        )
+    }
+}
+
+fn system_line(ms: u64, kind: &EventKind) -> Option<String> {
+    match kind {
+        EventKind::System(e) => Some(e.line(ms)),
+        EventKind::SystemRaw { layout, data } => {
+            Some(format!("#DG,SYS,v1,up={},layout={},raw={}", ms, layout, data.iter().map(|b| format!("{:02X}", b)).collect::<String>()))
+        }
+        _ => None,
+    }
+}
+
+// A #DG,SYS line of to_log back into its uptime and event. None for any other line, or one
+// that does not hold together
+pub fn system_from_line(text: &str) -> Option<(u64, EventKind)> {
+    let rest = text.strip_prefix("#DG,SYS,v1,")?;
+    let fields: BTreeMap<&str, &str> = rest.split(',').filter_map(|kv| kv.split_once('=')).collect();
+    let ms = fields.get("up")?.parse::<u64>().ok()?;
+    if let Some(raw) = fields.get("raw") {
+        let data = (0..raw.len()).step_by(2).map(|i| u8::from_str_radix(raw.get(i..i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?;
+        return Some((ms, EventKind::SystemRaw { layout: fields.get("layout")?.parse().ok()?, data }));
+    }
+    let code = |key: &str, named: &dyn Fn(u8) -> Option<String>| -> Option<u8> {
+        let v = fields.get(key)?;
+        v.parse::<u8>().ok().or_else(|| (0..=255u8).find(|n| named(*n).as_deref() == Some(*v)))
+    };
+    let source = code("source", &|n| source_word(n).map(str::to_string))?;
+    let what = code("what", &|n| what_word(source, n).map(str::to_string))?;
+    let part = code("part", &|n| part_word(n).map(str::to_string))?;
+    let reason = code("reason", &|n| reason_word(source, what, n))?;
+    let number = |key: &str| fields.get(key)?.parse::<i64>().ok();
+    Some((
+        ms,
+        EventKind::System(SystemEvent {
+            source,
+            what,
+            part,
+            reason,
+            count: u16::try_from(number("count")?).ok()?,
+            first_ms: u32::try_from(number("first_ms")?).ok()?,
+            last_ms: u32::try_from(number("last_ms")?).ok()?,
+            detail: number("detail")? as u32,
+        }),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,9 +332,8 @@ impl Slot {
     }
 }
 
-// None for anything decodeRecord in FlashLog.cpp would also turn down, or that did not
-// arrive as 64 whole bytes.
-fn slot(text: &str) -> Option<Slot> {
+// The 64 bytes of a slot, None when they did not arrive as 128 hex digits.
+fn slot_bytes(text: &str) -> Option<[u8; SLOT_BYTES]> {
     if text.len() != SLOT_BYTES * 2 {
         return None;
     }
@@ -212,8 +343,18 @@ fn slot(text: &str) -> Option<Slot> {
         let lo = (pair[1] as char).to_digit(16)?;
         b[i] = (hi * 16 + lo) as u8;
     }
-    let crc = u16::from_le_bytes([b[SLOT_CRC_AT], b[SLOT_CRC_AT + 1]]);
-    if crc != crc16(&b[..SLOT_CRC_AT]) {
+    Some(b)
+}
+
+fn crc_passes(b: &[u8; SLOT_BYTES]) -> bool {
+    u16::from_le_bytes([b[SLOT_CRC_AT], b[SLOT_CRC_AT + 1]]) == crc16(&b[..SLOT_CRC_AT])
+}
+
+// None for anything decodeRecord in FlashLog.cpp would also turn down, or that did not
+// arrive as 64 whole bytes.
+fn slot(text: &str) -> Option<Slot> {
+    let b = slot_bytes(text)?;
+    if !crc_passes(&b) {
         return None;
     }
     let boot = u16::from_le_bytes([b[1], b[2]]) as u32;
@@ -235,11 +376,53 @@ fn slot(text: &str) -> Option<Slot> {
                 EVENT_LOCK => return Some(Slot::Lock { boot, ms }),
                 EVENT_BOOT => EventKind::Boot { csr: word },
                 EVENT_DROPPED => EventKind::Dropped { count: word },
+                EVENT_SYSTEM if b[8] == SYSTEM_LAYOUT => {
+                    let u32_at = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+                    EventKind::System(SystemEvent {
+                        source: b[9],
+                        what: b[10],
+                        part: b[11],
+                        reason: b[12],
+                        count: u16::from_le_bytes([b[13], b[14]]),
+                        first_ms: u32_at(15),
+                        last_ms: u32_at(19),
+                        detail: u32_at(23),
+                    })
+                }
+                EVENT_SYSTEM => EventKind::SystemRaw { layout: b[8], data: b[8..SLOT_CRC_AT].to_vec() },
                 other => EventKind::Other(other),
             };
             Some(Slot::Event(Event { boot, ms, kind }))
         }
         _ => None,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum LineKind {
+    Good,      // a raw line whose 64 bytes pass their CRC
+    BadCrc,    // a whole raw line whose bytes do not
+    Garbled,   // something that was meant to be a raw line and did not arrive as one
+    Other,     // console talk, the found line
+}
+
+// One line as a printing would read it, for counting while the dump is still arriving. A
+// slot is judged on its CRC alone, before its type is looked at. A wrong or marginal baud
+// rate shows up here: a hex digit turned into another is a bad CRC, one turned into
+// something else or a lost line end is garbled. Noise on a line that was never a raw line,
+// like the byte a reset leaves before the boot line, is not counted.
+pub fn line_kind(line: &str) -> LineKind {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.first() == Some(&"raw") && parts.len() == 4 && parts[1].parse::<u64>().is_ok() {
+        if let Some(b) = slot_bytes(parts[3]) {
+            return if crc_passes(&b) { LineKind::Good } else { LineKind::BadCrc };
+        }
+    }
+    let hex_run = |p: &&str| p.len() >= 32 && p.chars().all(|c| c.is_ascii_hexdigit());
+    if line.contains("raw ") || parts.iter().any(hex_run) {
+        LineKind::Garbled
+    } else {
+        LineKind::Other
     }
 }
 
@@ -418,6 +601,12 @@ pub fn parse(text: &str) -> Dump {
         .unwrap_or_default()
 }
 
+// The last printing that reached its found line, packets or not: a chip holding nothing, or
+// only boot events and time anchors, is still a whole log
+pub fn last_whole(text: &str) -> Dump {
+    printings(text).into_iter().filter(Dump::complete).last().unwrap_or_default()
+}
+
 // The same choice, except that when no printing finished the last one to get anywhere is
 // handed over as it stands. For a pull that was cut short: part of a flight log is worth
 // having, as long as it is not passed off as all of it, and found stays None to say so.
@@ -533,16 +722,13 @@ fn uptime0_at(clock: &Clock, ms: u64) -> i128 {
     a as i128 + (b as i128 - a as i128) * (ms - a_ms) as i128 / (b_ms - a_ms) as i128
 }
 
+fn dated(clock: &Clock, ms: u64) -> u64 {
+    (uptime0_at(clock, ms) + ms as i128).clamp(0, u64::MAX as i128) as u64
+}
+
 // One boot's records in write order (not index order on a ring), each with its time
 fn rows<'a>(dump: &'a Dump, clock: &Clock) -> Vec<(u64, &'a Record)> {
-    dump.records
-        .iter()
-        .filter(|r| r.boot == clock.boot)
-        .map(|r| {
-            let t = (uptime0_at(clock, r.ms) + r.ms as i128).clamp(0, u64::MAX as i128);
-            (t as u64, r)
-        })
-        .collect()
+    dump.records.iter().filter(|r| r.boot == clock.boot).map(|r| (dated(clock, r.ms), r)).collect()
 }
 
 // Every record with its time, in one list. Boot by boot, not sorted by time: boots that
@@ -567,13 +753,22 @@ fn utc(unix_ms: u64) -> String {
 // boot gets one SRC line and one BOOT line, then its rows. The page splits the SRC line on
 // commas, so no value in it may hold one. A row carries its own uptime and its index on
 // the chip after the three radio fields a flash record does not have: a boot's dates slide
-// with its anchors, so uptime cannot be worked back out of them exactly.
+// with its anchors, so uptime cannot be worked back out of them exactly. System events go in
+// among the rows by uptime, the rows keeping their own order, and a boot with only those still
+// gets its header.
 pub fn to_log(dump: &Dump, origin: &str) -> String {
     let mut s = String::from("# descent-ground log v1 from flash\n");
 
     for clock in &clocks(dump) {
         let rows = rows(dump, clock);
-        let Some((t, _)) = rows.first() else { continue };
+        let mut system: Vec<(u64, String)> = dump
+            .events
+            .iter()
+            .filter(|e| e.boot == clock.boot)
+            .filter_map(|e| system_line(e.ms, &e.kind).map(|line| (e.ms, line)))
+            .collect();
+        system.sort_by_key(|(ms, _)| *ms);
+        let Some(t) = rows.first().map(|(t, _)| *t).or_else(|| system.first().map(|(ms, _)| dated(clock, *ms))) else { continue };
         let rx = format!("flash-boot{}", clock.boot);
         let anchor_bits = match &clock.anchor {
             Some(a) => format!(
@@ -598,8 +793,15 @@ pub fn to_log(dump: &Dump, origin: &str) -> String {
             anchor_bits
         ));
         s.push_str(&format!("{}\t{}\t#DG,BOOT,v1,n={}\n", t, rx, clock.boot));
+        let mut system = system.into_iter().peekable();
         for (t, r) in &rows {
+            while let Some((ms, line)) = system.next_if(|(ms, _)| *ms < r.ms) {
+                s.push_str(&format!("{}\t{}\t{}\n", dated(clock, ms), rx, line));
+            }
             s.push_str(&format!("{}\t{}\tPKT,55,{},,,,up={},n={}\n", t, rx, r.hex, r.ms, r.n));
+        }
+        for (ms, line) in system {
+            s.push_str(&format!("{}\t{}\t{}\n", dated(clock, ms), rx, line));
         }
     }
     s
@@ -648,6 +850,7 @@ pub struct BootReport {
     pub reset_csr: Option<u32>,
     pub dropped: Option<u32>,
     pub other_events: usize,
+    pub system_events: usize,   // records, each one pooled run, unknown layouts included
 }
 
 // What was read set against what the board said it has, for whoever has to decide whether
@@ -718,6 +921,7 @@ pub fn report(dump: &Dump, bytes: usize, longest_reader_gap_ms: u64) -> Report {
                     })
                     .max(),
                 other_events: mine(c.boot).filter(|k| matches!(k, EventKind::Other(_))).count(),
+                system_events: mine(c.boot).filter(|k| matches!(k, EventKind::System(_) | EventKind::SystemRaw { .. })).count(),
             }
         })
         .collect();
@@ -803,6 +1007,9 @@ impl BootReport {
         }
         if self.other_events > 0 {
             s.push_str(&format!(",\"otherEvents\":{}", self.other_events));
+        }
+        if self.system_events > 0 {
+            s.push_str(&format!(",\"systemEvents\":{}", self.system_events));
         }
         s + "}"
     }
@@ -1599,7 +1806,7 @@ anchor_utc=2026-09-26T16:45:50.000Z,anchors=1,anchors_rejected=0"
             packet(1, 2, 1000),
             event(2, 2, 2000, EVENT_DROPPED, 7),
             event(3, 2, 3000, EVENT_DROPPED, 12),
-            event(4, 2, 3500, 0x10, 99),
+            event(4, 2, 3500, 0x11, 99),
             found(5, 5, 0, 1),
         ]
         .concat();
@@ -1651,5 +1858,174 @@ anchor_utc=2026-09-26T16:45:50.000Z,anchors=1,anchors_rejected=0"
         assert!(!d.wrapped);
         assert!(!report(&d, 0, 0).json().contains("wrapped"));
         assert!(!report(&d, 0, 0).json().contains("reset"));
+    }
+
+    #[test]
+    fn a_line_is_counted_as_a_good_slot_a_bad_one_garbled_or_talk() {
+        let mut b = [0x44u8; 64];
+        b[0] = 0xA5;
+        let crc = crc16(&b[..62]);
+        b[62..].copy_from_slice(&crc.to_le_bytes());
+        let hex: String = b.iter().map(|v| format!("{:02X}", v)).collect();
+        assert_eq!(line_kind(&format!("raw 5 000140 {}", hex)), LineKind::Good);
+        // an address that does not read is no reason to turn down a slot, as for the printing
+        assert_eq!(line_kind(&format!("raw 5 00x140 {}", hex)), LineKind::Good);
+        // judged on the CRC alone: a type nothing knows is still a slot that arrived whole
+        let mut odd = b;
+        odd[0] = 0x11;
+        let crc = crc16(&odd[..62]);
+        odd[62..].copy_from_slice(&crc.to_le_bytes());
+        let odd: String = odd.iter().map(|v| format!("{:02X}", v)).collect();
+        assert_eq!(line_kind(&format!("raw 5 000140 {}", odd)), LineKind::Good);
+        assert_eq!(line_kind(&format!("raw 5 000140 {}", hex.replacen("44", "45", 1))), LineKind::BadCrc);
+        assert_eq!(line_kind(&format!("raw 5 000140 {}", &hex[..120])), LineKind::Garbled);
+        assert_eq!(line_kind(&format!("raw 5 000140 {}", hex.replacen("44", "4\u{fffd}", 1))), LineKind::Garbled);
+        assert_eq!(line_kind(&format!("raw x 000140 {}", hex)), LineKind::Garbled);
+        assert_eq!(line_kind(&format!("raw 5 000140 {}raw 6 000180 {}", hex, hex)), LineKind::Garbled);
+        assert_eq!(line_kind(&format!("w 5 000140 {}", hex)), LineKind::Garbled, "the start of the line lost");
+        assert_eq!(line_kind("\u{fffd}I BOOT 0 c0: start test=flashdump baud=115200"), LineKind::Other);
+        assert_eq!(line_kind("found 3 records, 3 good (0 time anchors), 0 bad, from 1 boots, log ends at address 0x0000C0"), LineKind::Other);
+        assert_eq!(line_kind("the log has gone round the chip: oldest sector 4, newest sector 3"), LineKind::Other);
+    }
+
+    // A system slot laid out as FlashLog.cpp writeSystem does it
+    fn system(n: u64, boot: u16, ms: u32, e: &SystemEvent) -> String {
+        let mut p = vec![EVENT_SYSTEM, SYSTEM_LAYOUT, e.source, e.what, e.part, e.reason];
+        p.extend_from_slice(&e.count.to_le_bytes());
+        p.extend_from_slice(&e.first_ms.to_le_bytes());
+        p.extend_from_slice(&e.last_ms.to_le_bytes());
+        p.extend_from_slice(&e.detail.to_le_bytes());
+        raw_line(n, &slot(SLOT_EVENT, boot, ms, &p))
+    }
+
+    fn sys(source: u8, what: u8, part: u8, reason: u8, count: u16, first_ms: u32, last_ms: u32, detail: u32) -> SystemEvent {
+        SystemEvent { source, what, part, reason, count, first_ms, last_ms, detail }
+    }
+
+    fn sys_lines(log: &str) -> Vec<String> {
+        log.lines().filter_map(|l| l.split('\t').nth(2)).filter(|t| t.starts_with("#DG,SYS")).map(String::from).collect()
+    }
+
+    #[test]
+    fn a_system_event_of_each_source_reads_typed_and_says_its_codes() {
+        let events = [
+            sys(1, 1, 1, 2, 101, 80, 30080, 0x0F),
+            sys(2, 6, 2, 0, 1, 7000, 7000, 30000),
+            sys(3, 1, 1, 1, 1, 60100, 60100, 0),
+            sys(4, 1, 5, 1, 3, 60000, 180000, (-707i32) as u32),
+            sys(5, 1, 6, 6, 1, 1000, 1000, 812),
+        ];
+        let text: String = events.iter().enumerate().map(|(i, e)| system(i as u64, 4, 200_000 + i as u32, e)).collect::<String>()
+            + &packet(5, 4, 200_010)
+            + &found(6, 6, 0, 1);
+        let d = parse(&text);
+        let kinds: Vec<EventKind> = d.events.iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(kinds, events.iter().cloned().map(EventKind::System).collect::<Vec<_>>());
+        assert_eq!(d.events[0].ms, 200_000);
+        assert_eq!(
+            sys_lines(&to_log(&d, "x")),
+            vec![
+                "#DG,SYS,v1,up=200000,source=sensor,what=retry,part=imu,reason=silent,count=101,first_ms=80,last_ms=30080,detail=15",
+                "#DG,SYS,v1,up=200001,source=bus,what=quarantine,part=env,reason=none,count=1,first_ms=7000,last_ms=7000,detail=30000",
+                "#DG,SYS,v1,up=200002,source=phase,what=toair,part=imu,reason=imumotion,count=1,first_ms=60100,last_ms=60100,detail=0",
+                "#DG,SYS,v1,up=200003,source=radio,what=txfail,part=radio,reason=startrefused,count=3,first_ms=60000,last_ms=180000,detail=-707",
+                "#DG,SYS,v1,up=200004,source=flash,what=writefail,part=flash,reason=failed,count=1,first_ms=1000,last_ms=1000,detail=812",
+            ]
+        );
+        assert_eq!(reason_word(2, 1, 3).as_deref(), Some("sdalow+scllow"));
+    }
+
+    #[test]
+    fn an_unknown_layout_or_code_is_kept_as_it_came() {
+        let mut p = vec![EVENT_SYSTEM, 2, 9, 9, 9];
+        p.resize(1 + 54, 0xAB);
+        let text = [raw_line(0, &slot(SLOT_EVENT, 1, 500, &p)), system(1, 1, 600, &sys(9, 40, 77, 200, 2, 1, 2, 3)), packet(2, 1, 700), found(3, 3, 0, 1)].concat();
+        let d = parse(&text);
+        assert_eq!(d.events.len(), 2, "neither dropped");
+        assert_eq!(d.events[0].kind, EventKind::SystemRaw { layout: 2, data: p[1..].to_vec() });
+        let lines = sys_lines(&to_log(&d, "x"));
+        assert_eq!(lines[0], format!("#DG,SYS,v1,up=500,layout=2,raw=02090909{}", "AB".repeat(50)));
+        assert_eq!(lines[1], "#DG,SYS,v1,up=600,source=9,what=40,part=77,reason=200,count=2,first_ms=1,last_ms=2,detail=3");
+        // and the report counts both as system events, not as kinds it cannot read
+        assert!(report(&d, 0, 0).json().ends_with(",\"systemEvents\":2}]}"), "{}", report(&d, 0, 0).json());
+    }
+
+    #[test]
+    fn system_lines_go_among_the_rows_by_uptime_and_read_back() {
+        let text = [
+            packet(0, 3, 1000),
+            packet(1, 3, 1050),
+            system(2, 3, 6100, &sys(1, 6, 4, 0, 1, 1020, 1020, 9000)),
+            packet(3, 3, 1100),
+            system(4, 5, 40, &sys(4, 3, 5, 1, 1, 30, 30, (-2i32) as u32)),
+            found(5, 5, 0, 2),
+        ]
+        .concat();
+        let d = parse(&text);
+        let log = to_log(&d, "x");
+        let texts: Vec<&str> = log.lines().filter_map(|l| l.split('\t').nth(2)).collect();
+        let at = |prefix: &str| texts.iter().position(|t| t.starts_with(prefix)).unwrap();
+        assert!(at("PKT,55") < at("#DG,SYS,v1,up=6100") && at("#DG,SYS,v1,up=6100") > texts.iter().rposition(|t| t.starts_with("PKT")).unwrap(),
+            "written at 6100, so after the rows of 1000 to 1100: {}", log);
+        // boot 5 has no packet and still gets its header and its line
+        assert_eq!(log.matches("#DG,BOOT,").count(), 2, "{}", log);
+        assert!(log.contains("\tflash-boot5\t#DG,SYS,v1,up=40,source=radio,what=resetup,part=radio,reason=setupok,count=1,first_ms=30,last_ms=30,detail=-2"), "{}", log);
+        // every line comes back as the event it was written from
+        let back: Vec<(u64, EventKind)> = sys_lines(&log).iter().map(|l| system_from_line(l).unwrap()).collect();
+        let want: Vec<(u64, EventKind)> = d.events.iter().map(|e| (e.ms, e.kind.clone())).collect();
+        assert_eq!(back, want);
+        assert_eq!(system_from_line("#DG,SYS,v1,up=1,source=sensor"), None);
+        assert_eq!(system_from_line("#DG,SRC,v1,kind=flash"), None);
+    }
+
+    #[test]
+    fn the_report_counts_system_events_per_boot() {
+        let text = [
+            event(0, 2, 5, EVENT_BOOT, 0),
+            system(1, 2, 7000, &sys(1, 1, 1, 2, 400, 80, 30080, 15)),
+            system(2, 2, 9000, &sys(2, 2, 7, 1, 1, 9000, 9000, 0x12)),
+            packet(3, 2, 9100),
+            found(4, 4, 0, 1),
+        ]
+        .concat();
+        let r = report(&parse(&text), 0, 0);
+        assert_eq!(r.boots[0].system_events, 2);
+        assert_eq!(r.boots[0].other_events, 0);
+        assert!(r.json().ends_with(",\"resetCsr\":0,\"reset\":\"none\",\"systemEvents\":2}]}"), "{}", r.json());
+    }
+
+    // The words are the flight repo's own names for the codes, and the numbers are its numbers:
+    // read the header itself, so a code renumbered or added there fails here
+    #[test]
+    fn the_codes_are_the_ones_in_the_flight_repos_header() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fsw/V2_6_X_Code/src/log/SystemEvent.h");
+        let header = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {}", path.display(), e));
+        let codes: Vec<(String, u8)> = header
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("constexpr uint8_t k"))
+            .filter_map(|l| l.split_once(" = "))
+            .map(|(name, rest)| (name.to_string(), rest.split(';').next().unwrap().trim().parse::<u8>().unwrap()))
+            .collect();
+        assert!(codes.len() > 40, "{:?}", codes);
+        let sources = ["Sensor", "Bus", "Phase", "Radio", "Flash"];
+        let mut checked = 0;
+        for (name, n) in &codes {
+            let word = |prefix: &str| name.strip_prefix(prefix).map(str::to_lowercase);
+            if let Some(w) = word("Source") {
+                assert_eq!(source_word(*n), Some(w.as_str()), "{}", name);
+            } else if let Some(w) = word("Part") {
+                assert_eq!(part_word(*n), Some(w.as_str()), "{}", name);
+            } else if let Some(w) = word("Why") {
+                let any = (1..=5).any(|s| (1..=7).any(|what| reason_word(s, what, *n).as_deref() == Some(w.as_str())));
+                assert!(any, "{} = {} is no reason this reads", name, n);
+            } else {
+                let (s, w) = sources.iter().enumerate().find_map(|(i, p)| word(p).map(|w| (i as u8 + 1, w))).unwrap_or_else(|| panic!("{}", name));
+                assert_eq!(what_word(s, *n), Some(w.as_str()), "{}", name);
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, codes.len());
+        let flash_log = std::fs::read_to_string(path.parent().unwrap().join("../app/FlashLog.h")).unwrap();
+        assert!(flash_log.contains("constexpr uint8_t kLogEventSystem = 0x10;") && flash_log.contains("constexpr uint8_t kLogSystemLayout = 1;"));
     }
 }

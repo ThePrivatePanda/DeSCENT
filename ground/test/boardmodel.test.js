@@ -297,12 +297,12 @@ test('a settings block fills the on-the-board column, one row per phase', () => 
   const older = [{ phase: 1, name: 'falling', rate: RATE(1000), logMs: 50 }, { phase: 0, name: 'landed', rate: RATE(60000), logMs: 1000 }];
   assert.deepStrictEqual(B.settingsTable(Object.assign({}, s, { layoutVersion: 3, olderSlots: older }), 'le').rows.slice(3).map((r) => r.onBoard),
     ['every 60 s, log every 10 s; landed slot every 60 s, log every 1 s', 'every 10 s, log every 0.05 s; falling slot every 1 s, log every 0.05 s']);
-  // A ground log gap of 0 writes nothing; in the air it is every reading.
+  // A log gap of 0 is every reading, on the ground as in the air.
   assert.deepStrictEqual(B.settingsTable(Object.assign({}, s, { log: [FLAT(0), FLAT(0)] }), 'le').rows.slice(3).map((r) => r.onBoard),
-    ['every 60 s, log nothing written', 'every 10 s, log every reading']);
+    ['every 60 s, log every reading', 'every 10 s, log every reading']);
   // A log on the battery says so, with 0 in the words of its slot.
   assert.equal(B.settingsTable(Object.assign({}, s, { log: [FLAT(1000, { follow: true, intervalMs: [1000, 2000, 3000, 4000, 0] }), FLAT(50)] }), 'le').rows[3].onBoard,
-    'every 60 s, log by battery: 1 s above 75 %, 2 s to 50 %, 3 s to 35 %, 4 s to 20 %, then nothing written (1 s when the gauge cannot be read)');
+    'every 60 s, log by battery: 1 s above 75 %, 2 s to 50 %, 3 s to 35 %, 4 s to 20 %, then every reading (1 s when the gauge cannot be read)');
   // A layout-2 block, from before the log gaps, has the gaps and no logs.
   assert.deepStrictEqual(B.settingsTable(Object.assign({}, s, { layoutVersion: 2, log: null }), 'le').rows.slice(3).map((r) => r.onBoard),
     ['every 60 s', 'every 10 s']);
@@ -401,7 +401,7 @@ test('what a write changes is listed by row and column', () => {
   // A band named as the design says it.
   assert.deepStrictEqual(changes({ p1f: true, p1lms4: '5' }, 1)[2], ['Air, below 20 %, log', '0.05 s', '5 s']);
   // 0 in the words of the column and the phase.
-  assert.deepStrictEqual(changes({ p0l: '0', p0lms0: '10' }, 0), [['Ground, always, log', '10 s', 'nothing written']]);
+  assert.deepStrictEqual(changes({ p0l: '0', p0lms0: '10' }, 0), [['Ground, always, log', '10 s', 'every reading']]);
   assert.deepStrictEqual(changes({ p1l: '0' }, 1), [['Air, always, log', '0.05 s', 'every reading']]);
   assert.deepStrictEqual(changes({ p1s: '0' }, 1), [['Air, always, transmit', '10 s', 'back to back']]);
   // A threshold is one row for both columns, and a value the table holds unused is still said.
