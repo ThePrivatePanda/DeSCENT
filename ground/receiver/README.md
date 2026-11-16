@@ -7,6 +7,10 @@ that - so a receiver only has to agree with the ChipSats about the radio paramet
 * DescentRawReceiver - the sketch, with boards.h and utilities.h from LilyGO
 * firmware - built images, whole-flash, written at 0x0
 
+An SDR can be a receiver too: a program the app starts from a `receiver =` line in
+descent-ground.conf and reads off its stdout. It prints these same lines with a few changes
+(`sf=` on every PKT and ERR, no `name=`, nothing sent to it). ../docs/sdr-receiver.md is its spec.
+
 ## Flash it
 
 `./tbeam.py --flash ../../ground/receiver/firmware/descent-raw-receiver-1.2.1.bin` from fsw/tools,

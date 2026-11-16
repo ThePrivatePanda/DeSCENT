@@ -1243,6 +1243,7 @@ mod tests {
             masked: crate::localfw::masked(image, block_at),
             len: image.len(),
             block_at,
+            options: None,
         }
     }
     const SRC: &str = "5555555555555555555555555555555555555555555555555555555555555555";

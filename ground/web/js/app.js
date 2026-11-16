@@ -126,6 +126,9 @@
   // A receiver goes by its own name or its id, which stay with the board. Its key (rx1,
   // rx2) is only the order the ports were found in. A log's keys are the log's own, so
   // in a replay the boards plugged in now have no say.
+  // The open ports that are not a ChipSat's console
+  const receiverPorts = () => hub.ports.filter((p) => p.role !== 'console');
+
   function rxName(rx) {
     const replaying = view.mode === 'replay';
     const port = replaying ? null : hub.ports.find((p) => p.key === rx);
@@ -152,7 +155,8 @@
   $('btn-connect').addEventListener('click', async () => {
     try {
       await hub.add();
-      toast(hub.ports.length + (hub.ports.length === 1 ? ' receiver' : ' receivers') + ' found');
+      const n = receiverPorts().length;
+      toast(n + (n === 1 ? ' receiver' : ' receivers') + ' found');
     } catch (e) {
       toast(e && e.name === 'NotFoundError' ? 'No receiver found' : 'Could not look for receivers: ' + (e.message || e));
     }
@@ -871,20 +875,24 @@
     const t = now();
     const replaying = view.mode === 'replay';
     rxHead(replaying);
-    const keys = new Set([...f.receivers.keys(), ...(replaying ? [] : hub.ports.map((p) => p.key))]);
+    // A console's key can still have a receiver from lines it sent before it said what it was
+    const consoles = replaying ? new Set() : new Set(hub.ports.filter((p) => p.role === 'console').map((p) => p.key));
+    const keys = new Set([...f.receivers.keys(), ...(replaying ? [] : receiverPorts().map((p) => p.key))].filter((k) => !consoles.has(k)));
     const rows = [...keys].map((k) => {
       const r = f.receivers.get(k);
       const port = replaying ? null : hub.ports.find((p) => p.key === k);
       const m = meta(k);
       const st = V.receiverState(r, port, t);
       const source = f.rxSource.get(k);
-      const kind = source === 'csv' ? 'CSV firmware' : source === 'raw' ? 'raw firmware' : '';
+      // A program the app starts (an SDR, command.rs) is never written to, so it has no disconnect
+      const program = !!port && k.startsWith('cmd:');
+      const kind = program ? 'SDR' : source === 'csv' ? 'CSV firmware' : source === 'raw' ? 'raw firmware' : '';
       const detail = [kind, r ? V.num(r.unique) + ' new, ' + V.num(r.packets - r.unique - r.badCrc) + ' duplicate' : '',
         r && r.badCrc ? V.num(r.badCrc) + ' bad CRC' : '', r && r.radioErrors ? V.num(r.radioErrors) + ' radio errors' : '',
-        port && port.usb ? 'USB ' + port.usb : '', port && port.error ? port.error : '']
+        port && port.usb ? 'USB ' + port.usb : '', program ? 'started by ' + port.port : '', port && port.error ? port.error : '']
         .filter(Boolean).join('\n');
       const controls = replaying ? '' : (r && r.info.sf ? sfSelect(k, r.info.sf) : '') +
-        (port && port.status === 'open' ? '<button data-close="' + esc(k) + '" title="Disconnect" aria-label="Disconnect ' + esc(rxName(k)) + '">✕</button>' : '');
+        (port && port.status === 'open' && !program ? '<button data-close="' + esc(k) + '" title="Disconnect" aria-label="Disconnect ' + esc(rxName(k)) + '">✕</button>' : '');
       return V.receiverRowHtml({ key: k, name: rxName(k), id: r && r.id, sf: r && r.info.sf, packets: r ? r.unique : 0,
         word: st.word, cls: st.cls, index: m.index, detail, controls, extra: sfMark(k, r), sel: view.rxSel === k });
     });
@@ -938,8 +946,55 @@
     askSf(k, sf);
   });
 
+  // The Map tab: the fleet on screen, live or replayed, on one flight view. A map cannot be
+  // redrawn from markup, so its element is kept and put back in the box. Samples are worked out
+  // again only when a run's history has changed.
+  const mapBox = document.createElement('div');
+  const mapRuns = new Map();   // run id -> {key, samples, gaps}
+  let flightView = null;
+  function runSamples(run) {
+    const h = run.history;
+    const key = h.t.length + ':' + h.t[0];
+    let c = mapRuns.get(run.runId);
+    if (!c || c.key !== key) {
+      const samples = DG.flight.fromHistory(h);
+      c = { key, samples, gaps: DG.flight.counterGaps(samples) };
+      mapRuns.set(run.runId, c);
+    }
+    return c;
+  }
+  function renderMap(el) {
+    if (!flightView) flightView = new DG.FlightView(mapBox, { live: true, toast });
+    if (mapBox.parentNode !== el) { el.innerHTML = ''; delete el.dgHtml; el.appendChild(mapBox); }
+    const f = fleet();
+    const t = now();
+    const flights = [];
+    // every board, its earlier runs dimmed behind the one transmitting now
+    [...f.units.values()].filter((u) => !f.hidden.has(u.csid)).sort((a, b) => a.csid - b.csid).forEach((u, index) => {
+      const before = [];
+      const add = (run, current) => {
+        // the app sends a run's history when asked, once per run; the Map tab draws them all
+        client().wantHistory(run.label);
+        const { samples, gaps } = runSamples(run);
+        if (!current) before.push({ samples, firstT: run.firstT / 1000 });
+        flights.push({
+          key: run.label, name: 'CSID ' + run.label, index, samples, gaps, dim: !current, sel: String(view.sel) === run.label,
+          before: current ? before : null, firstT: run.firstT / 1000,
+          card: !current ? null : {
+            lastT: run.lastT / 1000, silent: f.state(run, t) !== 'OK',
+            battery: run.latest && run.latest.valid.soc ? run.latest.values.battery : null,
+            rx: run.receptions.map((r) => ({ name: rxName(r.rx), rssi: r.rssi, snr: r.snr })),
+          },
+        });
+      };
+      for (const r of f.earlierRuns(u.csid)) add(r, false);
+      add(u, true);
+    });
+    flightView.show(flights, { now: t / 1000 });
+  }
+
   const charts = new DG.Charts($('charts'), $('tabs'), (k) => ({ label: rxName(k), index: meta(k).index }));
-  charts.custom = renderRuns;
+  charts.custom = (el, unit) => (charts.tab === 'map' ? renderMap(el) : renderRuns(el, unit));
 
   // The Runs tab's buttons. Delete asks first, in a row under the run.
   $('charts').addEventListener('click', (e) => {

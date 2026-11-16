@@ -17,20 +17,25 @@ use tungstenite::protocol::Role;
 pub const FIRST_PORT: u16 = 8765;
 pub const LAST_PORT: u16 = 8774;
 
-// rxId is the id a receiver prints in its header line, null until one has arrived.
+// rxId is the id a receiver prints in its header line, null until one has arrived. rxKind is
+// sdr for a program the app starts (command.rs), whose port is its command line and usb empty.
 // rxName is what the board says it is called, rxFw the firmware it says it runs (1.2.1
 // was the first to say), and the last name is what this computer calls that id. A board already has a "name", the one kept against its USB serial, so
 // in "boards" the name kept against the id is "rxLocalName".
+// role is receiver, console (a ChipSat's) or unknown, and a board can also be the
+// flight-controller. csid is the board a console last said it is. A board's error is why it
+// is not being read when it should be.
 pub fn ports_json(ports: &[PortInfo], boards: &[Board], log: Option<&str>) -> String {
     let or_null = |v: Option<&String>| match v {
         Some(s) => format!("\"{}\"", esc(s)),
         None => String::from("null"),
     };
+    let csid = |c: Option<u8>| c.map(|c| c.to_string()).unwrap_or_else(|| String::from("null"));
     let items: Vec<String> = ports
         .iter()
         .map(|p| {
             format!(
-                "{{\"key\":\"{}\",\"port\":\"{}\",\"usb\":\"{}\",\"status\":\"{}\",\"error\":{},\"rxId\":{},\"rxName\":{},\"rxFw\":{},\"name\":{}}}",
+                "{{\"key\":\"{}\",\"port\":\"{}\",\"usb\":\"{}\",\"status\":\"{}\",\"error\":{},\"rxId\":{},\"rxName\":{},\"rxFw\":{},\"rxKind\":{},\"name\":{},\"role\":\"{}\",\"csid\":{}}}",
                 esc(&p.key),
                 esc(&p.port),
                 esc(&p.usb),
@@ -39,7 +44,10 @@ pub fn ports_json(ports: &[PortInfo], boards: &[Board], log: Option<&str>) -> St
                 or_null(p.rx_id.as_ref()),
                 or_null(p.rx_name.as_ref()),
                 or_null(p.rx_fw.as_ref()),
+                or_null(p.rx_kind.as_ref()),
                 or_null(p.name.as_ref()),
+                p.role.as_str(),
+                csid(p.csid),
             )
         })
         .collect();
@@ -48,7 +56,7 @@ pub fn ports_json(ports: &[PortInfo], boards: &[Board], log: Option<&str>) -> St
         .map(|b| {
             let read = ports.iter().find(|p| p.port == b.port);
             format!(
-                "{{\"port\":\"{}\",\"usb\":\"{}\",\"label\":\"{}\",\"serial\":\"{}\",\"state\":\"{}\",\"name\":\"{}\",\"rxId\":{},\"rxName\":{},\"rxFw\":{},\"rxLocalName\":{}}}",
+                "{{\"port\":\"{}\",\"usb\":\"{}\",\"label\":\"{}\",\"serial\":\"{}\",\"state\":\"{}\",\"name\":\"{}\",\"rxId\":{},\"rxName\":{},\"rxFw\":{},\"rxLocalName\":{},\"role\":\"{}\",\"csid\":{},\"error\":{}}}",
                 esc(&b.port),
                 esc(&b.usb),
                 esc(&b.label),
@@ -59,6 +67,10 @@ pub fn ports_json(ports: &[PortInfo], boards: &[Board], log: Option<&str>) -> St
                 or_null(read.and_then(|p| p.rx_name.as_ref())),
                 or_null(read.and_then(|p| p.rx_fw.as_ref())),
                 or_null(read.and_then(|p| p.name.as_ref())),
+                // a board being read has its role from the port, which has heard it since the last scan
+                read.map(|p| p.role.as_str()).unwrap_or(b.role),
+                csid(read.and_then(|p| p.csid)),
+                if b.error.is_empty() { String::from("null") } else { format!("\"{}\"", esc(&b.error)) },
             )
         })
         .collect();
@@ -645,6 +657,13 @@ fn chip_image(
     let (image, label, note) = match (asked(q, "embedded"), asked(q, "saved")) {
         (Some(_), Some(_)) => return Err(String::from("embedded and saved were both given, and a flash writes one image")),
         (Some("flight"), None) => {
+            let default = crate::fswbuild::Options::DEFAULT;
+            if crate::fswbuild::Options::asked(asked(q, "log"), asked(q, "mhz"))? != default {
+                return Err(format!(
+                    "the log level and the frequency are compiled in, and with no flight software tree on this computer only the image this app carries can be written, at {}",
+                    default.words()
+                ));
+            }
             let module = ctx.chips.lock().unwrap().get(uid).and_then(|c| c.module);
             let flight = crate::flight::carried();
             let image = flight.choose(module)?;
@@ -700,12 +719,26 @@ fn chip_image(
     Ok((image, label, note))
 }
 
-fn from_tree(ctx: &Ctx, part: &'static str) -> crate::chipflash::Make {
+fn from_tree(ctx: &Ctx, part: &'static str, options: Option<crate::fswbuild::Options>) -> crate::chipflash::Make {
     let local = ctx.local.clone();
     Box::new(move |say: &dyn Fn(&str)| {
-        let (bytes, id) = local.get_or_refuse(part, say)?;
+        let (bytes, id) = local.get_or_refuse(part, options, say)?;
         Ok((bytes, id.words((crate::logfile::now_ms() / 1000) as u64)))
     })
+}
+
+// The one #SET line a /api/receiver/<key>/config body asks for: {"sf":9} or {"freq":903.5}.
+// The frequency is held to the band a ChipSat can be built for, not the 137-1020 MHz a T-Beam takes
+fn receiver_setting(body: &str) -> Result<String, String> {
+    match (int_field(body, "sf"), crate::json::num_field(body, "freq")) {
+        (Some(sf), _) if (6..=12).contains(&sf) => Ok(format!("#SET,sf,{}\n", sf)),
+        (Some(sf), _) => Err(format!("spreading factor {} is not between 6 and 12", sf)),
+        (None, Some(mhz)) => {
+            let o = crate::fswbuild::Options::asked(None, Some(&mhz.to_string()))?;
+            Ok(format!("#SET,freq,{}\n", o.mhz()))
+        }
+        (None, None) => Err(String::from("no spreading factor or frequency in the request")),
+    }
 }
 
 fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
@@ -733,13 +766,21 @@ fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
             .ok_or_else(|| String::from("no radio module given and none remembered for this board"))?;
         // checked against the tree's own radio table before any build
         let wanted = settings_asked(&q)?.ok_or_else(|| String::from("no settings given to build with"))?;
+        let options = crate::fswbuild::Options::asked(asked(&q, "log"), asked(&q, "mhz"))?;
         let (radio, radio_note) = ctx.local.radio(true)?;
         let asked = radio.check(&wanted, module)?;
         // the rates are not said here: the page's tables have them, and the step list cannot hold a paragraph
-        let words = format!("a flight image for board {} on the {} module, SF{} at {} dBm", asked.csid, module.to_uppercase(), asked.sf, asked.dbm);
+        let words = format!(
+            "a flight image for board {} on the {} module, SF{} at {} dBm, {}",
+            asked.csid,
+            module.to_uppercase(),
+            asked.sf,
+            asked.dbm,
+            options.words()
+        );
         let part = crate::localfw::part_for("flight", module).ok_or_else(|| format!("{:?} is not a radio module", module))?;
         let label = words.clone();
-        (Vec::new(), label, radio_note, Some(crate::chipflash::BuildPlan { make: from_tree(ctx, part.name), asked: Some(asked), words }))
+        (Vec::new(), label, radio_note, Some(crate::chipflash::BuildPlan { make: from_tree(ctx, part.name, Some(options)), asked: Some(asked), words }))
     } else if on && embedded == Some("bench") {
         let stored = ctx.chips.lock().unwrap().get(&uid).and_then(|c| c.module);
         let module = asked(&q, "module").and_then(crate::chips::module_word).or(stored).ok_or_else(|| {
@@ -747,7 +788,7 @@ fn chip_flash(url: &str, body: Vec<u8>, ctx: &Ctx) -> Result<(), String> {
         })?;
         let part = crate::localfw::part_for("bench", module).ok_or_else(|| format!("{:?} is not a radio module", module))?;
         let words = format!("the {} sensor bench firmware", module.to_uppercase());
-        (Vec::new(), words.clone(), None, Some(crate::chipflash::BuildPlan { make: from_tree(ctx, part.name), asked: None, words }))
+        (Vec::new(), words.clone(), None, Some(crate::chipflash::BuildPlan { make: from_tree(ctx, part.name, None), asked: None, words }))
     } else {
         let (i, l, n) = chip_image(&q, body, &uid, ctx)?;
         (i, l, n, None)
@@ -1029,7 +1070,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
     // version it is talking to.
     if path == "/api/health" {
         let (boards, receivers) = match ctx.hub.lock() {
-            Ok(h) => (h.boards().len(), h.ports().len()),
+            Ok(h) => (h.boards().len(), h.ports().iter().filter(|p| p.role != crate::serial::Role::Console).count()),
             Err(_) => (0, 0),
         };
         let log = ctx
@@ -1124,13 +1165,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
                 ctx.hub.lock().unwrap().dismiss(&key);
                 Ok(())
             }
-            "config" => match int_field(&body, "sf") {
-                Some(sf) if (6..=12).contains(&sf) => {
-                    ctx.hub.lock().unwrap().send(&key, &format!("#SET,sf,{}\n", sf))
-                }
-                Some(sf) => Err(format!("spreading factor {} is not between 6 and 12", sf)),
-                None => Err(String::from("no spreading factor in the request")),
-            },
+            "config" => receiver_setting(&body).and_then(|line| ctx.hub.lock().unwrap().send(&key, &line)),
             other => Err(format!("no such action: {}", other)),
         };
         let (code, text) = match result {
@@ -1295,15 +1330,15 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
     // Map tiles the browser saved while it had a connection.
     if path.starts_with("/tiles/") {
         match crate::tiles::parse(&path) {
-            Some((z, x, y)) => match crate::tiles::read(&ctx.dir, z, x, y) {
-                Some(bytes) => {
+            Some(t) => match crate::tiles::read(&ctx.dir, &t) {
+                Some((bytes, kind)) => {
                     let _ = request.respond(
                         Response::from_data(bytes)
-                            .with_header(header("Content-Type", "image/png"))
+                            .with_header(header("Content-Type", kind))
                             .with_header(header("Cache-Control", "max-age=604800")),
                     );
                 }
-                // Missing is ordinary: the page draws an empty square and carries on.
+                // Missing is ordinary: the page fetches it, or draws its grid and carries on.
                 None => {
                     let _ = request.respond(Response::from_string("no tile").with_status_code(404));
                 }
@@ -1317,7 +1352,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
 
     if path.starts_with("/api/tile/") {
         let as_tile = path.replacen("/api/tile/", "/tiles/", 1);
-        let (z, x, y) = match crate::tiles::parse(&as_tile) {
+        let tile = match crate::tiles::parse(&as_tile) {
             Some(t) => t,
             None => {
                 let _ = request.respond(Response::from_string("not a tile").with_status_code(400));
@@ -1326,7 +1361,7 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
         };
         let mut bytes = Vec::new();
         let _ = std::io::Read::read_to_end(&mut request.as_reader(), &mut bytes);
-        let body = match crate::tiles::write(&ctx.dir, z, x, y, &bytes) {
+        let body = match crate::tiles::write(&ctx.dir, &tile, &bytes) {
             Ok(()) => String::from("{\"ok\":true}"),
             Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", esc(&e)),
         };
@@ -1337,13 +1372,16 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
     }
 
     if path == "/api/tiles" {
-        let (count, bytes) = crate::tiles::stored(&ctx.dir);
+        let ((count, bytes), layers) = crate::tiles::stored(&ctx.dir);
+        let layers: Vec<String> =
+            layers.iter().map(|(l, n, b)| format!("\"{}\":{{\"tiles\":{},\"bytes\":{}}}", l, n, b)).collect();
         let _ = request.respond(
             Response::from_string(format!(
-                "{{\"tiles\":{},\"bytes\":{},\"dir\":\"{}\"}}",
+                "{{\"tiles\":{},\"bytes\":{},\"dir\":\"{}\",\"layers\":{{{}}}}}",
                 count,
                 bytes,
-                esc(&crate::tiles::dir(&ctx.dir).to_string_lossy())
+                esc(&crate::tiles::dir(&ctx.dir).to_string_lossy()),
+                layers.join(",")
             ))
             .with_header(header("Content-Type", "application/json")),
         );
@@ -1747,7 +1785,10 @@ mod tests {
             rx_id: None,
             rx_name: None,
             rx_fw: None,
+            rx_kind: None,
             name: None,
+            role: crate::serial::Role::Unknown,
+            csid: None,
         }];
         let boards = vec![Board {
             port: "/dev/ttyACM0".into(),
@@ -1757,9 +1798,11 @@ mod tests {
             key: "1a86:55d4:58A1".into(),
             state: "waiting".into(),
             name: "Left T-Beam".into(),
+            role: "unknown",
+            error: String::new(),
         }];
         let json = ports_json(&ports, &boards, Some("/tmp/a.log"));
-        assert_eq!(json, "{\"ports\":[{\"key\":\"rx1\",\"port\":\"/dev/ttyUSB0\",\"usb\":\"10c4:ea60\",\"status\":\"open\",\"error\":null,\"rxId\":null,\"rxName\":null,\"rxFw\":null,\"name\":null}],\"boards\":[{\"port\":\"/dev/ttyACM0\",\"usb\":\"1a86:55d4\",\"label\":\"CH9102\",\"serial\":\"58A1\",\"state\":\"waiting\",\"name\":\"Left T-Beam\",\"rxId\":null,\"rxName\":null,\"rxFw\":null,\"rxLocalName\":null}],\"log\":\"/tmp/a.log\"}");
+        assert_eq!(json, "{\"ports\":[{\"key\":\"rx1\",\"port\":\"/dev/ttyUSB0\",\"usb\":\"10c4:ea60\",\"status\":\"open\",\"error\":null,\"rxId\":null,\"rxName\":null,\"rxFw\":null,\"rxKind\":null,\"name\":null,\"role\":\"unknown\",\"csid\":null}],\"boards\":[{\"port\":\"/dev/ttyACM0\",\"usb\":\"1a86:55d4\",\"label\":\"CH9102\",\"serial\":\"58A1\",\"state\":\"waiting\",\"name\":\"Left T-Beam\",\"rxId\":null,\"rxName\":null,\"rxFw\":null,\"rxLocalName\":null,\"role\":\"unknown\",\"csid\":null,\"error\":null}],\"log\":\"/tmp/a.log\"}");
     }
 
     #[test]
@@ -1773,7 +1816,10 @@ mod tests {
             rx_id: Some("A4C1F3".into()),
             rx_name: Some("on the \"board\"".into()),
             rx_fw: Some("1.2.1".into()),
+            rx_kind: None,
             name: Some("01".into()),
+            role: crate::serial::Role::Receiver,
+            csid: None,
         }];
         let board = |port: &str, name: &str| Board {
             port: port.into(),
@@ -1783,26 +1829,38 @@ mod tests {
             key: "10c4:ea60:0001".into(),
             state: "receiver".into(),
             name: name.into(),
+            role: "receiver",
+            error: String::new(),
         };
         let json = ports_json(&ports, &[board("/dev/ttyUSB0", "Left T-Beam"), board("/dev/ttyUSB1", "")], None);
         assert!(
-            json.contains("{\"key\":\"rx2\",\"port\":\"/dev/ttyUSB0\",\"usb\":\"10c4:ea60\",\"status\":\"open\",\"error\":null,\"rxId\":\"A4C1F3\",\"rxName\":\"on the \\\"board\\\"\",\"rxFw\":\"1.2.1\",\"name\":\"01\"}"),
+            json.contains("{\"key\":\"rx2\",\"port\":\"/dev/ttyUSB0\",\"usb\":\"10c4:ea60\",\"status\":\"open\",\"error\":null,\"rxId\":\"A4C1F3\",\"rxName\":\"on the \\\"board\\\"\",\"rxFw\":\"1.2.1\",\"rxKind\":null,\"name\":\"01\",\"role\":\"receiver\",\"csid\":null}"),
             "{}",
             json
         );
         // The board on that port is the same receiver. What it was already called by its
         // USB serial stays under "name", so the name kept against the id has its own key.
         assert!(
-            json.contains("\"state\":\"receiver\",\"name\":\"Left T-Beam\",\"rxId\":\"A4C1F3\",\"rxName\":\"on the \\\"board\\\"\",\"rxFw\":\"1.2.1\",\"rxLocalName\":\"01\"}"),
+            json.contains("\"state\":\"receiver\",\"name\":\"Left T-Beam\",\"rxId\":\"A4C1F3\",\"rxName\":\"on the \\\"board\\\"\",\"rxFw\":\"1.2.1\",\"rxLocalName\":\"01\",\"role\":\"receiver\""),
             "{}",
             json
         );
         // A board nobody is reading has said nothing about itself.
-        assert!(json.contains("\"port\":\"/dev/ttyUSB1\",\"usb\":\"10c4:ea60\",\"label\":\"CP2102\",\"serial\":\"0001\",\"state\":\"receiver\",\"name\":\"\",\"rxId\":null,\"rxName\":null,\"rxFw\":null,\"rxLocalName\":null}"), "{}", json);
+        assert!(json.contains("\"port\":\"/dev/ttyUSB1\",\"usb\":\"10c4:ea60\",\"label\":\"CP2102\",\"serial\":\"0001\",\"state\":\"receiver\",\"name\":\"\",\"rxId\":null,\"rxName\":null,\"rxFw\":null,\"rxLocalName\":null,\"role\":\"receiver\",\"csid\":null,\"error\":null}"), "{}", json);
     }
 
     fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
         v.iter().map(|(k, x)| (k.to_string(), x.to_string())).collect()
+    }
+
+    #[test]
+    fn a_receiver_is_told_one_setting_and_its_frequency_only_inside_the_band() {
+        assert_eq!(receiver_setting("{\"sf\":9}").unwrap(), "#SET,sf,9\n");
+        assert_eq!(receiver_setting("{\"freq\":903.5}").unwrap(), "#SET,freq,903.5\n");
+        assert_eq!(receiver_setting("{\"freq\":915}").unwrap(), "#SET,freq,915.0\n");
+        assert!(receiver_setting("{\"sf\":13}").unwrap_err().contains("between 6 and 12"));
+        assert!(receiver_setting("{\"freq\":868.1}").unwrap_err().contains("US band"));
+        assert!(receiver_setting("{}").unwrap_err().contains("no spreading factor or frequency"));
     }
 
     #[test]
@@ -1953,7 +2011,10 @@ mod tests {
             rx_id: None,
             rx_name: None,
             rx_fw: None,
+            rx_kind: None,
             name: None,
+            role: crate::serial::Role::Unknown,
+            csid: None,
         }];
         let json = ports_json(&ports, &[], None);
         assert!(json.contains("bad \\\"thing\\\"\\n"), "{}", json);

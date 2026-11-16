@@ -238,6 +238,9 @@
     { key: 'ground', label: 'Ground' },
     { key: 'air', label: 'Air' },
   ];
+  // The page shows the ground's two slots as one ground rate, written to both (the user, 2026-11-16:
+  // no more logs than transmissions). The air keeps a log and a transmit column
+  const GROUND = 0;
   const BANDS = 5;
   // The thresholds the firmware is compiled with. Written only behind a battery switch that is
   // off, where the firmware never reads them; a switch that is on needs every box typed.
@@ -248,6 +251,7 @@
 
   // 0 means every IMU reading (20 Hz), on the ground as in the air
   function logZero() { return 'every reading'; }
+  const GROUND_ZERO = 'back to back, every reading';
   function logWords(ms) {
     return Number(ms) === 0 ? logZero() : 'every ' + intervalWords(ms);
   }
@@ -275,15 +279,16 @@
   // What one cell holds: the gap the rate gives in that row.
   const gapIn = (r, k) => (k === FIXED || !r.follow ? r.fixedMs : r.intervalMs[k]);
   const secsOr = (ms, zero) => (Number(ms) === 0 ? zero : intervalWords(ms));
-  const zeroOf = (column) => (column === 'log' ? logZero() : 'back to back');
+  const zeroOf = (column) => (column === 'log' ? logZero() : column === 'ground' ? GROUND_ZERO : 'back to back');
   const typed = (v) => (/^\s*-?\d+(\.\d+)?\s*$/.test(String(v)) ? Number(v) : NaN);
   const toMs = (v) => Math.round(typed(v) * 1000);
 
   // The draft's rate for a phase's column. p<n>s and p<n>ms<k> are the transmit boxes, p<n>l and
-  // p<n>lms<k> the log ones, in seconds. The switch and the thresholds are the phase's, one set
-  // for both columns. A box that is empty or half typed is NaN, never 0.
+  // p<n>lms<k> the log ones, in seconds; the ground's log is its transmit boxes, the ground rate. The
+  // switch and the thresholds are the phase's, one set for both columns. A box that is empty or half
+  // typed is NaN, never 0.
   function draftRate(d, n, column) {
-    const log = column === 'log';
+    const log = column === 'log' && n !== GROUND;
     return {
       fixedMs: toMs(d['p' + n + (log ? 'l' : 's')]), follow: !!d['p' + n + 'f'],
       percent: [0, 1, 2, 3].map((k) => typed(d['p' + n + 'soc' + k])),
@@ -303,11 +308,12 @@
     if (bad(d.dbm)) missing.push('the transmit power');
     let boxes = 0;
     PHASES.forEach((ph, n) => {
+      const logs = n !== GROUND;
       if (d['p' + n + 'f']) {
         for (let k = 0; k < BANDS - 1; k++) if (bad(d['p' + n + 'soc' + k])) boxes++;
-        for (let k = 0; k < BANDS; k++) { if (bad(d['p' + n + 'ms' + k])) boxes++; if (bad(d['p' + n + 'lms' + k])) boxes++; }
+        for (let k = 0; k < BANDS; k++) { if (bad(d['p' + n + 'ms' + k])) boxes++; if (logs && bad(d['p' + n + 'lms' + k])) boxes++; }
       } else {
-        if (bad(d['p' + n + 'l'])) boxes++;
+        if (logs && bad(d['p' + n + 'l'])) boxes++;
         if (bad(d['p' + n + 's'])) boxes++;
       }
     });
@@ -331,6 +337,13 @@
       return 'On the board the thresholds differ: log ' + log.percent.join(', ') + ' %, transmit ' + tx.percent.join(', ') + ' %.';
     }
     return '';
+  }
+
+  // Two slots that give the same gap at every charge: the same fixed gap and switch, and with the
+  // switch on the same thresholds and bands. A table behind a switch that is off is never read
+  function sameRate(a, b) {
+    if (!a || !b || Number(a.fixedMs) !== Number(b.fixedMs) || !!a.follow !== !!b.follow) return false;
+    return !a.follow || (a.percent.join() === b.percent.join() && a.intervalMs.join() === b.intervalMs.join());
   }
 
   // What a read with no block in it is told. The dump firmware never has one; any other image
@@ -357,9 +370,14 @@
       const words = (rate, logMs) => rateWords(rate) + (logMs == null ? '' : ', log ' + logMs);
       const older = (s && s.olderSlots || []).filter((o) => o.phase === n)
         .map((o) => o.name + ' slot ' + words(o.rate, o.logMs == null ? null : logWords(o.logMs)));
-      const onBoard = !s ? '—' : tx ? [words(tx, log ? rateWords(log, logZero()) : null)].concat(older).join('; ')
+      // the ground as one rate when its two slots agree, else both as they are
+      const one = n === GROUND && sameRate(tx, log);
+      const both = one ? rateWords(tx, GROUND_ZERO) : words(tx, log ? rateWords(log, logZero()) : null);
+      const onBoard = !s ? '—' : tx ? [both].concat(older).join('; ')
         : ph.key === 'air' ? 'every ' + intervalWords(s.txIntervalMs) + ' (' + NO_PHASES + ')' : NO_PHASES;
-      rows.push({ key: ph.key, label: ph.label, onBoard, older, apart: columnsApart(tx, log) });
+      const apart = n !== GROUND ? columnsApart(tx, log) : tx && log && !one
+        ? 'On the board the ground\'s transmit and log rates differ. A write sets both to the ground rate.' : '';
+      rows.push({ key: ph.key, label: ph.label, onBoard, older, apart });
     });
     if (!s) {
       // What the app said about the block it could not give, as it said it.
@@ -389,29 +407,33 @@
     const ph = PHASES[n];
     const out = [];
     const want = { transmit: draftRate(draft, n, 'transmit'), log: draftRate(draft, n, 'log') };
-    const sayRate = (column) => rateWords(want[column], zeroOf(column));
+    const sayRate = (column) => rateWords(want[column === 'ground' ? 'transmit' : column], zeroOf(column));
     if (!s.transmit) {
       return [[ph.label, ph.key === 'air' ? 'every ' + intervalWords(s.txIntervalMs) + ' (' + NO_PHASES + ')' : NO_PHASES,
-        sayRate('transmit') + ', log ' + sayRate('log')]];
+        n === GROUND ? sayRate('ground') : sayRate('transmit') + ', log ' + sayRate('log')]];
     }
     (s.olderSlots || []).filter((o) => o.phase === n).forEach((o) => {
       out.push([ph.label + ', ' + o.name + ' slot', rateWords(o.rate), 'gone: the block has one slot a phase']);
     });
     const board = { transmit: s.transmit[n], log: s.log ? s.log[n] : null };
-    const columns = ['log', 'transmit'];
+    // A ground whose two slots agree changes as the one ground rate; one that doesn't, slot by slot
+    const one = n === GROUND && sameRate(board.transmit, board.log);
+    const columns = one ? ['transmit'] : ['log', 'transmit'];
+    const named = (c) => (one ? 'ground rate' : c);
     columns.forEach((c) => {
       const was = board[c];
       if (!was) { out.push([ph.label + ', ' + c, 'no log gaps', sayRate(c)]); return; }
       if (!!was.follow !== want[c].follow) {
-        out.push([ph.label + ', ' + c + ' by battery level', was.follow ? 'on' : 'off', want[c].follow ? 'on' : 'off']);
+        out.push([ph.label + ', ' + named(c) + ' by battery level', was.follow ? 'on' : 'off', want[c].follow ? 'on' : 'off']);
       }
     });
     for (let k = 0; k < BANDS - 1; k++) {
       const off = columns.filter((c) => board[c] && Number(board[c].percent[k]) !== want[c].percent[k]);
       const was = off.map((c) => board[c].percent[k]);
       if (off.length === 2 && was[0] === was[1]) off.pop();
+      const shared = (c) => one || (columns.every((x) => board[x]) && was[0] === board[columns[1 - columns.indexOf(c)]].percent[k]);
       off.forEach((c, i) => {
-        out.push([ph.label + ', ' + (off.length === 1 && columns.every((x) => board[x]) && was[0] === board[columns[1 - columns.indexOf(c)]].percent[k] ? '' : c + ' ') + 'threshold ' + (k + 1),
+        out.push([ph.label + ', ' + (off.length === 1 && shared(c) ? '' : c + ' ') + 'threshold ' + (k + 1),
           was[i] + ' %', (Number.isNaN(want[c].percent[k]) ? '—' : want[c].percent[k]) + ' %']);
       });
     }
@@ -419,8 +441,8 @@
     columns.forEach((c) => {
       const was = board[c];
       if (!was) return;
-      const zero = zeroOf(c);
-      const row = (what, a, b) => { if (Number(a) !== b) out.push([ph.label + ', ' + what + ', ' + c, secsOr(a, zero), secsOr(b, zero)]); };
+      const zero = zeroOf(one ? 'ground' : c);
+      const row = (what, a, b) => { if (Number(a) !== b) out.push([ph.label + ', ' + what + ', ' + named(c), secsOr(a, zero), secsOr(b, zero)]); };
       row(want[c].follow ? 'gauge unread' : 'always', was.fixedMs, want[c].fixedMs);
       for (let k = 0; k < BANDS; k++) {
         const label = bandLabel(showing, k).toLowerCase();
@@ -440,13 +462,14 @@
     const keys = follow ? [0, 1, 2, 3, 4, FIXED] : [FIXED];
     const board = settings && settings.transmit
       ? { transmit: settings.transmit[n], log: settings.log ? settings.log[n] : null } : null;
+    const one = !!board && n === GROUND && sameRate(board.transmit, board.log);
     return keys.map((k) => {
       const cell = (column) => {
         const was = board && board[column];
         if (!was) return { was: '', changed: !!settings };
         const want = draftRate(draft, n, column);
         if (!follow && was.follow) return { was: 'by battery', changed: true };
-        return { was: secsOr(gapIn(was, k), zeroOf(column)), changed: Number(gapIn(was, k)) !== gapIn(want, k) };
+        return { was: secsOr(gapIn(was, k), zeroOf(one ? 'ground' : column)), changed: Number(gapIn(was, k)) !== gapIn(want, k) };
       };
       return { key: k, log: cell('log'), transmit: cell('transmit') };
     });
@@ -482,10 +505,12 @@
   // /api/ports, heard is what the page itself has read off it, board is its USB adapter's
   // entry, which may carry a name given before ids were used. The key (rx1, rx2) is the
   // order ports were found in, so it is only used when nothing else is known.
+  // An SDR the app starts as a program (rxKind sdr, docs/sdr-receiver.md) goes by SDR and its id.
   function receiverName(key, port, heard, board) {
     const own = (port && port.rxName) || (heard && heard.info && heard.info.name);
     const id = (port && port.rxId) || (heard && heard.id);
-    return own || (port && port.name) || (board && board.name) || (id ? 'T-Beam ' + id : key);
+    const sdr = (port && port.rxKind === 'sdr') || (heard && heard.info && heard.info.kind === 'sdr');
+    return own || (port && port.name) || (board && board.name) || (id ? (sdr ? 'SDR ' : 'T-Beam ') + id : key);
   }
 
   // Where a receiver's name is kept: on the board when it reports one, on this computer
@@ -525,8 +550,9 @@
 
   // The receivers being read, for the bar on every screen. heard is the live fleet's
   // receivers: key -> {id, info: {sf}, lastT}.
+  // A ChipSat's console is read too, and is no receiver
   function receiverWords(ports, boards, heard, now) {
-    return (ports || []).map((p) => {
+    return (ports || []).filter((p) => p.role !== 'console').map((p) => {
       const b = (boards || []).find((x) => x.port === p.port);
       const r = heard.get(p.key);
       const name = receiverName(p.key, p, r, b);
@@ -560,6 +586,6 @@
 
   return {
     MODULE, uidWords, sameBoard, chipName, firmwareWords, stillOnProbe, probesChanged, probeToRead, probeToAutoRead, swapSeen, readButton, readToast, dropChoice, chipList, stepList, powerOptions, sfOptions, dbmWords,
-    flashWay, settingsTable, buildDiffers, phaseChanges, phaseRows, draftRate, draftStop, INERT_PERCENT, bandLabel, rateWords, logWords, logZero, LAYOUT, PHASES, BANDS, FIXED, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal, headerSf,
+    flashWay, settingsTable, buildDiffers, phaseChanges, phaseRows, draftRate, draftStop, sameRate, INERT_PERCENT, bandLabel, rateWords, logWords, logZero, LAYOUT, PHASES, GROUND, BANDS, FIXED, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal, headerSf,
   };
 });

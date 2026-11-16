@@ -198,6 +198,49 @@ test('a flight board keeps its layout and has no bench pane', async () => {
   assert.match(p.headWords(), /Identity and radio.*\bPhases\b.*\bWrite\b.*Flight logs.*Other images/);
 });
 
+test('a flight board\'s sheet shows its console as it arrived, from its port, and no part cards', async () => {
+  const p = await bench({ chips: [FLIGHT9], probes: [PROBE], read: readOf('flight') });
+  const t = Date.now();
+  p.say(CONSOLE.key, [
+    'I BOOT 12 c0: start log=4 csid=9',
+    'W GPS 900 c0: init ok=0 reason=config',
+    'E FLASH 950 c0: write ok=0 reason=busy',
+    'I PHASE 70000 c40: sleep ms=60000',
+  ], t);
+  await p.tick();
+  const h = p.head();
+  assert.ok(h.indexOf('<h3>Console</h3>') < h.indexOf('id="cs-console"'));
+  assert.ok(h.indexOf('id="cs-console"') < h.indexOf('Identity and radio'), 'above the steps');
+  assert.doesNotMatch(h, /id="cs-bench"/);
+  assert.equal((h.match(/<select data-console=/g) || []).length, 1, 'one chooser, in Console');
+  assert.match(p.headWords(), /Flight logs .* Console port \/dev\/ttyUSB0 chosen in Console/);
+  const c = p.html('cs-console');
+  assert.match(c, /<span class="boot">[^<]*I BOOT 12 c0: start log=4/);
+  assert.match(c, /<span class="warn">[^<]*W GPS 900 c0: init ok=0/);
+  assert.match(c, /<span class="bad">[^<]*E FLASH 950 c0: write ok=0/);
+  assert.ok(c.indexOf('I BOOT 12') < c.indexOf('I PHASE 70000'), 'newest at the bottom');
+  assert.match(tidy(p.text('cs-console')), /4 lines, 0 not in the log format, the last at \d\d:\d\d:\d\d/);
+  assert.doesNotMatch(c, /Barometer|class="parts"|Heard by the receivers/);
+});
+
+test('a console port that goes says so, keeps its lines, and carries on when it comes back', async () => {
+  const p = await bench({ chips: [FLIGHT9], probes: [PROBE], read: readOf('flight'), boards: [Object.assign({}, CONSOLE, { state: 'waiting' }), TBEAM] });
+  await p.fire('screen-chipsats', 'click', { 'data-listen': CONSOLE.port });
+  assert.strictEqual(p.storage['dg-console-' + UID9], CONSOLE.port);
+  p.say(CONSOLE.key, ['I BOOT 12 c0: start log=4']);
+  await p.tick();
+  const gone = p.o.boards.shift();
+  await p.tick();
+  assert.match(p.headWords(), /\/dev\/ttyUSB0 is not plugged in\./);
+  assert.match(p.head(), /<option selected disabled>\/dev\/ttyUSB0, not plugged in<\/option>/);
+  assert.match(p.html('cs-console'), /I BOOT 12 c0: start log=4/);
+  p.o.boards.unshift(gone);
+  p.say(CONSOLE.key, ['I CYC 1000 c1: beat n=1']);
+  await p.tick();
+  assert.doesNotMatch(p.headWords(), /not plugged in/);
+  assert.match(tidy(p.text('cs-console')), /2 lines/);
+});
+
 test('a bench board has the bench first, then Other images, then the flight panes folded with why', async () => {
   const p = await bench();
   const h = p.head();
@@ -247,7 +290,7 @@ test('flight software can be written from the bench pane on one press, saying wh
   assert.match(p.headWords(), /Sensor bench running it, read off the board now/);
   const h = p.head();
   assert.ok(h.indexOf('data-buildembed="1"') < h.indexOf('id="cs-bench"'), 'the button is in the bench pane');
-  assert.match(p.headWords(), /Write flight software board 9, LE, SF7, 14 dBm\. Change it in Identity and radio below\./);
+  assert.match(p.headWords(), /Write flight software board 9, LE, SF7, 14 dBm, log level 4, 915\.0 MHz\. Change it in Identity and radio below\./);
   assert.doesNotMatch(h, /data-buildgo/);
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   assert.match(p.o.flashed.embedded, /^(built|flight)$/);
@@ -274,4 +317,63 @@ test('lines are found under the open port\'s key, as the app sends them (its boa
   await p.tick();
   assert.match(p.live(), /<span class="k">temp<\/span>=21.40/);
   assert.match(p.head(), /data-radio="\/dev\/ttyUSB0"[^>]*>Radio on\/off/);
+});
+
+// ---------- the console filter ----------
+
+const gps = (n, ms0) => Array.from({ length: n }, (_, i) => 'W GPS ' + (ms0 + i * 500) + ' c' + i + ': nofix sats=0');
+const pickFilter = (p, value) => p.fire('screen-chipsats', 'change', { 'data-filter': '1' }, { value });
+
+test('PHASE is still offered and found after thousands of GPS lines', async () => {
+  const p = await bench({ chips: [FLIGHT9], probes: [PROBE], read: readOf('flight') });
+  p.say(CONSOLE.key, ['I BOOT 12 c0: start log=4 csid=9', 'I PHASE 70000 c40: ground why=start', ...gps(6000, 71000)]);
+  await p.tick();
+  const c = p.html('cs-console');
+  for (const tag of ['PHASE', 'SYS', 'ENV', 'BOOT', 'RST', 'CYC']) assert.match(c, new RegExp('<option value="' + tag + '"'), tag + ' offered with no line of it kept');
+  assert.match(tidy(p.text('cs-console')), /6002 of 6002 lines match/);
+  await pickFilter(p, 'PHASE');
+  const f = p.html('cs-console');
+  assert.match(f, /<option value="PHASE" selected>/);
+  assert.match(f, /I PHASE 70000 c40: ground why=start/);
+  assert.doesNotMatch(f, /W GPS/);
+  assert.match(tidy(p.text('cs-console')), /1 of 6002 lines match/);
+});
+
+test('a new line that does not match the filter is kept hidden and shows when the filter is switched to it', async () => {
+  const p = await bench({ chips: [FLIGHT9], probes: [PROBE], read: readOf('flight') });
+  p.say(CONSOLE.key, ['I PHASE 1000 c1: ground why=start', 'I CYC 2000 c2: beat n=2']);
+  await pickFilter(p, 'PHASE');
+  p.say(CONSOLE.key, ['I CYC 3000 c3: beat n=3', 'I PHASE 4000 c4: air why=rise']);
+  await p.tick();
+  let c = p.html('cs-console');
+  assert.match(c, /I PHASE 4000 c4: air why=rise/, 'a new match appears live');
+  assert.ok(c.indexOf('PHASE 1000') < c.indexOf('PHASE 4000'), 'newest at the bottom');
+  assert.doesNotMatch(c, /I CYC/);
+  assert.match(tidy(p.text('cs-console')), /2 of 4 lines match/);
+  await pickFilter(p, 'CYC');
+  c = p.html('cs-console');
+  assert.match(c, /I CYC 2000 c2: beat n=2/, 'an earlier hidden line');
+  assert.match(c, /I CYC 3000 c3: beat n=3/, 'a line that came in while hidden');
+  assert.doesNotMatch(c, /I PHASE/);
+  await pickFilter(p, '');
+  assert.match(tidy(p.text('cs-console')), /4 of 4 lines match/);
+});
+
+test('only the newest matches are drawn, saying so, and Pause holds the lines while the filter still works', async () => {
+  const p = await bench({ chips: [FLIGHT9], probes: [PROBE], read: readOf('flight') });
+  p.say(CONSOLE.key, ['I PHASE 1000 c1: ground why=start', ...gps(2500, 2000)]);
+  await p.tick();
+  let c = p.html('cs-console');
+  assert.match(tidy(p.text('cs-console')), /showing the newest 2000 that match/);
+  assert.doesNotMatch(c, /I PHASE 1000/);
+  assert.equal((c.match(/W GPS/g) || []).length, 2000);
+  await p.fire('screen-chipsats', 'change', { 'data-pause': '1' }, { checked: true });
+  p.say(CONSOLE.key, ['I PHASE 9000000 c9: air why=rise']);
+  await pickFilter(p, 'PHASE');
+  c = p.html('cs-console');
+  assert.match(c, /I PHASE 1000 c1/);
+  assert.doesNotMatch(c, /I PHASE 9000000/, 'came after Pause');
+  assert.match(tidy(p.text('cs-console')), /1 of 2501 lines match/);
+  await p.fire('screen-chipsats', 'change', { 'data-pause': '1' }, { checked: false });
+  assert.match(p.html('cs-console'), /I PHASE 9000000 c9/);
 });

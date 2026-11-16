@@ -8,7 +8,9 @@
   'use strict';
 
   const LINE = /^([EWIDV]) ([A-Z]+) (\d+) c(\d+): (\S+)(.*)$/;
-  const RAW_KEPT = 5000;          // lines of raw console the screen can scroll back through
+  // the whole session's console for the filter: GPS searching, the heartbeat and the rest come
+  // to about 3 lines a second, so this is a day and more
+  const RAW_KEPT = 300000;
   const GAP_MS = 3000;            // heartbeat is 1 s, so a gap this long is the port, not the board
   const LOOP_BOOTS = 3;           // starts inside LOOP_MS that count as a boot loop
   const LOOP_MS = 60000;
@@ -40,7 +42,9 @@
 
   class Session {
     constructor() {
-      this.raw = [];          // {t, text, line}
+      this.raw = [];          // {t, text, tag, level, start}, tag null off the log format
+      this.dropped = 0;       // oldest raw lines let go past RAW_KEPT
+      this.tags = new Set();  // every tag heard, dropped lines' too
       this.parts = new Map(); // tag -> part
       this.boots = [];        // {t, fields, cause, before, upMs, bench}
       this.gaps = [];         // {from, to}, port went quiet, not a restart
@@ -53,8 +57,12 @@
 
     add(t, text) {
       const line = parse(text);
-      this.raw.push({ t, text, line });
-      if (this.raw.length > RAW_KEPT) this.raw.splice(0, this.raw.length - RAW_KEPT);
+      this.raw.push({ t, text, tag: line ? line.tag : null, level: line ? line.level : null, start: !!line && line.tag === 'BOOT' && line.event === 'start' });
+      if (line) this.tags.add(line.tag);
+      if (this.raw.length > RAW_KEPT) {
+        this.dropped += this.raw.length - RAW_KEPT;
+        this.raw.splice(0, this.raw.length - RAW_KEPT);
+      }
       if (this.lastT !== null && t - this.lastT > GAP_MS) this.gaps.push({ from: this.lastT, to: t });
       this.lastT = t;
       this.heard++;
@@ -208,5 +216,5 @@
     }
   }
 
-  return { parse, Session, Part, Radio, BENCH_CSID, GAP_MS, LOOP_BOOTS, LOOP_MS };
+  return { parse, Session, Part, Radio, RAW_KEPT, BENCH_CSID, GAP_MS, LOOP_BOOTS, LOOP_MS };
 });

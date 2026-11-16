@@ -1,0 +1,7 @@
+Downloaded once with curl, 2026-11-09. URL, then sha256.
+maplibre/maplibre-gl.js  https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.js  45a9b07a9189ce56054c620a947ccf41e291e58c95e9b61533b740aaa65ee5cb
+maplibre/maplibre-gl.css  https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.css  ab1e70d59ec40465bae7e7030da2f3ccf28133fd502e62bd598eefbadfd7a732
+maplibre/LICENSE.txt  https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/LICENSE.txt  ee5fc05a0677eaf69601d2c7db0d9ecd6cc27c3abc1d0733bc9ed34707cf8ef2
+three/three.module.min.js  https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.module.min.js  06552c54e4071fbc7305117aafe6765d92c5d2a2a83507d4f05b9bf4f3d4d463
+three/three.core.min.js  https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.core.min.js  79f2b4f58d3e99a9948a4d3b7f6d5c2daf705bdefe9fb82ebec715623966551c
+three/LICENSE  https://cdn.jsdelivr.net/npm/three@0.179.1/LICENSE  bfe119ea4fd413f5f7ca3fcd63adb0c4a073ed39daa2fe7d3e6b769e21272601

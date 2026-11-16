@@ -1,11 +1,13 @@
 // One thread per open port.
 //
-// Nothing is opened until the operator says it is a receiver. That is not caution for
+// An unknown board is not opened until the operator says to. That is not caution for
 // its own sake: opening a port pulses DTR, which resets an ESP32, and serialport
 // documents that Linux asserts DTR on open whatever you ask for, so there is no way
 // to listen to an unknown board to find out what it is without possibly resetting it.
 // A ChipSat and a T-Beam can carry the same USB bridge, so the chip cannot tell them
 // apart either. The operator says so once and the board is remembered after that.
+// Two kinds open by themselves: an ST-Link's own serial port, which is a ChipSat's
+// console and has no ESP32 behind it, and a board this app has heard say it is a T-Beam.
 use crate::framing::Framer;
 use crate::logfile::now_ms;
 use crate::receivers::{self, Header};
@@ -57,14 +59,92 @@ pub fn is_flight_controller(usb: &str) -> bool {
     usb == "1209:5741"
 }
 
+// The STLINK-V3's virtual COM port. Nothing but the ChipSat on the probe ever talks on it.
+pub fn is_stlink_console(usb: &str) -> bool {
+    usb == "0483:3754"
+}
+
+// What is on the other end of an open port. A console is a ChipSat's: it is read and its
+// lines are kept, but it is never sent a receiver's commands and never counted as one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Role {
+    Receiver,
+    Console,
+    Unknown,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Receiver => "receiver",
+            Role::Console => "console",
+            Role::Unknown => "unknown",
+        }
+    }
+}
+
+// What one line says about the board that printed it. Only a whole #DG,RX header counts for
+// a T-Beam, and only a line in Log.cpp's format ("I BOOT 0 c0: start") for a ChipSat; a
+// T-Beam prints neither of the other's.
+pub fn role_said(line: &str) -> Option<Role> {
+    if receivers::header(line).is_some() {
+        Some(Role::Receiver)
+    } else if crate::check::console_at(line.as_bytes(), 0).is_some() {
+        Some(Role::Console)
+    } else {
+        None
+    }
+}
+
+// The ST-Link's port is a console whatever it prints. Otherwise what the board has said
+// this session, else whether it was heard as a T-Beam on an earlier one.
+fn role_of(usb: &str, key: &str, said: &HashMap<String, Role>, tbeams: &HashSet<String>) -> Role {
+    if is_stlink_console(usb) {
+        Role::Console
+    } else if let Some(r) = said.get(key) {
+        *r
+    } else if tbeams.contains(key) {
+        Role::Receiver
+    } else {
+        Role::Unknown
+    }
+}
+
+// The board id a console names in its settings line at boot:
+// "I BOOT 1 c0: settings from=block csid=17 module=le ..."
+pub fn csid_said(line: &str) -> Option<u8> {
+    let at = crate::check::console_at(line.as_bytes(), 0)?;
+    if !line[2..].starts_with("BOOT ") {
+        return None;
+    }
+    let mut words = line[at..].split_whitespace();
+    if words.next()? != "settings" {
+        return None;
+    }
+    words.find_map(|w| w.strip_prefix("csid="))?.parse().ok()
+}
+
+// Linux says EBUSY when another program has the port open, which is what serialport's
+// exclusive lock turns a second copy of this app into.
+fn open_failure(e: &serialport::Error) -> String {
+    let text = e.to_string();
+    if text.contains("ermission") {
+        format!("{} — add yourself to the dialout group: sudo usermod -aG dialout $USER, then log out and back in", text)
+    } else if text.to_lowercase().contains("busy") {
+        String::from("held by another program, perhaps the other copy of this app")
+    } else {
+        text
+    }
+}
+
 pub enum Event {
     Line { key: String, t_ms: u128, text: String },
     Ports,
 }
 
 // Every USB serial port on the machine, and what we are doing about it.
-// state: "receiver" (open), "waiting" (never touched, needs a yes), "dismissed"
-// (disconnected by hand this session), "ignored" (told to leave it alone for good).
+// state: "receiver" (read, whatever its role), "waiting" (never touched, needs a yes),
+// "dismissed" (disconnected by hand this session), "ignored" (told to leave it alone for good).
 #[derive(Clone)]
 pub struct Board {
     pub port: String,
@@ -74,6 +154,8 @@ pub struct Board {
     pub key: String,
     pub state: String,
     pub name: String,   // what the operator calls it, empty until they say
+    pub role: &'static str,   // a Role, or "flight-controller"
+    pub error: String,  // why it is not being read when it should be
 }
 
 #[derive(Clone)]
@@ -88,7 +170,10 @@ pub struct PortInfo {
     pub rx_id: Option<String>,
     pub rx_name: Option<String>,   // what the board says it is called
     pub rx_fw: Option<String>,     // the firmware it says it runs, from 1.2.1 on
+    pub rx_kind: Option<String>,   // sdr for a program read by command.rs; a T-Beam says none
     pub name: Option<String>,      // what this computer calls that id
+    pub role: Role,
+    pub csid: Option<u8>,          // the board a console last said it is
 }
 
 // The one thing that tells an unmarked board from its neighbour without opening it:
@@ -189,11 +274,13 @@ struct Heard {
     // not reported a name since. A board can refuse one, and is then not asked again
     // with every header.
     asked: Option<String>,
+    csid: Option<u8>,
 }
 
 struct Open {
     port: String,
     usb: String,
+    board: String,                        // its board key, which its role is kept against
     writer: Option<Writer>,
     heard: Arc<Mutex<Heard>>,             // the reader thread writes this
     alive: Arc<Mutex<bool>>,
@@ -223,6 +310,12 @@ pub struct Hub {
     // open receivers missing from the listing, and for how many passes
     missing: HashMap<String, u32>,
     listing_failed: bool,          // said once, not every 2 s
+    commands: Vec<crate::command::Source>,   // receivers that are programs, never written to
+    // board key -> what it has said it is, this session. Shared with the reader threads,
+    // which hear it; kept here so a port that comes back under another name keeps it.
+    said: Arc<Mutex<HashMap<String, Role>>>,
+    tbeams: HashSet<String>,       // board keys heard as a T-Beam, on any run
+    cannot_open: HashMap<String, String>,   // device path -> why it could not be opened
 }
 
 // Called on every line a receiver sends. Only its header line changes anything, and the
@@ -313,6 +406,22 @@ fn notice(
     news
 }
 
+// Keeps what a line says the board is, against its board key, so a port that comes back
+// under another name is still what it was. The answer is whether that changed anything.
+fn learn(line: &str, usb: &str, board: &str, said: &Mutex<HashMap<String, Role>>) -> bool {
+    let Some(role) = role_said(line) else { return false };
+    if is_stlink_console(usb) {
+        return false;
+    }
+    said.lock().unwrap().insert(board.to_string(), role) != Some(role)
+}
+
+// A console's settings line names the board on it. The answer is whether that is news.
+fn heard_csid(line: &str, heard: &Mutex<Heard>) -> bool {
+    let Some(csid) = csid_said(line) else { return false };
+    heard.lock().unwrap().csid.replace(csid) != Some(csid)
+}
+
 impl Hub {
     pub fn new(tx: Sender<Event>) -> Self {
         Hub {
@@ -333,7 +442,16 @@ impl Hub {
             want_sf: Arc::new(Mutex::new(HashMap::new())),
             missing: HashMap::new(),
             listing_failed: false,
+            commands: Vec::new(),
+            said: Arc::new(Mutex::new(HashMap::new())),
+            tbeams: HashSet::new(),
+            cannot_open: HashMap::new(),
         }
+    }
+
+    pub fn add_commands(&mut self, sources: Vec<crate::command::Source>) {
+        self.commands.extend(sources);
+        let _ = self.tx.send(Event::Ports);
     }
 
     // What the operator decided last time. Kept beside the binary so a field laptop
@@ -349,6 +467,7 @@ impl Hub {
                 match line.split_once(' ') {
                     Some(("receiver", k)) => { self.approved.insert(k.trim().to_string()); }
                     Some(("ignore", k)) => { self.ignored.insert(k.trim().to_string()); }
+                    Some(("tbeam", k)) => { self.tbeams.insert(k.trim().to_string()); }
                     // name <key> <whatever the operator typed>, spaces and all
                     Some(("name", rest)) => {
                         if let Some((k, n)) = rest.trim_start().split_once(' ') {
@@ -370,12 +489,14 @@ impl Hub {
     fn save(&self) -> Result<(), String> {
         let Some(f) = &self.store else { return Ok(()) };
         let mut text = String::from("# what DeSCENT Ground may open, and what each board is called.\n");
-        text.push_str("# one per line: receiver <board>, ignore <board>, name <board> <what you call it>\n");
+        text.push_str("# one per line: receiver <board>, ignore <board>, name <board> <what you call it>,\n");
+        text.push_str("# tbeam <board> for one heard saying it is a T-Beam, which is opened without asking\n");
         let mut rows: Vec<String> = self
             .approved
             .iter()
             .map(|k| format!("receiver {}", k))
             .chain(self.ignored.iter().map(|k| format!("ignore {}", k)))
+            .chain(self.tbeams.iter().map(|k| format!("tbeam {}", k)))
             .chain(self.names.iter().map(|(k, n)| format!("name {} {}", k, n)))
             .collect();
         rows.sort();
@@ -442,6 +563,8 @@ impl Hub {
         self.approved.remove(&key);
         self.ignored.remove(&key);
         self.names.remove(&key);
+        self.tbeams.remove(&key);
+        self.said.lock().unwrap().remove(&key);
         self.dismissed.remove(port);
         self.complained.remove(port);
         self.touch_board(port, Some("waiting"), Some(""));
@@ -554,7 +677,7 @@ impl Hub {
     }
 
     fn fingerprint(boards: &[Board]) -> String {
-        boards.iter().map(|b| format!("{}|{}|{}", b.port, b.state, b.name)).collect()
+        boards.iter().map(|b| format!("{}|{}|{}|{}|{}", b.port, b.state, b.name, b.role, b.error)).collect()
     }
 
     // Answering a decision straight away, rather than leaving the page to show what it
@@ -574,13 +697,16 @@ impl Hub {
     }
 
     pub fn ports(&self) -> Vec<PortInfo> {
+        let said = self.said.lock().unwrap().clone();
         let mut v: Vec<PortInfo> = self
             .open
             .iter()
             .map(|(key, o)| {
-                let heard = o.heard.lock().ok().and_then(|h| h.header.clone());
+                let (heard, csid) = o.heard.lock().map(|h| (h.header.clone(), h.csid)).unwrap_or((None, None));
                 let rx_id = heard.as_ref().map(|h| h.id.clone());
                 PortInfo {
+                    role: role_of(&o.usb, &o.board, &said, &self.tbeams),
+                    csid,
                     key: key.clone(),
                     port: o.port.clone(),
                     usb: o.usb.clone(),
@@ -588,17 +714,25 @@ impl Hub {
                     error: o.error.lock().ok().and_then(|e| e.clone()),
                     name: rx_id.as_deref().and_then(|id| self.rx_names.lock().unwrap().get(id).map(String::from)),
                     rx_fw: heard.as_ref().and_then(|h| h.fw.clone()),
+                    rx_kind: heard.as_ref().and_then(|h| h.kind.clone()),
                     rx_name: heard.and_then(|h| h.name).filter(|n| !n.is_empty()),
                     rx_id,
                 }
             })
             .collect();
+        let names = self.rx_names.lock().unwrap();
+        v.extend(self.commands.iter().map(|c| c.port_info(&names)));
         v.sort_by(|a, b| a.key.cmp(&b.key));
         v
     }
 
+    // A ChipSat's console can be written to (the bench takes R for its radio), but never a
+    // receiver's #GET or #SET.
     pub fn send(&mut self, key: &str, text: &str) -> Result<(), String> {
         let o = self.open.get(key).ok_or_else(|| format!("{} is not open", key))?;
+        if text.starts_with('#') && role_of(&o.usb, &o.board, &self.said.lock().unwrap(), &self.tbeams) == Role::Console {
+            return Err(format!("{} is a ChipSat console, not a receiver", key));
+        }
         let writer = o.writer.as_ref().ok_or_else(|| format!("{} has no port", key))?;
         let mut w = writer.lock().map_err(|_| format!("{} is busy", key))?;
         w.write_all(text.as_bytes()).map_err(|e| format!("{}: {}", key, e))?;
@@ -690,6 +824,17 @@ impl Hub {
         let mut boards: Vec<Board> = Vec::new();
         let mut present: HashSet<String> = HashSet::new();
 
+        // A board heard saying it is a T-Beam is one on the next run too, so it opens without asking
+        let said = self.said.lock().unwrap().clone();
+        let heard_tbeams: Vec<String> =
+            said.iter().filter(|(k, r)| **r == Role::Receiver && !self.tbeams.contains(*k)).map(|(k, _)| k.clone()).collect();
+        if !heard_tbeams.is_empty() {
+            self.tbeams.extend(heard_tbeams);
+            if let Err(e) = self.save() {
+                println!("{}", e);
+            }
+        }
+
         for p in found {
             let u = match &p.port_type {
                 serialport::SerialPortType::UsbPort(u) => u.clone(),
@@ -701,12 +846,13 @@ impl Hub {
             let usb = format!("{:04x}:{:04x}", u.vid, u.pid);
             let label = bridge_name(u.vid, u.pid).to_string();
 
-            let approved = self.approved.contains(&key);
+            let role = role_of(&usb, &key, &said, &self.tbeams);
+            let opens = self.approved.contains(&key) || is_stlink_console(&usb) || self.tbeams.contains(&key);
             let state = if self.ignored.contains(&key) {
                 "ignored"
             } else if self.dismissed.contains(&p.port_name) {
                 "dismissed"
-            } else if approved {
+            } else if opens {
                 "receiver"
             } else {
                 "waiting"
@@ -717,15 +863,18 @@ impl Hub {
                 usb: usb.clone(),
                 label,
                 serial,
-                key,
+                key: key.clone(),
                 state: state.to_string(),
                 name,
+                role: if is_flight_controller(&usb) { "flight-controller" } else { role.as_str() },
+                error: String::new(),
             });
 
             if state != "receiver"
                 || self.flashing.contains(&p.port_name)
                 || self.probing.contains(&p.port_name)
             {
+                self.cannot_open.remove(&p.port_name);
                 continue;
             }
 
@@ -740,18 +889,16 @@ impl Hub {
             match serialport::new(&p.port_name, BAUD).timeout(Duration::from_millis(200)).open() {
                 Ok(port) => {
                     self.complained.remove(&p.port_name);
-                    self.spawn(rx, p.port_name, usb, port);
+                    self.cannot_open.remove(&p.port_name);
+                    self.spawn(rx, p.port_name, usb, key, role, port);
                 }
                 Err(e) => {
-                    let hint = if e.to_string().contains("ermission") {
-                        format!("{} — add yourself to the dialout group: sudo usermod -aG dialout $USER, then log out and back in", e)
-                    } else {
-                        e.to_string()
-                    };
+                    let why = open_failure(&e);
                     // Once per port, not every two seconds forever.
                     if self.complained.insert(p.port_name.clone()) {
-                        println!("{}: {}", p.port_name, hint);
+                        println!("{}: {}", p.port_name, why);
                     }
+                    self.cannot_open.insert(p.port_name.clone(), why);
                 }
             }
         }
@@ -759,6 +906,12 @@ impl Hub {
         // Unplugging a board clears a by-hand disconnect, so plugging it back in
         // brings it back the way anyone would expect.
         self.dismissed.retain(|p| present.contains(p));
+        self.cannot_open.retain(|p, _| present.contains(p));
+        for b in boards.iter_mut() {
+            if let Some(why) = self.cannot_open.get(&b.port) {
+                b.error = why.clone();
+            }
+        }
 
         // The replug watch runs off this same pass, so nothing has to be opened for it.
         // A board unplugged and back inside one 2 s pass is missed, which is why the
@@ -802,6 +955,8 @@ impl Hub {
         key: String,
         port_name: String,
         usb: String,
+        board: String,
+        role: Role,
         port: Box<dyn serialport::SerialPort>,
     ) {
         let reader = match port.try_clone() {
@@ -827,6 +982,9 @@ impl Hub {
         let thread_wants = self.want_sf.clone();
         let thread_port = port_name.clone();
         let thread_writer = writer.clone();
+        let thread_said = self.said.clone();
+        let thread_usb = usb.clone();
+        let thread_board = board.clone();
         let mut reader = reader;
         let handle = std::thread::spawn(move || {
             let mut framer = Framer::new();
@@ -840,7 +998,18 @@ impl Hub {
                     Ok(n) => {
                         let t = now_ms();
                         for line in framer.push(&buf[..n]) {
-                            let news = notice(&line, &thread_heard, &thread_names, thread_writer.as_ref(), Some((&thread_wants, &thread_port)));
+                            // The page and the live model are told before the line arrives, so
+                            // the first console line is never taken for a receiver's
+                            if learn(&line, &thread_usb, &thread_board, &thread_said) {
+                                let _ = tx.send(Event::Ports);
+                            }
+                            let console = is_stlink_console(&thread_usb)
+                                || thread_said.lock().unwrap().get(&thread_board) == Some(&Role::Console);
+                            let news = if console {
+                                heard_csid(&line, &thread_heard)
+                            } else {
+                                notice(&line, &thread_heard, &thread_names, thread_writer.as_ref(), Some((&thread_wants, &thread_port)))
+                            };
                             let _ = tx.send(Event::Line {
                                 key: thread_key.clone(),
                                 t_ms: t,
@@ -864,16 +1033,19 @@ impl Hub {
             }
         });
 
-        println!("{} on {} (USB {})", key, port_name, usb);
+        println!("{} on {} (USB {}), {}", key, port_name, usb, role.as_str());
         self.open.insert(
             key.clone(),
-            Open { port: port_name, usb, writer, heard, alive, status, error, handle: Some(handle) },
+            Open { port: port_name, usb, board, writer, heard, alive, status, error, handle: Some(handle) },
         );
 
-        // Ask who this is straight away. Opening the port usually resets an ESP32
-        // through the USB bridge's DTR line, so the boot header often arrives by
-        // itself, but a board that does not reset would stay unidentified for 30 s.
-        let _ = self.send(&key, "#GET\n");
+        // Ask a known T-Beam who it is straight away. Opening the port usually resets an
+        // ESP32 through the USB bridge's DTR line, so the boot header often arrives by
+        // itself, but a board that does not reset would stay unidentified for 30 s. A board
+        // not known yet is not asked: it may be a ChipSat, and a T-Beam says so within 30 s.
+        if role == Role::Receiver {
+            let _ = self.send(&key, "#GET\n");
+        }
         let _ = self.tx.send(Event::Ports);
     }
 
@@ -884,12 +1056,18 @@ impl Hub {
 
     #[cfg(test)]
     fn pretend_open_writing(&mut self, key: &str, port: &str, writer: Option<Box<dyn Write + Send>>) {
+        self.pretend_open_usb(key, port, "10c4:ea60", &format!("10c4:ea60:{}", port), writer);
+    }
+
+    #[cfg(test)]
+    fn pretend_open_usb(&mut self, key: &str, port: &str, usb: &str, board: &str, writer: Option<Box<dyn Write + Send>>) {
         self.keys.map.insert(port.to_string(), key.to_string());
         self.open.insert(
             key.to_string(),
             Open {
                 port: port.to_string(),
-                usb: "10c4:ea60".into(),
+                usb: usb.into(),
+                board: board.into(),
                 writer: writer.map(|w| Arc::new(Mutex::new(w))),
                 heard: Arc::new(Mutex::new(Heard::default())),
                 alive: Arc::new(Mutex::new(false)),
@@ -1008,6 +1186,8 @@ mod tests {
             key: key.into(),
             state: state.into(),
             name: String::new(),
+            role: "unknown",
+            error: String::new(),
         }
     }
 
@@ -1631,6 +1811,157 @@ mod tests {
         assert_eq!(looks_like(&["ets Jun  8 2016 00:22:57".into()], 24), "something-else");
         // Bytes that never finished a line are not silence.
         assert_eq!(looks_like(&[], 17), "something-else");
+    }
+
+    #[test]
+    fn a_board_is_what_it_says_it_is() {
+        assert_eq!(role_said(HEADER), Some(Role::Receiver));
+        assert_eq!(role_said(NAMED), Some(Role::Receiver));
+        for line in ["I BOOT 0 c0: start log=3", "I CYC 1520 c12: tick", "W GPS 82481 c24: read ok=0 reason=nofix",
+            "I PKT 2210 c3: 00 00 00 00 98 BD FF FF"] {
+            assert_eq!(role_said(line), Some(Role::Console), "{}", line);
+        }
+        // nothing a T-Beam prints besides its header says either way, nor does half a header
+        for line in ["PKT,55,00FF,-50.0,13.75,-12", "HB,1,2,3", "ERR,-2,-110,3", "#DG,RX,v1,id=A4", "ets Jun  8 2016 00:22:57", ""] {
+            assert_eq!(role_said(line), None, "{}", line);
+        }
+    }
+
+    #[test]
+    fn the_st_links_own_port_is_a_console_whatever_it_prints() {
+        let none = HashMap::new();
+        let tbeams = HashSet::new();
+        assert_eq!(role_of("0483:3754", "0483:3754:X", &none, &tbeams), Role::Console);
+        let said = Mutex::new(HashMap::new());
+        assert!(!learn(HEADER, "0483:3754", "0483:3754:X", &said));
+        assert_eq!(role_of("0483:3754", "0483:3754:X", &said.lock().unwrap(), &tbeams), Role::Console);
+        // anything else is nothing until it says
+        assert_eq!(role_of("10c4:ea60", "10c4:ea60:0001", &none, &tbeams), Role::Unknown);
+        assert_eq!(role_of("10c4:ea60", "10c4:ea60:0001", &none, &HashSet::from([String::from("10c4:ea60:0001")])), Role::Receiver);
+    }
+
+    #[test]
+    fn a_role_heard_sticks_to_the_board_when_it_comes_back_on_another_port() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut hub = Hub::new(tx);
+        hub.pretend_open_usb("rx1", "/dev/ttyUSB0", "1a86:7523", "1a86:7523:-", None);
+        assert_eq!(hub.ports()[0].role, Role::Unknown);
+        assert!(!learn("PKT,55,00FF,-50.0,13.75,-12", "1a86:7523", "1a86:7523:-", &hub.said));
+        assert!(learn("I BOOT 0 c0: start log=3", "1a86:7523", "1a86:7523:-", &hub.said));
+        assert!(!learn("I CYC 1520 c12: tick", "1a86:7523", "1a86:7523:-", &hub.said), "already known");
+        assert_eq!(hub.ports()[0].role, Role::Console);
+
+        hub.close("rx1");
+        hub.pretend_open_usb("rx4", "/dev/ttyUSB3", "1a86:7523", "1a86:7523:-", None);
+        assert_eq!(hub.ports()[0].role, Role::Console);
+        // another board on the other socket is its own
+        hub.pretend_open_usb("rx5", "/dev/ttyUSB4", "1a86:7523", "1a86:7523:Q", None);
+        assert_eq!(hub.ports().iter().find(|p| p.key == "rx5").unwrap().role, Role::Unknown);
+    }
+
+    #[test]
+    fn a_board_heard_as_a_t_beam_opens_by_itself_on_the_next_run() {
+        let dir = scratch("tbeams");
+        let mut hub = reloaded(&dir);
+        hub.pretend_open_usb("rx1", "/dev/ttyACM0", "1a86:55d4", "1a86:55d4:58A1", None);
+        assert!(learn(HEADER, "1a86:55d4", "1a86:55d4:58A1", &hub.said));
+        // kept by the next scan, which has nothing else to do here
+        hub.poll_found(Ok(Vec::new()));
+        let again = reloaded(&dir);
+        assert!(again.tbeams.contains("1a86:55d4:58A1"));
+        assert!(again.approved.is_empty(), "heard, not approved");
+        assert_eq!(role_of("1a86:55d4", "1a86:55d4:58A1", &HashMap::new(), &again.tbeams), Role::Receiver);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Paths that are not there, so nothing real is opened: only what the scan makes of them
+    fn usb_port(path: &std::path::Path, vid: u16, pid: u16, serial: &str) -> serialport::SerialPortInfo {
+        serialport::SerialPortInfo {
+            port_name: path.display().to_string(),
+            port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+                vid,
+                pid,
+                serial_number: Some(serial.into()),
+                manufacturer: None,
+                product: None,
+                interface: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn the_st_link_and_known_t_beams_are_read_without_asking_and_others_wait() {
+        let dir = scratch("opens");
+        std::fs::write(dir.join("descent-ground-boards.txt"), "tbeam 1a86:55d4:58A1\n").unwrap();
+        let mut hub = reloaded(&dir);
+        let gone = dir.join("no-such-port");
+        hub.poll_found(Ok(vec![
+            usb_port(&gone.join("acm2"), 0x0483, 0x3754, "002F0028"),
+            usb_port(&gone.join("acm0"), 0x1a86, 0x55d4, "58A1"),
+            usb_port(&gone.join("usb0"), 0x10c4, 0xea60, "0001"),
+            usb_port(&gone.join("acm1"), 0x1209, 0x5741, "x"),
+        ]));
+        let by = |hub: &Hub, end: &str| hub.boards.iter().find(|b| b.port.ends_with(end)).unwrap().clone();
+        let seen = |hub: &Hub, end: &str| {
+            let b = by(hub, end);
+            (b.state, b.role)
+        };
+        assert_eq!(seen(&hub, "acm2"), ("receiver".into(), "console"));
+        assert_eq!(seen(&hub, "acm0"), ("receiver".into(), "receiver"));
+        assert_eq!(seen(&hub, "usb0"), ("waiting".into(), "unknown"));
+        assert_eq!(seen(&hub, "acm1"), ("waiting".into(), "flight-controller"));
+        // tried and failed, and the page is told why
+        assert!(!by(&hub, "acm2").error.is_empty());
+        assert!(by(&hub, "usb0").error.is_empty());
+
+        // left alone by hand stays left alone
+        hub.ignore(&by(&hub, "acm2").port).unwrap();
+        hub.poll_found(Ok(vec![usb_port(&gone.join("acm2"), 0x0483, 0x3754, "002F0028")]));
+        let b = by(&hub, "acm2");
+        assert_eq!((b.state.as_str(), b.error.as_str()), ("ignored", ""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_port_another_program_holds_says_so() {
+        let busy = serialport::Error::new(serialport::ErrorKind::Io(ErrorKind::Other), "Device or resource busy");
+        assert_eq!(open_failure(&busy), "held by another program, perhaps the other copy of this app");
+        let gone = serialport::Error::new(serialport::ErrorKind::NoDevice, "No such file or directory");
+        assert_eq!(open_failure(&gone), "No such file or directory");
+        let denied = serialport::Error::new(serialport::ErrorKind::Io(ErrorKind::PermissionDenied), "Permission denied");
+        assert!(open_failure(&denied).contains("dialout"));
+    }
+
+    #[test]
+    fn a_console_is_never_sent_a_receivers_command() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut hub = Hub::new(tx);
+        let wire = Arc::new(Mutex::new(Vec::new()));
+        hub.pretend_open_usb("rx2", "/dev/ttyACM2", "0483:3754", "0483:3754:002F0028", Some(Box::new(Wire(wire.clone()))));
+        assert!(hub.send("rx2", "#GET\n").unwrap_err().contains("ChipSat console"));
+        assert!(hub.send("rx2", "#SET,sf,12\n").is_err());
+        // the bench's radio toggle is the console's own
+        hub.send("rx2", "R").unwrap();
+        assert_eq!(text(&wire), "R");
+
+        // nor is one that said so on a bridge a T-Beam could carry
+        let other = wired(&mut hub, "rx3", "/dev/ttyUSB0");
+        learn("I BOOT 0 c0: start", "10c4:ea60", "10c4:ea60:/dev/ttyUSB0", &hub.said);
+        assert!(hub.send("rx3", "#GET\n").is_err());
+        assert_eq!(text(&other), "");
+    }
+
+    #[test]
+    fn a_console_says_which_board_is_on_it() {
+        assert_eq!(csid_said("I BOOT 1 c0: settings from=block csid=17 module=le sf=9"), Some(17));
+        assert_eq!(csid_said("I BOOT 1 c0: settings from=build csid=255"), Some(255));
+        assert_eq!(csid_said("I BOOT 0 c0: start log=3"), None);
+        assert_eq!(csid_said("I RADIO 10 c0: settings csid=4"), None);
+        assert_eq!(csid_said("I BOOT 1 c0: settings from=block csid=4x"), None);
+        let heard = Mutex::new(Heard::default());
+        assert!(heard_csid("I BOOT 1 c0: settings from=block csid=17", &heard));
+        assert!(!heard_csid("I BOOT 1 c0: settings from=block csid=17", &heard));
+        assert_eq!(heard.lock().unwrap().csid, Some(17));
     }
 
     #[test]

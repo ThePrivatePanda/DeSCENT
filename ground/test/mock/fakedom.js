@@ -108,6 +108,8 @@ function dashboard(o) {
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
     addEventListener() {},
     uPlot: class { constructor(opts, data) { this.data = data; this.width = 600; this.height = 190; this.cursor = { idx: null }; } setData(d) { this.data = d; } setSize() {} },
+    // the flight view registers its tile loader on load; the map itself needs WebGL and is not drawn here
+    maplibregl: { addProtocol() {} },
     AudioContext: FakeAudio,
   };
   sandbox.window = sandbox;

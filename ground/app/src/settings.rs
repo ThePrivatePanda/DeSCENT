@@ -22,9 +22,10 @@
 //             +9  five gaps in ms, one per band: at or above each threshold, then below them all
 //           A slot that follows the battery uses its fixed gap while the gauge cannot be read.
 //           Transmit 0 is back to back. Air log 0 is every IMU reading, ground log 0 keeps
-//           nothing. 1 to 19 ms the firmware refuses in every log value, fixed or band, whether
-//           or not the slot follows the battery. The page writes one flag and one set of
-//           thresholds per phase to both slots; the firmware treats the slots independently.
+//           every record. 1 to 19 ms the firmware refuses in every log value, fixed or band,
+//           whether or not the slot follows the battery. The page writes one flag and one set of
+//           thresholds per phase to both slots, and one ground rate to both ground slots; the
+//           firmware treats the slots independently.
 //   138..158 reserved, zero
 //   158..160 CRC16 over 0..158, low byte first, the same way dump.rs reads a slot's
 //

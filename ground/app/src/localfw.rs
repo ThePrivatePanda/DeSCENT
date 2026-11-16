@@ -2,7 +2,7 @@
 //! the app, cached by source hash. No tree, the carried copies. Flight and bench images never fall
 //! back to the carried copy: writing the old image while someone thinks their edit is on the board
 //! is worse than refusing
-use crate::fswbuild::{self, Origin};
+use crate::fswbuild::{self, Options, Origin};
 use crate::json::esc;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -39,6 +39,14 @@ pub fn part_for(kind: &str, module: &str) -> Option<&'static Part> {
     PARTS.iter().find(|p| p.kind == kind && p.module == Some(module))
 }
 
+// a flight image at another log level or frequency is another file: "flight-le.log3-903.5"
+fn cache_name(name: &str, options: Option<Options>) -> String {
+    match options {
+        Some(o) => format!("{}.{}", name, o.key()),
+        None => name.to_string(),
+    }
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -64,6 +72,7 @@ pub struct Identity {
     pub masked: String,       // see masked()
     pub len: usize,
     pub block_at: Option<usize>,
+    pub options: Option<Options>,   // a flight image's, None for the rest and for lines from before 1.5.6
 }
 
 // "14:02" today, "20 Oct 14:02" otherwise
@@ -112,15 +121,16 @@ impl Identity {
         &self.sha256[..self.sha256.len().min(16)]
     }
 
-    /// "flight LE built here 14:02 from abc1234 + config.h changed"
+    /// "flight LE at log level 3 on 903.5 MHz built here 14:02 from abc1234 + config.h changed"
     pub fn words(&self, now_s: u64) -> String {
-        format!("{} built here {} {}", self.label(), when_words(self.at, now_s), origin_words(&self.origin))
+        let options = self.options.map(|o| format!(" at {}", o.words())).unwrap_or_default();
+        format!("{}{} built here {} {}", self.label(), options, when_words(self.at, now_s), origin_words(&self.origin))
     }
 
     pub fn json(&self, now_s: u64) -> String {
         let changed: Vec<String> = self.origin.changed.iter().map(|c| format!("\"{}\"", esc(c))).collect();
         format!(
-            "{{\"part\":\"{}\",\"label\":\"{}\",\"at\":{},\"words\":\"{}\",\"commit\":{},\"dirty\":{},\"changed\":[{}],\"source\":\"{}\",\"id\":\"{}\",\"bytes\":{}}}",
+            "{{\"part\":\"{}\",\"label\":\"{}\",\"at\":{},\"words\":\"{}\",\"commit\":{},\"dirty\":{},\"changed\":[{}],\"source\":\"{}\",\"id\":\"{}\",\"bytes\":{},\"log\":{},\"mhz\":{}}}",
             esc(&self.part),
             self.label(),
             self.at,
@@ -131,15 +141,17 @@ impl Identity {
             esc(&self.origin.source),
             esc(self.id()),
             self.len,
+            self.options.map(|o| o.log.to_string()).unwrap_or_else(|| String::from("null")),
+            self.options.map(|o| o.mhz()).unwrap_or_else(|| String::from("null")),
         )
     }
 
-    // tab separated, changed files joined with |
+    // tab separated, changed files joined with |, then the options or - (a line from before them has none)
     fn line(&self) -> String {
         let clean = |s: &str| s.replace(['\t', '\n', '\r', '|'], "?");
         let changed: Vec<String> = self.origin.changed.iter().map(|c| clean(c)).collect();
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             self.masked,
             self.len,
             self.block_at.map(|b| b.to_string()).unwrap_or_else(|| String::from("-")),
@@ -154,14 +166,19 @@ impl Identity {
             },
             self.sha256,
             changed.join("|"),
+            self.options.map(|o| o.key()).unwrap_or_else(|| String::from("-")),
         )
     }
 
     fn from_line(line: &str) -> Option<Identity> {
         let f: Vec<&str> = line.trim_end_matches(['\n', '\r']).split('\t').collect();
-        if f.len() != 10 {
+        if f.len() != 10 && f.len() != 11 {
             return None;
         }
+        let options = match f.get(10) {
+            None | Some(&"-") => None,
+            Some(key) => Some(Options::from_key(key)?),
+        };
         let hex = |s: &str| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit());
         if !hex(f[0]) || !hex(f[5]) || !hex(f[8]) {
             return None;
@@ -183,6 +200,7 @@ impl Identity {
                 changed: f[9].split('|').filter(|s| !s.is_empty()).map(String::from).collect(),
             },
             sha256: f[8].to_string(),
+            options,
         })
     }
 
@@ -194,7 +212,7 @@ impl Identity {
 // tests swap in one that compiles nothing
 pub trait Builder: Send + Sync {
     fn origin(&self, tree: &Path) -> Origin;
-    fn build(&self, tree: &Path, part: &str) -> Result<Vec<u8>, String>;
+    fn build(&self, tree: &Path, part: &str, options: Option<Options>) -> Result<Vec<u8>, String>;
 }
 
 pub struct RealBuilder;
@@ -203,8 +221,8 @@ impl Builder for RealBuilder {
     fn origin(&self, tree: &Path) -> Origin {
         fswbuild::origin(tree)
     }
-    fn build(&self, tree: &Path, part: &str) -> Result<Vec<u8>, String> {
-        fswbuild::build_part(tree, part)
+    fn build(&self, tree: &Path, part: &str, options: Option<Options>) -> Result<Vec<u8>, String> {
+        fswbuild::build_part(tree, part, options)
     }
 }
 
@@ -298,37 +316,56 @@ impl Local {
         self.dir.join(&source[..source.len().min(16)])
     }
 
-    fn cached(&self, origin: &Origin, name: &str) -> Option<(Vec<u8>, Identity)> {
+    fn cached(&self, origin: &Origin, name: &str, options: Option<Options>) -> Option<(Vec<u8>, Identity)> {
         let at = self.folder(&origin.source);
-        let bytes = std::fs::read(at.join(name)).ok().filter(|b| !b.is_empty())?;
-        let id = std::fs::read_to_string(at.join(format!("{}.id", name))).ok().and_then(|l| Identity::from_line(&l))?;
-        (id.sha256 == sha256_hex(&bytes) && id.origin.source == origin.source).then_some((bytes, id))
+        let file = cache_name(name, options);
+        let bytes = std::fs::read(at.join(&file)).ok().filter(|b| !b.is_empty())?;
+        let id = std::fs::read_to_string(at.join(format!("{}.id", file))).ok().and_then(|l| Identity::from_line(&l))?;
+        (id.sha256 == sha256_hex(&bytes) && id.origin.source == origin.source && id.options == options).then_some((bytes, id))
+    }
+
+    // every log level and frequency this part has been built at from these sources
+    fn variants(&self, origin: &Origin, name: &str) -> Vec<Identity> {
+        let prefix = format!("{}.", name);
+        let mut out: Vec<Identity> = std::fs::read_dir(self.folder(&origin.source))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let file = e.file_name().to_string_lossy().to_string();
+                let options = Options::from_key(file.strip_prefix(&prefix)?)?;
+                self.cached(origin, name, Some(options)).map(|(_, id)| id)
+            })
+            .collect();
+        out.sort_by_key(|id| id.options.map(|o| (o.log, o.tenths)));
+        out
     }
 
     #[cfg(test)]
-    pub fn built(&self, name: &str) -> Option<(Vec<u8>, Identity)> {
-        self.cached(&self.origin()?, name)
+    pub fn built(&self, name: &str, options: Option<Options>) -> Option<(Vec<u8>, Identity)> {
+        self.cached(&self.origin()?, name, options)
     }
 
-    // say() only hears about real builds (~13 s), not cache hits
-    pub fn get(&self, name: &str, say: &dyn Fn(&str)) -> Result<(Vec<u8>, Identity), String> {
+    // say() only hears about real builds (~13 s), not cache hits. options only for a flight image
+    pub fn get(&self, name: &str, options: Option<Options>, say: &dyn Fn(&str)) -> Result<(Vec<u8>, Identity), String> {
         let p = part(name).ok_or_else(|| format!("{:?} is not something the flight software builds", name))?;
         let tree = self.tree.as_deref().ok_or_else(|| String::from("there is no flight software tree on this computer"))?;
         let origin = self.builder.origin(tree);
-        if let Some(hit) = self.cached(&origin, name) {
+        if let Some(hit) = self.cached(&origin, name, options) {
             return Ok(hit);
         }
-        let key = (origin.source.clone(), name.to_string());
+        let key = (origin.source.clone(), cache_name(name, options));
         if let Some(e) = self.failed.lock().unwrap().get(&key) {
             return Err(e.clone());
         }
-        say(&format!("building the {} from the flight software in {}", p.label, tree.display()));
+        let at = options.map(|o| format!(" at {}", o.words())).unwrap_or_default();
+        say(&format!("building the {}{} from the flight software in {}", p.label, at, tree.display()));
         // someone may have saved a file mid-build, don't cache under the old hash
-        let built = self.builder.build(tree, name).and_then(|bytes| {
+        let built = self.builder.build(tree, name, options).and_then(|bytes| {
             if self.builder.origin(tree).source != origin.source {
                 return Err(format!("a source in {} changed while the {} was building, so it was not kept. Build again", tree.display(), p.label));
             }
-            self.keep(p, &origin, bytes)
+            self.keep(p, &origin, options, bytes)
         });
         if built.is_err() && self.builder.origin(tree).source != origin.source {
             return built;
@@ -339,7 +376,7 @@ impl Local {
         built
     }
 
-    fn keep(&self, p: &Part, origin: &Origin, bytes: Vec<u8>) -> Result<(Vec<u8>, Identity), String> {
+    fn keep(&self, p: &Part, origin: &Origin, options: Option<Options>, bytes: Vec<u8>) -> Result<(Vec<u8>, Identity), String> {
         if bytes.is_empty() {
             return Err(format!("the {} built empty", p.label));
         }
@@ -360,14 +397,16 @@ impl Local {
             masked: masked(&bytes, block_at),
             len: bytes.len(),
             block_at,
+            options,
         };
         let at = self.folder(&origin.source);
         let write = |file: &str, what: &[u8]| {
             std::fs::write(at.join(file), what).map_err(|e| format!("cannot keep the {} in {}: {}", p.label, at.display(), e))
         };
         std::fs::create_dir_all(&at).map_err(|e| format!("cannot make {}: {}", at.display(), e))?;
-        write(p.name, &bytes)?;
-        write(&format!("{}.id", p.name), id.line().as_bytes())?;
+        let file = cache_name(p.name, options);
+        write(&file, &bytes)?;
+        write(&format!("{}.id", file), id.line().as_bytes())?;
         if p.kind != "radio" {
             self.register(&id)?;
         }
@@ -406,7 +445,7 @@ impl Local {
                 .map(|b| Use::Carried(b, None))
                 .ok_or_else(|| format!("this build of the app carries no {}", label));
         }
-        match self.get(name, say) {
+        match self.get(name, None, say) {
             Ok((bytes, id)) => Ok(Use::Tree(bytes, id)),
             Err(e) => match self.carried(name) {
                 Some(b) if fallback => Ok(Use::Carried(
@@ -420,12 +459,12 @@ impl Local {
     }
 
     // for images about to be written, never falls back. Builds again after a failure
-    pub fn get_or_refuse(&self, name: &str, say: &dyn Fn(&str)) -> Result<(Vec<u8>, Identity), String> {
+    pub fn get_or_refuse(&self, name: &str, options: Option<Options>, say: &dyn Fn(&str)) -> Result<(Vec<u8>, Identity), String> {
         let label = part(name).map(|p| p.label).unwrap_or(name);
         if let Some(origin) = self.origin() {
-            self.failed.lock().unwrap().remove(&(origin.source, name.to_string()));
+            self.failed.lock().unwrap().remove(&(origin.source, cache_name(name, options)));
         }
-        self.get(name, say).map_err(|e| refused(label, &e))
+        self.get(name, options, say).map_err(|e| refused(label, &e))
     }
 
     pub fn radio(&self, tree: bool) -> Result<(crate::radio::Radio, Option<String>), String> {
@@ -438,7 +477,7 @@ impl Local {
 
     pub fn radio_text(&self, tree: bool) -> Result<(String, Option<String>), String> {
         let got = if tree && self.tree.is_some() {
-            match self.get("radio.json", &|_| {}) {
+            match self.get("radio.json", None, &|_| {}) {
                 Ok((bytes, _)) => return Ok((String::from_utf8_lossy(&bytes).to_string(), None)),
                 Err(e) => self.carried("radio.json").map(|b| {
                     Use::Carried(b, Some(format!("the radio table from this computer's flight software did not build, so the one this app carries is used. {}", e)))
@@ -472,7 +511,8 @@ impl Local {
         }
     }
 
-    // /api/fsw, for the write confirm
+    // /api/fsw, for the write confirm. A flight part's built and failed are for config.h's log level
+    // and frequency, the carried image's; variants are every other one built from these sources
     pub fn state_json(&self) -> String {
         let now = now_s();
         let q = |s: &Option<String>| s.as_ref().map(|t| format!("\"{}\"", esc(t))).unwrap_or_else(|| String::from("null"));
@@ -481,13 +521,18 @@ impl Local {
             .iter()
             .map(|p| {
                 let carried = self.carried(p.name);
-                let (built, same) = match origin.as_ref().and_then(|o| self.cached(o, p.name)) {
+                let options = (p.kind == "flight").then_some(Options::DEFAULT);
+                let (built, same) = match origin.as_ref().and_then(|o| self.cached(o, p.name, options)) {
                     Some((bytes, id)) => (id.json(now), carried.map(|c| (c == &bytes[..]).to_string()).unwrap_or_else(|| String::from("false"))),
                     None => (String::from("null"), String::from("null")),
                 };
-                let failed = origin.as_ref().and_then(|o| self.failed.lock().unwrap().get(&(o.source.clone(), p.name.to_string())).cloned());
+                let failed = origin.as_ref().and_then(|o| self.failed.lock().unwrap().get(&(o.source.clone(), cache_name(p.name, options))).cloned());
+                let variants: Vec<String> = match (&origin, p.kind) {
+                    (Some(o), "flight") => self.variants(o, p.name).iter().filter(|id| id.options != options).map(|id| id.json(now)).collect(),
+                    _ => Vec::new(),
+                };
                 format!(
-                    "{{\"part\":\"{}\",\"label\":\"{}\",\"kind\":\"{}\",\"module\":{},\"built\":{},\"failed\":{},\"carried\":{},\"same\":{}}}",
+                    "{{\"part\":\"{}\",\"label\":\"{}\",\"kind\":\"{}\",\"module\":{},\"built\":{},\"failed\":{},\"carried\":{},\"same\":{},\"variants\":[{}]}}",
                     p.name,
                     p.label,
                     p.kind,
@@ -496,6 +541,7 @@ impl Local {
                     q(&failed),
                     carried.map(|c| format!("\"{}\"", &sha256_hex(c)[..16])).unwrap_or_else(|| String::from("null")),
                     same,
+                    variants.join(","),
                 )
             })
             .collect();
@@ -547,7 +593,7 @@ mod tests {
                 changed: self.changed.clone(),
             }
         }
-        fn build(&self, _: &Path, part: &str) -> Result<Vec<u8>, String> {
+        fn build(&self, _: &Path, part: &str, options: Option<Options>) -> Result<Vec<u8>, String> {
             self.builds.fetch_add(1, Ordering::SeqCst);
             if let Some(after) = self.edit.lock().unwrap().take() {
                 *self.source.lock().unwrap() = after;
@@ -561,7 +607,9 @@ mod tests {
                 }
                 return Ok(RADIO.replace("\"min\": 5", "\"min\": 6").into_bytes());
             }
-            Ok(format!("{} built from {}", part, &self.source.lock().unwrap()[..8]).into_bytes())
+            // config.h's options are what the carried image was built at, so they add nothing
+            let at = options.filter(|o| *o != Options::DEFAULT).map(|o| format!(" at {}", o.key())).unwrap_or_default();
+            Ok(format!("{} built from {}{}", part, &self.source.lock().unwrap()[..8], at).into_bytes())
         }
     }
 
@@ -578,6 +626,7 @@ mod tests {
   "hp": {"dbm": [{"dbm": 14}, {"dbm": 17}, {"dbm": 20}, {"dbm": 22}]}
 }"#;
 
+    const D: Option<Options> = Some(Options::DEFAULT);
     const SRC_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const SRC_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const CARRIED_DUMP: &[u8] = b"the dump firmware the app carries";
@@ -621,7 +670,7 @@ mod tests {
     fn a_tree_at_another_layout_gets_the_carried_table_and_says_why() {
         let (l, fake, data) = local("old-layout", &[]);
         *fake.old_layout.lock().unwrap() = true;
-        let e = l.get("radio.json", &|_| {}).unwrap_err();
+        let e = l.get("radio.json", None, &|_| {}).unwrap_err();
         assert!(e.contains("it is for settings block layout 3, and this app writes layout 4"), "{}", e);
         let (radio, note) = l.radio(true).unwrap();
         assert_eq!(radio.sf_min, 5, "the carried table");
@@ -633,24 +682,24 @@ mod tests {
     fn a_part_is_built_once_per_source_and_a_changed_source_builds_again() {
         let (l, fake, data) = local("cache", &["V2_6_X_Code/src/config.h"]);
         let said = Mutex::new(Vec::new());
-        let (bytes, id) = l.get("flight-le", &|s| said.lock().unwrap().push(s.to_string())).unwrap();
+        let (bytes, id) = l.get("flight-le", D, &|s| said.lock().unwrap().push(s.to_string())).unwrap();
         assert_eq!(bytes, b"flight-le built from aaaaaaaa");
         assert_eq!(fake.builds.load(Ordering::SeqCst), 1);
-        assert!(said.lock().unwrap()[0].starts_with("building the flight LE from the flight software in"), "{:?}", said);
-        assert!(data.join(FOLDER).join(&SRC_A[..16]).join("flight-le").is_file());
+        assert!(said.lock().unwrap()[0].starts_with("building the flight LE at log level 4 on 915.0 MHz from the flight software in"), "{:?}", said);
+        assert!(data.join(FOLDER).join(&SRC_A[..16]).join("flight-le.log4-915.0").is_file());
         // cache hit, no build, nothing said
         said.lock().unwrap().clear();
-        let (again, again_id) = l.get("flight-le", &|s| said.lock().unwrap().push(s.to_string())).unwrap();
+        let (again, again_id) = l.get("flight-le", D, &|s| said.lock().unwrap().push(s.to_string())).unwrap();
         assert_eq!((again, again_id), (bytes, id.clone()));
         assert_eq!(fake.builds.load(Ordering::SeqCst), 1);
         assert!(said.lock().unwrap().is_empty());
         // survives a restart
         let fresh = Local::new(Some(data.join("fsw")), &data, Box::new(fake.clone()), carried());
-        assert_eq!(fresh.built("flight-le").unwrap().1, id);
+        assert_eq!(fresh.built("flight-le", D).unwrap().1, id);
         assert_eq!(fake.builds.load(Ordering::SeqCst), 1);
         *fake.source.lock().unwrap() = SRC_B.to_string();
-        assert!(l.built("flight-le").is_none());
-        let (b, _) = l.get("flight-le", &|_| {}).unwrap();
+        assert!(l.built("flight-le", D).is_none());
+        let (b, _) = l.get("flight-le", D, &|_| {}).unwrap();
         assert_eq!(b, b"flight-le built from bbbbbbbb");
         assert_eq!(fake.builds.load(Ordering::SeqCst), 2);
         let _ = std::fs::remove_dir_all(&data);
@@ -659,11 +708,11 @@ mod tests {
     #[test]
     fn every_image_built_is_in_the_registry_with_where_it_came_from() {
         let (l, fake, data) = local("registry", &["V2_6_X_Code/src/config.h"]);
-        l.get("flight-le", &|_| {}).unwrap();
-        l.get("flight-le", &|_| {}).unwrap();
-        l.get("radio.json", &|_| {}).unwrap();
+        l.get("flight-le", D, &|_| {}).unwrap();
+        l.get("flight-le", D, &|_| {}).unwrap();
+        l.get("radio.json", None, &|_| {}).unwrap();
         *fake.source.lock().unwrap() = SRC_B.to_string();
-        l.get("flash_dump", &|_| {}).unwrap();
+        l.get("flash_dump", None, &|_| {}).unwrap();
         let r = l.registered();
         assert_eq!(r.len(), 2, "one line per image, and the radio table is not an image: {:?}", r);
         assert_eq!((r[0].part.as_str(), r[0].origin.source.as_str()), ("flight-le", SRC_A));
@@ -671,7 +720,7 @@ mod tests {
         assert_eq!(r[0].origin.dirty, Some(true));
         assert_eq!(r[0].origin.changed, vec!["V2_6_X_Code/src/config.h".to_string()]);
         assert_eq!(r[1].part, "flash_dump");
-        assert!(r[0].words(r[0].at).starts_with("flight LE built here "), "{}", r[0].words(r[0].at));
+        assert!(r[0].words(r[0].at).starts_with("flight LE at log level 4 on 915.0 MHz built here "), "{}", r[0].words(r[0].at));
         assert!(r[0].words(r[0].at).ends_with(" from abc1234 + config.h changed"), "{}", r[0].words(r[0].at));
         use std::io::Write;
         std::fs::OpenOptions::new().append(true).open(data.join(FOLDER).join(REGISTRY)).unwrap().write_all(b"not a line\n").unwrap();
@@ -691,6 +740,7 @@ mod tests {
             masked: masked(&image, Some(at)),
             len: image.len(),
             block_at: Some(at),
+            options: None,
         };
         let mut flash = image.clone();
         flash.extend_from_slice(&[0xFF; 300]);
@@ -714,6 +764,7 @@ mod tests {
             masked: SRC_B.into(),
             len: 4096,
             block_at: Some(1000),
+            options: None,
         };
         let back = Identity::from_line(&id.line()).unwrap();
         assert_eq!(back.origin.changed, vec!["a/b.h".to_string(), "c?d?.cpp".to_string()]);
@@ -722,6 +773,42 @@ mod tests {
         assert_eq!(Identity::from_line(&none.line()).unwrap(), none);
         assert!(Identity::from_line("").is_none());
         assert!(Identity::from_line(&id.line().replace("bench-hp", "bench-xp")).is_none());
+        let flight = Identity { part: "flight-hp".into(), options: Some(Options { log: 3, tenths: 9035 }), ..id.clone() };
+        assert!(flight.line().ends_with("\tlog3-903.5\n"), "{}", flight.line());
+        assert_eq!(Identity::from_line(&flight.line()).unwrap().options, flight.options);
+        // a registry from before the options, ten fields
+        let old = none.line();
+        let old = old.trim_end().rsplit_once('\t').unwrap().0;
+        assert_eq!(Identity::from_line(old).unwrap(), none);
+        assert!(Identity::from_line(&flight.line().replace("log3-903.5", "log3-868.0")).is_none());
+    }
+
+    #[test]
+    fn each_log_level_and_frequency_is_its_own_image_and_says_so() {
+        let (l, fake, data) = local("options", &[]);
+        let quiet = Some(Options { log: 3, tenths: 9035 });
+        let said = Mutex::new(Vec::new());
+        let (bytes, id) = l.get("flight-le", quiet, &|s| said.lock().unwrap().push(s.to_string())).unwrap();
+        assert_eq!(bytes, b"flight-le built from aaaaaaaa at log3-903.5");
+        assert!(said.lock().unwrap()[0].starts_with("building the flight LE at log level 3 on 903.5 MHz from"), "{:?}", said);
+        assert!(id.words(id.at).starts_with("flight LE at log level 3 on 903.5 MHz built here "), "{}", id.words(id.at));
+        assert!(id.json(id.at).ends_with(",\"log\":3,\"mhz\":903.5}"), "{}", id.json(id.at));
+        assert_eq!(l.get("flight-le", D, &|_| {}).unwrap().0, b"flight-le built from aaaaaaaa");
+        assert_eq!(fake.builds.load(Ordering::SeqCst), 2, "another level is another build");
+        l.get("flight-le", quiet, &|_| {}).unwrap();
+        assert_eq!(fake.builds.load(Ordering::SeqCst), 2, "and each is kept");
+        assert_eq!(l.built("flight-le", quiet).unwrap().1.options, quiet);
+        assert!(l.built("flight-le", Some(Options { log: 3, tenths: 9150 })).is_none());
+        let r = l.registered();
+        assert_eq!(r.iter().map(|i| i.options).collect::<Vec<_>>(), vec![quiet, D]);
+        // the default is the part's built, the rest its variants
+        let s = l.state_json();
+        let le = &s[s.find("\"part\":\"flight-le\"").unwrap()..s.find("\"part\":\"flight-hp\"").unwrap()];
+        assert!(le.contains("\"built\":{\"part\":\"flight-le\"") && le.contains("\"log\":4,\"mhz\":915.0}"), "{}", le);
+        assert!(le.contains("\"variants\":[{\"part\":\"flight-le\""), "{}", le);
+        assert_eq!(le.matches("\"mhz\":903.5").count(), 1, "{}", le);
+        assert!(s.contains("\"part\":\"flash_dump\"") && s.contains("\"same\":null,\"variants\":[]}"), "{}", s);
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -817,7 +904,7 @@ mod tests {
     fn a_write_after_a_failed_build_builds_again_and_a_pull_does_not() {
         let (l, fake, data) = local("retry", &["V2_6_X_Code/src/config.h"]);
         fake.broken.lock().unwrap().extend(["flight-hp", "flash_dump"]);
-        let e = l.get_or_refuse("flight-hp", &|_| {}).unwrap_err();
+        let e = l.get_or_refuse("flight-hp", D, &|_| {}).unwrap_err();
         assert!(e.starts_with("the flight HP from this computer's flight software did not build, so nothing was written. the flight software did not build.\nconfig.h:60:26: error:"), "{}", e);
         assert!(!e.contains("Switch off"), "{}", e);
         let _ = l.pick("flash_dump", true, &|_| {});
@@ -825,17 +912,17 @@ mod tests {
         let _ = l.pick("flash_dump", true, &|_| {});
         assert_eq!(fake.builds.load(Ordering::SeqCst), before, "a pull uses the remembered failure");
         fake.broken.lock().unwrap().clear();
-        let (b, id) = l.get_or_refuse("flight-hp", &|_| {}).unwrap();
+        let (b, id) = l.get_or_refuse("flight-hp", D, &|_| {}).unwrap();
         assert_eq!(b, b"flight-hp built from aaaaaaaa");
         assert_eq!(fake.builds.load(Ordering::SeqCst), before + 1);
         assert!(id.words(id.at).ends_with(" from abc1234 + config.h changed"), "{}", id.words(id.at));
-        l.get("flight-le", &|_| {}).unwrap();
+        l.get("flight-le", D, &|_| {}).unwrap();
         let s = l.state_json();
         assert!(s.contains("\"changed\":[\"V2_6_X_Code/src/config.h\"],\"words\":\"from abc1234 + config.h changed\"}"), "{}", s);
         // fake flight-le happens to equal the carried one
-        assert!(s.contains("\"part\":\"flight-le\"") && s.contains(",\"same\":true}"), "{}", s);
+        assert!(s.contains("\"part\":\"flight-le\"") && s.contains(",\"same\":true,"), "{}", s);
         assert!(s.contains("\"part\":\"flight-hp\",\"label\":\"flight HP\",\"kind\":\"flight\",\"module\":\"hp\",\"built\":{\"part\":\"flight-hp\""), "{}", s);
-        assert!(s.contains("\"carried\":null,\"same\":false}"), "nothing carried is never the same: {}", s);
+        assert!(s.contains("\"carried\":null,\"same\":false,"), "nothing carried is never the same: {}", s);
         assert!(s.contains("\"part\":\"flash_dump\",\"label\":\"dump firmware\",\"kind\":\"dump\",\"module\":null,\"built\":null,\"failed\":\"the flight software"), "{}", s);
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -844,21 +931,21 @@ mod tests {
     fn a_source_saved_during_a_build_means_nothing_is_kept_under_the_old_sources() {
         let (l, fake, data) = local("edited", &[]);
         *fake.edit.lock().unwrap() = Some(SRC_B.to_string());
-        let e = l.get("flight-le", &|_| {}).unwrap_err();
+        let e = l.get("flight-le", D, &|_| {}).unwrap_err();
         assert!(e.contains("changed while the flight LE was building"), "{}", e);
-        assert!(!data.join(FOLDER).join(&SRC_A[..16]).join("flight-le").exists());
+        assert!(!data.join(FOLDER).join(&SRC_A[..16]).join("flight-le.log4-915.0").exists());
         assert!(l.registered().is_empty());
-        assert_eq!(l.get("flight-le", &|_| {}).unwrap().0, b"flight-le built from bbbbbbbb");
+        assert_eq!(l.get("flight-le", D, &|_| {}).unwrap().0, b"flight-le built from bbbbbbbb");
         let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
     fn a_cached_file_that_is_not_what_was_built_is_built_again() {
         let (l, fake, data) = local("tamper", &[]);
-        l.get("flash_dump", &|_| {}).unwrap();
+        l.get("flash_dump", None, &|_| {}).unwrap();
         std::fs::write(data.join(FOLDER).join(&SRC_A[..16]).join("flash_dump"), b"something else").unwrap();
-        assert!(l.built("flash_dump").is_none());
-        assert_eq!(l.get("flash_dump", &|_| {}).unwrap().0, b"flash_dump built from aaaaaaaa");
+        assert!(l.built("flash_dump", None).is_none());
+        assert_eq!(l.get("flash_dump", None, &|_| {}).unwrap().0, b"flash_dump built from aaaaaaaa");
         assert_eq!(fake.builds.load(Ordering::SeqCst), 2);
         let _ = std::fs::remove_dir_all(&data);
     }

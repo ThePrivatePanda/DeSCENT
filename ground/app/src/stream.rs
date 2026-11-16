@@ -4,7 +4,7 @@
 // Every message carries t, the time it is about (receive time live, the log's time in a
 // replay), and the socket adds seq. A page that connects gets a snapshot first, ending
 // with snapshot-end.
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -12,7 +12,7 @@ use crate::decode::{bytes_to_hex, js_num, Decoded};
 use crate::fleet::{Fleet, Receiver, Unit, Update};
 use crate::json::{esc, num_field, str_field};
 use crate::lines::{info_json, parse_line, Kind};
-use crate::serial::PortInfo;
+use crate::serial::{PortInfo, Role};
 use crate::ws::{Broadcast, Socket};
 
 // Lines kept per receiver for a page that connects later, the same as the page keeps
@@ -162,6 +162,7 @@ pub struct Model {
     lines: Vec<(String, VecDeque<(f64, String)>)>,         // rx -> its last lines
     formats: HashMap<String, &'static str>,                // rx -> raw or csv, by what it printed
     ports: HashMap<String, (Option<String>, String)>,      // rx -> (name, port status), live only
+    consoles: HashSet<String>,                             // keys of ChipSat consoles, live only
 }
 
 impl Model {
@@ -174,6 +175,7 @@ impl Model {
             lines: Vec::new(),
             formats: HashMap::new(),
             ports: HashMap::new(),
+            consoles: HashSet::new(),
         }
     }
 
@@ -209,6 +211,16 @@ impl Model {
         // fleet.js files a line with no receiver under "rx"
         let key = if rx.is_empty() { "rx" } else { rx };
         self.keep_line(key, t, text);
+        let legacy = legacy && t >= 0.0 && t.fract() == 0.0;
+        // A ChipSat's console is no receiver. Its lines go to the page as they came, and
+        // nothing in them is a reception: a packet it prints is one it sent, with no RSSI,
+        // and counting it would make the T-Beam that heard it a duplicate.
+        if self.consoles.contains(key) {
+            if !build {
+                return Vec::new();
+            }
+            return vec![if legacy { crate::ws::line_frame(key, t as u128, text) } else { line_msg(key, t, text) }];
+        }
         let ev = parse_line(text);
         match &ev.kind {
             Kind::Packet { source: "raw", .. } | Kind::Heartbeat { .. } | Kind::RxError { .. } | Kind::Device { kind: "rxinfo", .. } => {
@@ -224,7 +236,7 @@ impl Model {
             return Vec::new();
         }
         let mut out = Vec::new();
-        out.push(if legacy && t >= 0.0 && t.fract() == 0.0 {
+        out.push(if legacy {
             crate::ws::line_frame(key, t as u128, text)
         } else {
             line_msg(key, t, text)
@@ -383,6 +395,12 @@ impl Model {
             let name = p.name.clone().or_else(|| p.rx_name.clone()).filter(|n| !n.is_empty());
             now.insert(p.key.clone(), (name, p.status.clone()));
         }
+        // Lines a port sent before it said it was a console made it a receiver here
+        let consoles: HashSet<String> = ports.iter().filter(|p| p.role == Role::Console).map(|p| p.key.clone()).collect();
+        for k in consoles.difference(&self.consoles) {
+            self.fleet.drop_receiver(k);
+        }
+        self.consoles = consoles;
         let changed: Vec<String> = self
             .fleet
             .receivers(t)
@@ -521,6 +539,45 @@ mod tests {
         let msgs = m.line("rx2", 1200.0, &pkt(9, 1), true, false);
         assert!(msgs[1].contains("\"dup\":true"), "{}", msgs[1]);
         assert!(msgs[3].contains("\"packets\":1,\"unique\":0,\"dups\":1"), "{}", msgs[3]);
+    }
+
+    fn port_as(key: &str, role: Role) -> PortInfo {
+        PortInfo {
+            key: key.into(),
+            port: format!("/dev/fake-{}", key),
+            usb: String::new(),
+            status: "open".into(),
+            error: None,
+            rx_id: None,
+            rx_name: None,
+            rx_fw: None,
+            rx_kind: None,
+            name: None,
+            role,
+            csid: None,
+        }
+    }
+
+    #[test]
+    fn a_consoles_lines_go_out_as_lines_and_are_no_receivers() {
+        let mut m = Model::new(ModelSettings::default(), LIVE_MAX_POINTS);
+        // a line before the port was known for a console made it a receiver
+        m.line("rx2", 500.0, "garbage after the reset", true, false);
+        assert_eq!(m.fleet.receivers(500.0).len(), 1);
+        m.set_ports(&[port_as("rx1", Role::Receiver), port_as("rx2", Role::Console)], 600.0);
+        assert!(m.fleet.receivers(600.0).is_empty());
+
+        assert_eq!(kinds(&m.line("rx2", 900.0, "I BOOT 0 c0: start log=3", true, false)), ["line"]);
+        assert_eq!(kinds(&m.line("rx2", 1000.0, &pkt(9, 1), true, false)), ["line"]);
+        assert_eq!(m.packets(), 0);
+        // the T-Beam that heard the same bytes is the first to, not a duplicate
+        let msgs = m.line("rx1", 1200.0, &pkt(9, 1), true, false);
+        assert!(msgs[1].contains("\"dup\":false"), "{}", msgs[1]);
+        assert_eq!(m.fleet.receivers(1200.0).iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["rx1"]);
+        // a page that connects now gets the console's lines with the rest
+        let snap = m.snapshot(1300.0);
+        assert!(snap.iter().any(|s| s.contains("I BOOT 0 c0: start")));
+        assert!(!snap.iter().any(|s| s.contains("\"kind\":\"receiver\"") && s.contains("\"id\":\"rx2\"")));
     }
 
     #[test]

@@ -29,11 +29,14 @@ pub struct Header {
     // factor, and whether it is really in continuous receive. None from older firmware.
     pub sfchip: Option<u8>,
     pub rx: Option<bool>,
+    // What sort of receiver it is, from kind=. Only an SDR says (docs/sdr-receiver.md);
+    // a T-Beam's header has no kind.
+    pub kind: Option<String>,
 }
 
 // What a version looks like, and short: digits and dots, starting with a digit, 16
 // characters at most. Anything else after fw= is a damaged line.
-fn a_version(text: &str) -> Option<String> {
+pub fn a_version(text: &str) -> Option<String> {
     let fine = text.len() <= 16
         && text.starts_with(|c: char| c.is_ascii_digit())
         && text.chars().all(|c| c.is_ascii_digit() || c == '.');
@@ -59,6 +62,7 @@ pub fn header(line: &str) -> Option<Header> {
     let mut sf = None;
     let mut sfchip = None;
     let mut rx = None;
+    let mut kind = None;
     for field in fields.split(',') {
         match field.split_once('=') {
             Some(("id", v)) => id = an_id(v),
@@ -71,10 +75,11 @@ pub fn header(line: &str) -> Option<Header> {
                 "0" => Some(false),
                 _ => None,
             },
+            Some(("kind", v)) if !v.is_empty() => kind = Some(v.to_string()),
             _ => {}
         }
     }
-    Some(Header { id: id?, name, fw, sf, sfchip, rx })
+    Some(Header { id: id?, name, fw, sf, sfchip, rx, kind })
 }
 
 // A name as it can be kept here and sent to a board: one line, no commas, because a
@@ -189,12 +194,12 @@ mod tests {
     #[test]
     fn a_header_line_says_which_receiver_it_is() {
         let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8").unwrap();
-        assert_eq!(h, Header { id: "A4C1F3".into(), name: None, fw: None, sf: Some(9), sfchip: None, rx: None });
+        assert_eq!(h, Header { id: "A4C1F3".into(), name: None, fw: None, sf: Some(9), sfchip: None, rx: None, kind: None });
         // Newer firmware says what it is called, or that it is called nothing yet.
         let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8,name=Left one").unwrap();
         assert_eq!(h.name.as_deref(), Some("Left one"));
         let h = header("#DG,RX,v1,id=a4c1f3,name=,f=915.0").unwrap();
-        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some(String::new()), fw: None, sf: None, sfchip: None, rx: None });
+        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some(String::new()), fw: None, sf: None, sfchip: None, rx: None, kind: None });
 
         for no in [
             "PKT,55,00FF,-50.0,13.75,-12",
@@ -224,9 +229,15 @@ mod tests {
     }
 
     #[test]
+    fn an_sdr_header_says_its_kind_and_has_no_name_or_sf() {
+        let h = header("#DG,RX,v1,id=5D4E01,f=915.0,bw=125.0,cr=7,sync=0x12,pre=8,kind=sdr,sfs=7+8+9+10+11+12,fw=0.1.0").unwrap();
+        assert_eq!(h, Header { id: "5D4E01".into(), name: None, fw: Some("0.1.0".into()), sf: None, sfchip: None, rx: None, kind: Some("sdr".into()) });
+    }
+
+    #[test]
     fn a_header_says_which_firmware_it_runs_from_1_2_1_on() {
         let h = header("#DG,RX,v1,id=A4C1F3,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8,name=Left one,fw=1.2.1").unwrap();
-        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some("Left one".into()), fw: Some("1.2.1".into()), sf: Some(9), sfchip: None, rx: None });
+        assert_eq!(h, Header { id: "A4C1F3".into(), name: Some("Left one".into()), fw: Some("1.2.1".into()), sf: Some(9), sfchip: None, rx: None, kind: None });
         assert_eq!(header("#DG,RX,v1,id=A4C1F3,name=,fw=1.10.0\r").unwrap().fw.as_deref(), Some("1.10.0"));
         assert_eq!(header("#DG,RX,v1,id=A4C1F3,fw=2").unwrap().fw.as_deref(), Some("2"));
         assert_eq!(header("#DG,RX,v1,id=A4C1F3,fw=1234567.123456.1").unwrap().fw.as_deref(), Some("1234567.123456.1"));

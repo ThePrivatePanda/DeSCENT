@@ -253,7 +253,7 @@
   A.onReceivers = () => {
     if (offered || !hub.native) return;
     const boards = hub.boards || [];
-    if (!boards.length || boards.some((b) => b.state === 'receiver')) return;
+    if (!boards.length || boards.some((b) => b.state === 'receiver' && b.role !== 'console')) return;
     offered = true;
     if (screen === 'live') show('tbeams');
   };

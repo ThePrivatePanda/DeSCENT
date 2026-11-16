@@ -7,6 +7,7 @@
 <meta name="description" content="The DeSCENT ChipSat tool: live fleet over T-Beam LoRa receivers, flashing, flight log pulls and saved data">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%23c67139' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2' fill='%23c67139'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="vendor/uPlot.min.css">
+<link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css">
 <link rel="stylesheet" href="css/style.css">
 <link rel="stylesheet" href="css/live.css">
 <link rel="stylesheet" href="css/chipsats.css">
@@ -215,6 +216,8 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="vendor/uPlot.iife.min.js"></script>
+<script src="vendor/maplibre/maplibre-gl.js"></script>
+<script type="module" src="js/three-global.js"></script>
 <script src="js/stream.js"></script>
 <script src="js/bench.js"></script>
 <script src="js/store.js"></script>
@@ -232,6 +235,8 @@
 <script src="js/update.js"></script>
 <script src="js/livecards.js"></script>
 <script src="js/charts.js"></script>
+<script src="js/flight.js"></script>
+<script src="js/flightmap.js"></script>
 <script src="js/app.js"></script>
 <script src="js/screens.js"></script>
 <script src="js/tbeams.js"></script>

@@ -10,6 +10,7 @@
   text-align: left; white-space: normal; font-weight: 400; line-height: 1.4;
 }
 #screen-tbeams .tb-card:hover, #screen-tbeams .tb-card.sel { background: var(--color-neutral-100); }
+#screen-tbeams .tb-prog:hover { background: transparent; }
 #screen-tbeams .tb-top { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
 #screen-tbeams .tb-name { font: var(--font-heading-weight) 18px/1.3 var(--font-heading); overflow-wrap: anywhere; }
 #screen-tbeams .tb-sf { font: 700 12.5px/1.3 var(--font-body); }
@@ -44,6 +45,7 @@
 #screen-tbeams .tb-row .l { color: var(--color-text-70); font-size: 13.5px; }
 #screen-tbeams .tb-val { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; overflow-wrap: anywhere; }
 #screen-tbeams .tb-sfrow .tb-val { flex-direction: column; align-items: flex-start; gap: 6px; }
+#screen-tbeams .tb-freq { width: 96px; }
 #screen-tbeams .tb-fw .tb-row + .tb-row { border-top: 1px solid var(--color-neutral-200); }
 #screen-tbeams .tb-shared { margin: 12px 0 0; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--color-surface); font-size: 13.5px; }
 

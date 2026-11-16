@@ -222,7 +222,29 @@ pub struct Receiver {
 
 impl Receiver {
     pub fn sf(&self) -> Option<f64> {
-        self.info.iter().find(|(k, _)| k == "sf").map(|(_, v)| js_number(v)).filter(|x| x.is_finite())
+        sf_in(&self.info)
+    }
+}
+
+fn sf_in(info: &Info) -> Option<f64> {
+    info.iter().find(|(k, _)| k == "sf").map(|(_, v)| js_number(v)).filter(|x| x.is_finite())
+}
+
+// The spreading factor a PKT or ERR line says it came in on. An SDR hears every factor at
+// once and says which on each line (docs/sdr-receiver.md); a T-Beam's lines carry none, and
+// then its header's factor is the one that counts.
+pub fn line_sf(ev: &Event) -> Option<f64> {
+    match &ev.kind {
+        Kind::Packet { more: Some(more), .. } => sf_in(more),
+        // lines.rs keeps nothing past an ERR's SNR, so the fields are read off the text
+        Kind::RxError { .. } => ev
+            .text
+            .split(',')
+            .skip(4)
+            .find_map(|f| f.strip_prefix("sf="))
+            .map(js_number)
+            .filter(|x| x.is_finite()),
+        _ => None,
     }
 }
 
@@ -362,6 +384,10 @@ impl Fleet {
         self.receivers.len() - 1
     }
 
+    pub fn drop_receiver(&mut self, key: &str) {
+        self.receivers.retain(|r| r.key != key);
+    }
+
     fn live_index(&self, csid: u8) -> Option<usize> {
         self.units.iter().position(|u| u.csid == csid)
     }
@@ -439,7 +465,7 @@ impl Fleet {
             Kind::Empty => return ("empty", None, None),
             Kind::Other => return ("other", None, None),
         };
-        let sf = r.sf();
+        let sf = line_sf(ev).or_else(|| r.sf());
         r.last_t = Some(t);
         r.packets += 1;
         if !decoded.crc_ok {
@@ -1219,6 +1245,37 @@ mod tests {
         feed(&mut f, "rx2", &header(9), 3100.0);
         feed(&mut f, "rx2", &pkt(7, 2, "-90", "5", 127, 0.0), 3200.0);
         assert_eq!(f.unit("7").unwrap().receptions[1].sf, Some(9.0));
+    }
+
+    #[test]
+    fn an_sf_on_the_packet_line_beats_the_header() {
+        let mut f = Fleet::new(Config::default());
+        feed(&mut f, "cmd:1", "#DG,RX,v1,id=5D4E01,f=915.0,bw=125.0,cr=7,sync=0x12,pre=8,kind=sdr,sfs=7+8+9+10+11+12,fw=0.1.0", 0.0);
+        feed(&mut f, "cmd:1", &format!("{},sf=10,dbfs=-71.5", pkt(7, 1, "", "5", 127, 0.0)), 1000.0);
+        let u = f.unit("7").unwrap();
+        let r = &u.receptions[0];
+        assert_eq!((r.rx.as_str(), r.snr, r.sf), ("cmd:1", 5.0, Some(10.0)));
+        assert!(r.rssi.is_nan() && u.best_rssi.is_nan(), "an empty RSSI is no RSSI, not 0");
+
+        // A T-Beam on SF9 and an SDR that says SF12 for the same bytes: each reception keeps its own
+        feed(&mut f, "rx1", "#DG,RX,v1,id=72E53C,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8", 1500.0);
+        feed(&mut f, "rx1", &pkt(7, 2, "-90", "5", 127, 0.0), 2000.0);
+        feed(&mut f, "cmd:1", &format!("{},sf=12", pkt(7, 2, "", "4", 127, 0.0)), 2100.0);
+        let sfs: Vec<(&str, Option<f64>)> = f.unit("7").unwrap().receptions.iter().map(|r| (r.rx.as_str(), r.sf)).collect();
+        assert_eq!(sfs, [("rx1", Some(9.0)), ("cmd:1", Some(12.0))]);
+
+        // A T-Beam line that carries an sf= of its own would win too; one that does not falls back
+        feed(&mut f, "rx1", &format!("{},sf=11", pkt(7, 3, "-90", "5", 127, 0.0)), 3000.0);
+        assert_eq!(f.unit("7").unwrap().receptions[0].sf, Some(11.0));
+    }
+
+    #[test]
+    fn an_err_line_says_its_sf_when_it_carries_one() {
+        assert_eq!(line_sf(&parse_line("ERR,-7,,2.75,sf=9,hex=00FF")), Some(9.0));
+        assert_eq!(line_sf(&parse_line("ERR,-24,-101.5,-3.25,sf=12")), Some(12.0));
+        assert_eq!(line_sf(&parse_line("ERR,-7,-94.0,2.75")), None);
+        assert_eq!(line_sf(&parse_line("PKT,2,00FF,-50.0,13.75,-12")), None);
+        assert_eq!(line_sf(&parse_line("HB,1,2,3,sf=7")), None);
     }
 
     #[test]

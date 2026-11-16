@@ -31,6 +31,7 @@
     looks: new Map(),   // port -> what Listen took it for, see LOOKS
     done: new Map(),    // port -> {bad, warn, text}: how the last flash of it ended
     flashAsks: new Map(), // port -> the spreading factor asked of a board after its flash, see flashHeard
+    freqAsks: new Map(),  // receiver key -> the carrier frequency last asked of it, see askFreq
     lines: new Map(),   // receiver key -> its last three lines
     hb: new Map(),      // receiver key -> {up, t}: uptime its last heartbeat gave, and when
     busy: null, pct: 0, note: '',
@@ -41,7 +42,11 @@
     if (!state.opts.has(port)) state.opts.set(port, { sf: 9, backup: false });
     return state.opts.get(port);
   };
-  const boards = () => hub.boards || [];
+  // A ChipSat's console (the ST-Link's own port, or one that printed the flight log) is the
+  // ChipSats screen's, never a T-Beam
+  const boards = () => (hub.boards || []).filter((b) => b.role !== 'console');
+  // A board that should be read and could not be opened says why, not "reading it"
+  const stateOf = (b) => (b.state === 'receiver' && b.error ? ['bad', 'not opened'] : STATE_WORDS[b.state] || ['off', b.state]);
   const grouped = new Intl.NumberFormat('en-US');
   const count = (n) => grouped.format(n);
   const clock = (t) => String(new Date(t).getHours()).padStart(2, '0') + ':' + String(new Date(t).getMinutes()).padStart(2, '0');
@@ -62,6 +67,7 @@
     const beat = /^HB,(\d+),/.exec(text);
     if (beat) state.hb.set(rx, { up: Number(beat[1]), t });
     flashHeard(rx, text, t);
+    freqHeard(rx, text, t);
   });
 
   // A flashed board boots on the spreading factor its firmware was built with. The app
@@ -140,7 +146,7 @@
       if (A.shell.current() === 'tbeams') render();
     }
   }
-  setInterval(() => flashWaits(Date.now()), 1000);
+  setInterval(() => { flashWaits(Date.now()); freqWaits(Date.now()); }, 1000);
 
   // Which physical board is /dev/ttyUSB0? Nobody can answer that from a port name, so
   // the app watches for one to be unplugged and plugged back in, and you name that one.
@@ -195,12 +201,12 @@
       '</span><span class="note">USB serial</span></div>';
     if (!all.length) return head + '<p class="empty">Nothing plugged in.</p>';
     return head + all.map((b) => {
-      const [cls, word] = STATE_WORDS[b.state] || ['off', b.state];
+      const [cls, word] = stateOf(b);
       const rx = reading(b);
       const sf = rx && rx.r && rx.r.info.sf ? '<span class="tb-sf">SF' + esc(rx.r.info.sf) + '</span>' : '';
       const name = nameOf(b);
       const sub = [state.looks.has(b.port) ? LOOKS[state.looks.get(b.port)] || state.looks.get(b.port) : '',
-        name === b.port ? '' : b.port, usbOf(b)].filter(Boolean).join(' · ');
+        name === b.port ? '' : b.port, usbOf(b), b.error || ''].filter(Boolean).join(' · ');
       const on = b.port === state.sel;
       return '<button class="card' + (on ? ' sel ring' : '') + ' tb-card" data-pick="' + esc(b.port) + '">' +
         '<span class="tb-top"><b class="tb-name">' + esc(name) + '</b>' +
@@ -208,6 +214,21 @@
         (ident.found === b.port ? mark('good', 'this one') : '') + sf + '</span>' +
         '<span class="tb-sub">' + esc(sub) + '</span></button>';
     }).join('');
+  }
+
+  // Receivers the app starts as programs, from receiver = lines in descent-ground.conf (an SDR,
+  // docs/sdr-receiver.md). No USB, nothing to flash and nothing is sent to them, so no sheet.
+  function programsHtml() {
+    const progs = hub.ports.filter((p) => p.key.startsWith('cmd:'));
+    if (!progs.length) return '';
+    return '<div class="tb-listhead"><span class="kicker">Programs · ' + progs.length + '</span><span class="note">receiver = in descent-ground.conf</span></div>' +
+      progs.map((p) => {
+        const [cls, word] = p.status === 'open' ? ['good', 'reading it'] : ['bad', p.status];
+        const sub = [p.rxId ? 'kind ' + (p.rxKind || 'not said') : 'no header yet', p.rxFw ? 'fw ' + p.rxFw : '', p.key, p.port].filter(Boolean).join(' · ');
+        return '<div class="card tb-card tb-prog"><span class="tb-top"><b class="tb-name">' + esc(B.receiverName(p.key, p, A.live.receivers.get(p.key))) + '</b>' +
+          mark(cls, word) + '</span><span class="tb-sub">' + esc(sub) + '</span>' +
+          (p.status !== 'open' && p.error ? '<span class="tb-sub">' + esc(p.error) + '</span>' : '') + '</div>';
+      }).join('');
   }
 
   const row = (label, value, cls) => '<div class="tb-row' + (cls ? ' ' + cls : '') + '"><span class="l">' + label + '</span><div class="tb-val">' + value + '</div></div>';
@@ -219,7 +240,7 @@
     const is = b.state === 'receiver';
     const rx = reading(b);
     const fw = B.receiverFirmware(rx ? rx.port : null, state.firmwareVersion);
-    const [cls, word] = STATE_WORDS[b.state] || ['off', b.state];
+    const [cls, word] = stateOf(b);
     // A receiver that has announced its id is named by that id, and the name goes with
     // the board to any port. Before that, a name can only be kept for the USB adapter.
     const how = rx ? B.namedBy(rx.port, rx.r) : { by: 'port', id: '' };
@@ -247,6 +268,7 @@
         '<span class="tb-acts"><button data-listen="' + esc(b.port) + '">Listen 5 s</button>' + decide +
           '<button class="ghost" data-forget="' + esc(b.port) + '"' + (state.busy === b.port ? ' disabled' : '') + '>Forget this board</button></span>' +
       '</div>' +
+      (b.error ? '<p class="outcome bad">' + esc(b.port + ': ' + b.error) + '</p>' : '') +
       '<p class="tb-notes note">' + kept + '. ' +
         (is ? '' : 'Opening a port can reset the board on it. ') +
         (b.state === 'dismissed' ? 'Stays shut until it is replugged. ' : '') +
@@ -296,6 +318,82 @@
     return mark('bad', word) + hint(esc(ask.said) + '.' + (ask.state === 'refused' ? ' The board answered #DG,ERR,sf.' : ''));
   }
 
+  // A carrier frequency is asked of a T-Beam the way a spreading factor is: #SET,freq through
+  // the app, and only the header it prints at once (f=) or its #DG,ERR,freq counts. Never of a
+  // ChipSat console or an SDR, which the app's config call would pass the line to all the same.
+  const FREQ_WAIT_MS = 4000;
+  const tunable = (port) => !!port && port.role === 'receiver' && port.status === 'open' && port.rxKind !== 'sdr';
+
+  function freqStop(v) {
+    const f = Number(String(v).trim());
+    if (String(v).trim() === '' || !Number.isFinite(f)) return 'it is not a number of MHz';
+    if (f < 902 || f > 928) return 'it has to be 902.0 to 928.0 MHz, the US band';
+    if (Math.abs(f * 10 - Math.round(f * 10)) > 1e-6) return 'it goes in 0.1 MHz steps';
+    return '';
+  }
+
+  function askFreq(key, typed) {
+    const port = hub.ports.find((p) => p.key === key);
+    if (!tunable(port)) { toast('Not sent: ' + key + ' is not a T-Beam being read'); return; }
+    const name = B.receiverName(port.port, port, A.live.receivers.get(key), boards().find((x) => x.port === port.port));
+    const stop = freqStop(typed);
+    const mhz = stop ? String(typed).trim() : Number(typed).toFixed(1);
+    const ask = { mhz, at: Date.now(), state: stop ? 'stopped' : 'asked', said: stop ? mhz + ' MHz not sent: ' + stop : '', heardF: '', heardAt: 0, name };
+    state.freqAsks.set(key, ask);
+    render();
+    if (stop) return;
+    hub.setFreq(key, mhz).catch((err) => {
+      ask.state = 'failed';
+      ask.said = 'Could not ask ' + name + ' for ' + mhz + ' MHz: ' + (err.message || err);
+      toast(ask.said);
+      render();
+    });
+  }
+
+  function freqHeard(rx, text, t) {
+    const ask = state.freqAsks.get(rx);
+    if (!ask || ask.state !== 'asked') return;
+    if (text.startsWith('#DG,ERR,freq')) {
+      ask.state = 'refused';
+      ask.said = ask.name + ' refused ' + ask.mhz + ' MHz';
+    } else if (text.startsWith('#DG,RX,')) {
+      const f = /,f=([\d.]+)/.exec(text);
+      // a header printed before the command landed still says the old value; the wait judges it
+      if (!f || Number(f[1]).toFixed(1) !== ask.mhz) { ask.heardF = f ? f[1] : ''; return; }
+      ask.state = 'heard';
+      ask.heardAt = t;
+      ask.said = ask.name + ' is on ' + ask.mhz + ' MHz';
+    } else return;
+    toast(ask.said);
+    if (A.shell.current() === 'tbeams') render();
+  }
+
+  function freqWaits(now) {
+    for (const ask of state.freqAsks.values()) {
+      if (ask.state !== 'asked' || now - ask.at <= FREQ_WAIT_MS) continue;
+      ask.state = 'silent';
+      ask.said = ask.heardF ? ask.name + ' answered with ' + ask.heardF + ' MHz, not ' + ask.mhz
+        : 'No header from ' + ask.name + ' in ' + (FREQ_WAIT_MS / 1000) + ' s, so ' + ask.mhz + ' MHz is not confirmed';
+      toast(ask.said);
+      if (A.shell.current() === 'tbeams') render();
+    }
+  }
+
+  // Under the frequency box, as sfSaid is under the spreading factor
+  function freqSaid(key, info) {
+    const ask = state.freqAsks.get(key);
+    const hint = (words) => '<span class="hint">' + words + ' It hears only boards on this frequency.</span>';
+    const own = hint("The board's own report. Type 902.0 to 928.0 MHz to change it; it counts only when its header says so.");
+    if (!ask) return own;
+    if (ask.state === 'asked') return mark('warn', 'asked for ' + ask.mhz + ' MHz') + hint('Asked at ' + clockS(ask.at) + ". Waiting for the board's header.");
+    if (ask.state === 'heard') {
+      if (Number(info.f).toFixed(1) !== ask.mhz) return own;
+      return mark('good', 'confirmed') + hint("The board's header said " + ask.mhz + ' MHz at ' + clockS(ask.heardAt) + '.');
+    }
+    const word = ask.state === 'refused' ? 'refused ' + ask.mhz + ' MHz' : ask.state === 'silent' ? ask.mhz + ' MHz not confirmed' : ask.mhz + ' MHz not sent';
+    return mark('bad', esc(word)) + hint(esc(ask.said) + '.' + (ask.state === 'refused' ? ' The board answered #DG,ERR,freq.' : ''));
+  }
+
   function radioCard(b) {
     const rx = reading(b);
     if (!rx) return '';
@@ -308,7 +406,9 @@
       // The select is the board's own report of what it is on, so it stays plain ink.
       row('Spreading factor', info.sf ? sfSelect(rx.key, info.sf) + sfSaid(rx.key, info)
         : '<span class="note">not reported yet</span>', 'tb-sfrow') +
-      row('Frequency', info.f ? val(esc(info.f) + ' MHz') : unsaid) +
+      row('Frequency', !info.f ? unsaid : !tunable(rx.port) ? val(esc(info.f) + ' MHz')
+        : '<span><input type="text" inputmode="decimal" class="tb-freq" data-freq="' + esc(rx.key) + '" data-keep="freq:' + esc(rx.key) +
+          '" value="' + esc(info.f) + '" aria-label="Carrier frequency of ' + esc(rx.key) + ' in MHz"> MHz</span>' + freqSaid(rx.key, info), 'tb-sfrow') +
       row('Bandwidth · CR', pair(info.bw ? String(Number(info.bw)) + ' kHz' : '', info.cr ? '4/' + info.cr : '')) +
       row('Sync · preamble', pair(info.sync, info.pre)) +
       sharedSf(rx, r) + '</div>';
@@ -392,7 +492,7 @@
     $('tb-ident').textContent = ident.watching ? 'Waiting for a replug' : 'Start watching';
     $('tb-ident-stop').hidden = !ident.watching;
     paint($('tb-which'), whichHtml());
-    paint($('tb-list'), listHtml());
+    paint($('tb-list'), listHtml() + programsHtml());
     paint($('tb-sheet'), sheetHtml());
   }
 
@@ -480,6 +580,8 @@
     if (backup) { optsFor(backup).backup = t.checked; render(); return; }
     const flashSf = t.getAttribute('data-flashsf');
     if (flashSf) { optsFor(flashSf).sf = Number(t.value); t.blur(); render(); return; }
+    const freq = t.getAttribute('data-freq');
+    if (freq) { t.blur(); askFreq(freq, t.value); return; }
     const key = t.getAttribute('data-sf');
     if (key) {
       const sf = Number(t.value);

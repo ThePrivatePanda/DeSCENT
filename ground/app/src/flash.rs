@@ -27,14 +27,16 @@ pub fn candidates_from(hub: &crate::serial::Hub, found: &[String]) -> Vec<String
 // allowed. A port we have never been told to touch is never offered for flashing:
 // writing firmware to somebody's ChipSat is not a recoverable mistake.
 pub fn candidate_ports(hub: &crate::serial::Hub) -> Vec<String> {
-    let mut found: Vec<String> = hub.ports().into_iter().map(|p| p.port).collect();
+    // a ChipSat's console is never a T-Beam to write receiver firmware to
+    let mut found: Vec<String> =
+        hub.ports().into_iter().filter(|p| p.role != crate::serial::Role::Console).map(|p| p.port).collect();
     let live: Vec<String> = serialport::available_ports()
         .unwrap_or_default()
         .into_iter()
         .map(|p| p.port_name)
         .collect();
     for b in hub.boards() {
-        if b.state == "receiver" && live.contains(&b.port) && !found.contains(&b.port) {
+        if b.state == "receiver" && b.role != "console" && live.contains(&b.port) && !found.contains(&b.port) {
             found.push(b.port);
         }
     }

@@ -5,6 +5,7 @@ mod assets;
 mod check;
 mod chipflash;
 mod chips;
+mod command;
 mod csv;
 mod decode;
 mod dump;
@@ -22,6 +23,7 @@ mod localfw;
 mod logfile;
 mod opts;
 mod replay;
+mod rxcheck;
 mod pull;
 mod radio;
 mod receiver_image;
@@ -46,6 +48,9 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().is_some_and(|a| a == "check") {
         std::process::exit(check::run(&argv[1..]));
+    }
+    if argv.first().is_some_and(|a| a == "check-receiver") {
+        std::process::exit(rxcheck::run(&argv[1..]));
     }
 
     let dir = std::env::current_exe()
@@ -108,8 +113,10 @@ fn main() {
     let log = Arc::new(Mutex::new(log));
 
     let (tx, rx) = mpsc::channel();
+    let commands = command::start(&opts.receivers, &tx);
     let hub = Arc::new(Mutex::new(serial::Hub::new(tx)));
     hub.lock().unwrap().remember_in(&dir);
+    hub.lock().unwrap().add_commands(commands);
     let broadcast = ws::Broadcast::new();
     let live = Arc::new(stream::Stream::with_out(
         stream::Model::new(stream::ModelSettings::load(&dir), stream::LIVE_MAX_POINTS),

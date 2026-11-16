@@ -1699,6 +1699,7 @@ record 1 boot 0 ms 2567\r\n\
             masked: sha(FLIGHT),
             len: FLIGHT.len(),
             block_at: None,
+            options: None,
         }];
         let job = Job {
             shared: shared(),

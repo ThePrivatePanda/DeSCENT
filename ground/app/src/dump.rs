@@ -147,7 +147,7 @@ pub fn reason_word(source: u8, what: u8, reason: u8) -> Option<String> {
             return Some(lines.join("+"));
         }
         (2, 5) => &["clearok", "clearlow", "clearsclheld"],
-        (3, _) => &["imumotion", "quiet", "quietnoalt", "barodescent", "imudead", "bootairlimit", "motionheld", "quiethigh", "moving", "goodfix"],
+        (3, _) => &["imumotion", "quiet", "quietnoalt", "barodescent", "imudead", "bootairlimit", "motionheld", "quiethigh", "moving", "goodfix", "quietimu", "tumbling", "freefall", "climb", "motionhint", "tilted"],
         (4, 1) => &["startrefused", "finishfailed"],
         (4, 3) => &["setupok", "setupfailed"],
         (5, 1) => &["notready", "timeout", "buserror", "noack", "baddata", "failed"],

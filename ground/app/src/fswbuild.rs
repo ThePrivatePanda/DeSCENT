@@ -48,25 +48,92 @@ fn is_tree(at: &Path) -> bool {
     at.join("build.sh").is_file() && at.join("V2_6_X_Code").is_dir()
 }
 
+/// The two things besides the module a flight image is compiled with: the console's log level
+/// (config.h's CHIPSAT_LOG_LEVEL, lines above it are not in the image) and the carrier frequency
+/// (CHIPSAT_RADIO_FREQUENCY_MHZ). Neither is in the settings block, so each value is its own image.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Options {
+    pub log: u8,
+    pub tenths: u16,   // MHz in tenths, 9035 is 903.5
+}
+
+impl Options {
+    // config.h's
+    pub const DEFAULT: Options = Options { log: 4, tenths: 9150 };
+
+    /// As the page asks for them, either one left out being config.h's. The frequency is held to
+    /// the US band in 0.1 MHz steps: the T-Beams are told it as one decimal.
+    pub fn asked(log: Option<&str>, mhz: Option<&str>) -> Result<Options, String> {
+        let log = match log.map(str::trim) {
+            None => Options::DEFAULT.log,
+            Some(v) => match v.parse::<u8>() {
+                Ok(n) if n <= 4 => n,
+                _ => return Err(format!("log level {:?} is not 0 to 4", v)),
+            },
+        };
+        let tenths = match mhz.map(str::trim) {
+            None => Options::DEFAULT.tenths,
+            Some(v) => {
+                let f: f64 = v.parse().map_err(|_| format!("carrier frequency {:?} is not a number of MHz", v))?;
+                let tenths = (f * 10.0).round();
+                if !(9020.0..=9280.0).contains(&tenths) {
+                    return Err(format!("carrier frequency {} MHz is outside 902.0 to 928.0 MHz, the US band", v));
+                }
+                if (f * 10.0 - tenths).abs() > 1e-6 {
+                    return Err(format!("carrier frequency {} MHz is not in 0.1 MHz steps", v));
+                }
+                tenths as u16
+            }
+        };
+        Ok(Options { log, tenths })
+    }
+
+    pub fn mhz(&self) -> String {
+        format!("{}.{}", self.tenths / 10, self.tenths % 10)
+    }
+
+    pub fn words(&self) -> String {
+        format!("log level {} on {} MHz", self.log, self.mhz())
+    }
+
+    // in cached file names and registry lines: "log3-903.5"
+    pub fn key(&self) -> String {
+        format!("log{}-{}", self.log, self.mhz())
+    }
+
+    pub fn from_key(key: &str) -> Option<Options> {
+        let (log, mhz) = key.strip_prefix("log")?.split_once('-')?;
+        Options::asked(Some(log), Some(mhz)).ok().filter(|o| o.key() == key)
+    }
+}
+
 // everything shares the tree's build/, so one at a time
 static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // Same flags as tools/emit_firmware.sh, part names as in fsw/firmware. ~13 s each since a new -D
-// forces a reconfigure. Flight images only get the module so config.h edits stick; board
-// settings get patched into the block afterwards like the carried image
-pub fn build_part(at: &Path, part: &str) -> Result<Vec<u8>, String> {
-    let args: &[&str] = match part {
-        "flight-le" => &["build", "-DCHIPSAT_RADIO_MODULE=1"],
-        "flight-hp" => &["build", "-DCHIPSAT_RADIO_MODULE=2"],
-        "flash_dump" => &["build", "--sketch", "flash_dump"],
-        "bench-le" => &["build", "--sketch", "sensor_bench", "-DCHIPSAT_RADIO_MODULE=1"],
-        "bench-hp" => &["build", "--sketch", "sensor_bench", "-DCHIPSAT_RADIO_MODULE=2"],
+// forces a reconfigure. Flight images only get the module and the options so config.h edits
+// stick; board settings get patched into the block afterwards like the carried image
+pub fn build_part(at: &Path, part: &str, options: Option<Options>) -> Result<Vec<u8>, String> {
+    let mut args: Vec<String> = match part {
+        "flight-le" => vec!["build".into(), "-DCHIPSAT_RADIO_MODULE=1".into()],
+        "flight-hp" => vec!["build".into(), "-DCHIPSAT_RADIO_MODULE=2".into()],
+        "flash_dump" => vec!["build".into(), "--sketch".into(), "flash_dump".into()],
+        "bench-le" => vec!["build".into(), "--sketch".into(), "sensor_bench".into(), "-DCHIPSAT_RADIO_MODULE=1".into()],
+        "bench-hp" => vec!["build".into(), "--sketch".into(), "sensor_bench".into(), "-DCHIPSAT_RADIO_MODULE=2".into()],
         "radio.json" => return radio_json(at),
         other => return Err(format!("{:?} is not something the flight software builds", other)),
     };
+    match options {
+        Some(o) if part.starts_with("flight-") => {
+            args.push(format!("-DCHIPSAT_LOG_LEVEL={}", o.log));
+            args.push(format!("-DCHIPSAT_RADIO_FREQUENCY_MHZ={}", o.mhz()));
+        }
+        Some(_) => return Err(format!("only a flight image takes a log level and a frequency, not the {}", part)),
+        None => {}
+    }
     let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let out = std::process::Command::new("./build.sh")
-        .args(args)
+        .args(&args)
         .current_dir(at)
         .output()
         .map_err(|e| format!("cannot run {}/build.sh: {}", at.display(), e))?;
@@ -251,10 +318,40 @@ mod tests {
 
     #[test]
     fn a_missing_tree_says_which_path_it_tried() {
-        let e = build_part(Path::new("/nonexistent"), "flight-le").unwrap_err();
+        let e = build_part(Path::new("/nonexistent"), "flight-le", Some(Options::DEFAULT)).unwrap_err();
         assert!(e.contains("/nonexistent"), "{}", e);
-        let e = build_part(Path::new("/nonexistent"), "radio.json").unwrap_err();
+        let e = build_part(Path::new("/nonexistent"), "radio.json", None).unwrap_err();
         assert!(e.contains("/nonexistent"), "{}", e);
+        let e = build_part(Path::new("/nonexistent"), "bench-le", Some(Options::DEFAULT)).unwrap_err();
+        assert!(e.contains("only a flight image"), "{}", e);
+    }
+
+    #[test]
+    fn the_log_level_and_the_frequency_are_held_to_what_the_board_and_the_band_take() {
+        assert_eq!(Options::asked(None, None).unwrap(), Options::DEFAULT);
+        assert_eq!(Options::asked(Some("3"), Some("903.5")).unwrap(), Options { log: 3, tenths: 9035 });
+        assert_eq!(Options::asked(Some("0"), Some("902")).unwrap(), Options { log: 0, tenths: 9020 });
+        assert_eq!(Options::asked(None, Some("928.0")).unwrap().mhz(), "928.0");
+        for (log, mhz, says) in [
+            (Some("5"), None, "not 0 to 4"),
+            (Some("-1"), None, "not 0 to 4"),
+            (Some("x"), None, "not 0 to 4"),
+            (None, Some("901.9"), "US band"),
+            (None, Some("928.1"), "US band"),
+            (None, Some("868"), "US band"),
+            (None, Some("903.55"), "0.1 MHz steps"),
+            (None, Some("nan"), "US band"),
+            (None, Some("MHz"), "not a number"),
+        ] {
+            let e = Options::asked(log, mhz).unwrap_err();
+            assert!(e.contains(says), "{:?} {:?}: {}", log, mhz, e);
+        }
+        let o = Options { log: 3, tenths: 9035 };
+        assert_eq!((o.key().as_str(), o.words().as_str()), ("log3-903.5", "log level 3 on 903.5 MHz"));
+        assert_eq!(Options::from_key(&o.key()), Some(o));
+        for no in ["", "-", "log3", "log9-903.5", "log3-903.50", "log3-1000.0", "3-903.5"] {
+            assert_eq!(Options::from_key(no), None, "{}", no);
+        }
     }
 
     #[test]
@@ -273,7 +370,7 @@ mod tests {
 
     #[test]
     fn a_part_the_flight_software_does_not_build_is_refused_before_anything_runs() {
-        let e = build_part(Path::new("/nonexistent"), "flight-xp").unwrap_err();
+        let e = build_part(Path::new("/nonexistent"), "flight-xp", None).unwrap_err();
         assert!(e.contains("not something the flight software builds"), "{}", e);
     }
 

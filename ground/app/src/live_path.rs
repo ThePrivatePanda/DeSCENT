@@ -89,7 +89,10 @@ fn port(key: &str, status: &str) -> PortInfo {
         rx_id: None,
         rx_name: None,
         rx_fw: None,
+        rx_kind: None,
         name: None,
+        role: crate::serial::Role::Receiver,
+        csid: None,
     }
 }
 

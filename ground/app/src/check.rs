@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use crate::decode::{self, Decoded, VALIDITY_KEYS};
 use crate::dump::{self, Dump, EventKind};
-use crate::fleet::{Config, Fleet};
+use crate::fleet::{line_sf, Config, Fleet};
 use crate::json::esc;
 use crate::lines::{self, Kind};
 
@@ -36,6 +36,9 @@ const FRESH_BIT: usize = 7;
 const SPELLS_KEPT: usize = 50;   // per sensor in the JSON
 const EVENTS_KEPT: usize = 200;  // system event runs per boot in the JSON, the earliest
 const EVENTS_PRINTED: usize = 20;
+// Records per boot in the flight view's track. A boot with more keeps every nth record, the
+// smallest n that fits: 20 Hz for 16 minutes fits whole.
+const TRACK_KEPT: usize = 20_000;
 const SHOWN: usize = 5;          // lines of any one list in the printed report
 const SAMPLES: usize = 5;
 const SAMPLE_CHARS: usize = 80;
@@ -182,6 +185,36 @@ struct Spell {
     open: bool,   // still clear on the boot's last record
 }
 
+// The middle step between records, in the air and on the ground as the phase events split the
+// boot, and over a boot with no phase events. Boot-air logs as the air does (docs/phases.md), so
+// it counts as air. None where no two records in a row fall in that part.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Rates {
+    air: Option<u64>,
+    ground: Option<u64>,
+    unphased: Option<u64>,
+}
+
+fn rates(ms: &[u64], phases: &[Segment]) -> Rates {
+    let air = |at: u64| {
+        let s = phases.iter().rev().find(|s| s.from_ms <= at).unwrap();   // boot-air starts at 0
+        s.phase.starts_with("air") || s.phase == "boot-air"
+    };
+    let mut steps: [Vec<u64>; 3] = Default::default();
+    for w in ms.windows(2) {
+        let part = if phases.is_empty() { 2 } else if air(w[0]) == air(w[1]) { usize::from(!air(w[0])) } else { continue };
+        steps[part].push(w[1].saturating_sub(w[0]));
+    }
+    let mid = |v: &Vec<u64>| (!v.is_empty()).then(|| middle(v));
+    Rates { air: mid(&steps[0]), ground: mid(&steps[1]), unphased: mid(&steps[2]) }
+}
+
+impl Rates {
+    fn json(&self) -> String {
+        format!("{{\"air\":{},\"ground\":{},\"none\":{}}}", opt(&self.air), opt(&self.ground), opt(&self.unphased))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Sensor {
     name: &'static str,
@@ -190,6 +223,9 @@ struct Sensor {
     clear_ms: u64,
     spells: usize,
     longest: Vec<Spell>,   // longest first, SPELLS_KEPT of them
+    first_valid_ms: Option<u64>,
+    last_valid_ms: Option<u64>,
+    spacing: Rates,        // of the records with the flag set
 }
 
 impl Sensor {
@@ -198,9 +234,10 @@ impl Sensor {
     }
 }
 
-fn sensors(rows: &[(u64, [bool; 8])]) -> Vec<Sensor> {
+fn sensors(rows: &[(u64, [bool; 8])], phases: &[Segment]) -> Vec<Sensor> {
     (0..SENSORS)
         .map(|bit| {
+            let set: Vec<u64> = rows.iter().filter(|(_, v)| v[bit]).map(|(ms, _)| *ms).collect();
             let mut spells: Vec<Spell> = Vec::new();
             let mut start = None;
             for (ms, valid) in rows {
@@ -222,11 +259,14 @@ fn sensors(rows: &[(u64, [bool; 8])]) -> Vec<Sensor> {
             spells.truncate(SPELLS_KEPT);
             Sensor {
                 name: VALIDITY_KEYS[bit],
-                clear: rows.iter().filter(|(_, v)| !v[bit]).count(),
+                clear: rows.len() - set.len(),
                 records: rows.len(),
                 clear_ms,
                 spells: count,
                 longest: spells,
+                first_valid_ms: set.first().copied(),
+                last_valid_ms: set.last().copied(),
+                spacing: rates(&set, phases),
             }
         })
         .collect()
@@ -253,7 +293,7 @@ impl ConsoleLine<'_> {
 }
 
 // Where the line's text starts, past "c0: ", if a console line starts at `at`
-fn console_at(b: &[u8], at: usize) -> Option<usize> {
+pub(crate) fn console_at(b: &[u8], at: usize) -> Option<usize> {
     if !matches!(b.get(at)?, b'I' | b'W' | b'E' | b'D') || *b.get(at + 1)? != b' ' {
         return None;
     }
@@ -554,40 +594,42 @@ fn run_words(e: &dump::SystemEvent) -> [String; 4] {
     ]
 }
 
-// The comments in SystemEvent.h and docs/phases.md, said plainly. No threshold: the log does not
-// record the constants the board ran with
+// What happened, to which part and what the board did about it, for someone reading this in a
+// field. Each one says only what Health.cpp, SensorWatch.cpp, I2cWatch.cpp, ImuSh2.cpp, Phase.cpp,
+// FlightController.cpp and FlashLog.cpp do for that code. No threshold: the log does not record
+// the constants the board ran with
 fn meaning(e: &dump::SystemEvent) -> &'static str {
     match (e.source, e.what) {
-        (1, 1) => "went bad, the driver only re-reads",
-        (1, 2) => "a reset held off in the air, the part still partly works",
-        (1, 3) => "first reset: IMU soft reset, BME280 or gauge restart, GPS port",
-        (1, 4) => "second reset: IMU pin reset, GPS hot start",
-        (1, 5) => "resets did not help, left alone for a while",
-        (1, 6) => "a good reading again",
-        (1, 7) => "the IMU reset pin was pulsed",
-        (1, 8) => "the IMU driver's own background restart ended",
-        (2, 1) => "a bus line was low before a transfer",
-        (2, 2) => "a bus line was low right after a transfer, blamed on that address",
-        (2, 3) => "timeouts in a row, the part held back",
-        (2, 4) => "two parts timing out together, so the bus was cleared",
-        (2, 5) => "a bus clear ran",
-        (2, 6) => "jammed too often, the part put in quarantine",
-        (2, 7) => "out of quarantine, on probation",
-        (3, 1) => "to the air",
-        (3, 2) => "to the ground",
-        (3, 3) => "the barometer started falling in the air, which holds the air phase",
-        (3, 4) => "boot-air ended: the log goes to its ground rate, the radio's phase does not move",
-        (3, 5) => "the IMU stepped up to its fast rate on the ground",
-        (3, 6) => "the IMU went back to its slow rate on the ground without going up",
-        (3, 7) => "landed with a fix held: GPS in standby, the MCU stopped between work, packets carry the held fix",
-        (3, 8) => "out of asleep, everything on again",
-        (4, 1) => "a transmission failed",
-        (4, 2) => "a transmission did not finish in time",
-        (4, 3) => "the radio was set up again",
-        (5, 1) => "a flash write failed",
-        (5, 2) => "an erase did not finish in time",
-        (5, 3) => "flash logging stopped for this boot",
-        _ => "a code this build does not know",
+        (1, 1) => "The sensor stopped giving fresh readings. For now the board only keeps reading it to see whether it comes back by itself; if it doesn't, a reset comes next.",
+        (1, 2) => "In the air the IMU stopped some of its reports but not all. The board does not reset a part that still partly works in the air, so it kept reading it. It resets it if it stops completely, or once on the ground.",
+        (1, 3) => "The sensor stayed bad, so the board reset it: a soft reset for the IMU, a restart of the barometer or fuel gauge driver, or reopening the GPS serial port. The detail says whether the driver took the reset.",
+        (1, 4) => "The first reset did not bring the sensor back, so the board tried the stronger one: the IMU's reset pin, or a GPS hot start.",
+        (1, 5) => "The resets did not bring the sensor back, so the board stopped trying for a while (the detail says how long) and then starts again from the first reset. The wait doubles each time, up to a limit that is shorter in the air.",
+        (1, 6) => "The sensor gave a good reading again. The detail says how long it was bad.",
+        (1, 7) => "The board pulsed the IMU's reset pin, which restarts the IMU completely. The reason says why: at every boot, before clearing a stuck I2C bus the IMU is blamed for, after the IMU's own restart failed, as the second reset of a bad IMU, or asleep after landing when the IMU would not wake (once a wake).",
+        (1, 8) => "The IMU driver finished one try at bringing the IMU back (answer on I2C, reset, turn its reports back on). The detail says whether it worked. If it failed, the next try starts with the IMU's reset pin.",
+        (2, 1) => "Before the board talked to a part, it found an I2C line already held low: something on the bus (often the IMU) was stuck holding it. The address is the part it was about to talk to, not necessarily the one holding the line. The board stops I2C and clears the bus by pulsing the clock line, pulsing the IMU's reset pin first if the IMU is the part it was about to talk to.",
+        (2, 2) => "Right after a transfer with this part an I2C line was left held low, so this part is blamed. The board stops I2C and clears the bus by pulsing the clock line, pulsing the IMU's reset pin first if this is the IMU. A part that jams again soon after is put in quarantine.",
+        (2, 3) => "Transfers to this part timed out several times in a row, so the board stopped talking to it for a short hold (the detail says how long) and then tries again. The hold doubles if it keeps happening.",
+        (2, 4) => "Two different parts timed out close together, which points at the bus itself rather than one part, so the board clears the bus.",
+        (2, 5) => "The board cleared the I2C bus: it stopped I2C, pulsed the clock line until the data line was let go, and sent a stop. If both lines came back high it starts I2C again; if not, I2C stays off and the clear is tried again after a wait that doubles. The detail is how many pulses it took.",
+        (2, 6) => "This part jammed the bus again soon after the last time, so the board stopped talking to it for a while (the detail says how long). Each quarantine is twice as long as the last, up to a limit.",
+        (2, 7) => "The quarantine ended and the board talks to the part again. One more jam soon puts it straight back in, for twice as long.",
+        (3, 1) => "The board decided it was in the air: it writes what was in its RAM ring to the chip, then logs every record at full rate and sends at the air rate. The reason says what decided it.",
+        (3, 2) => "The board decided it was on the ground: the log and radio go to their ground rates and the IMU to its slow rate. After a flight this is landed, and the board starts looking for a GPS fix to hold.",
+        (3, 3) => "In the air the barometer read a steady fall. While it keeps reading that, the board stays in the air even if the IMU goes quiet.",
+        (3, 4) => "Every boot starts in boot-air, logging and transmitting at the air's rates, in case the reset came in the middle of a fall. This ended it: the log and radio go to their ground rates. Firmware before 2026-11-16 kept the radio on its ground rate all through boot-air.",
+        (3, 5) => "On the ground the IMU read movement, or asleep after landing the board found itself tilted, so the board stepped the IMU up to its fast rate so the start of a fall is not missed. The phase is still the ground.",
+        (3, 6) => "The IMU stayed still long enough after being stepped up, so the board put it back to its slow ground rate. It never went to the air.",
+        (3, 7) => "Landed and holding a good GPS fix: everything sleeps, and once a ground transmit gap the board wakes, looks a few seconds for a fresh fix, sends one packet with the held or the fresh fix (the GPS flag set) and writes its record. Firmware before 2026-11-16 kept the IMU on and sent at the ground rate without looking again. The detail is the held fix's accuracy.",
+        (3, 8) => "Woke from asleep: everything is on again and the GPS looks for a new fix. The reason says what woke it: tilted keeps it landed, a climb takes it to the air (older firmware gave moving, and imudead for a climb).",
+        (4, 1) => "A packet was not sent: the radio refused to start it, or started and then reported a failure. The board sets the radio up again before the next packet.",
+        (4, 2) => "The radio did not say the packet was sent within its time on air and a margin. The board sets the radio up again before the next packet.",
+        (4, 3) => "The board set the radio up again, after a failed packet or when starting one failed. If the setup failed, that packet is skipped and the next one tries again.",
+        (5, 1) => "Writing a record to the flash chip failed. The reason is the error the chip driver gave.",
+        (5, 2) => "Erasing a sector of the flash chip ran past its time limit. The board treats the chip as stuck and stops logging for the rest of this boot.",
+        (5, 3) => "Logging to the flash chip stopped for the rest of this boot: nothing after this is on the chip. The detail is how many records it holds.",
+        _ => "A code this build of the app does not know.",
     }
 }
 
@@ -595,36 +637,45 @@ fn reason_meaning(e: &dump::SystemEvent) -> Option<String> {
     let word = dump::reason_word(e.source, e.what, e.reason)?;
     let said = match (e.source, word.as_str()) {
         (_, "none") => return None,
-        (1, "asleep") => "the IMU was asleep",
-        (1, "silent") => "every IMU report stopped",
-        (1, "partial") => "some IMU reports stopped",
-        (1, "stale") => "ready but no fresh reading",
-        (1, "notready") => "the driver is not up",
-        (1, "nopvt") => "bytes from the GPS but no position",
-        (1, "nobytes") => "nothing at all from the GPS",
-        (1, "boot") => "at boot, before the first start",
-        (1, "busstuck") => "before a bus clear the IMU is blamed for",
-        (1, "noack") => "the probe or the reset write got no ACK",
-        (1, "noreset") => "no reset complete in time",
-        (1, "noenable") => "a Set Feature write failed",
-        (2, "clearok") => "both lines high after it",
-        (2, "clearlow") => "SDA still low after the pulses",
-        (2, "clearsclheld") => "SCL never came up, so clocking cannot help",
-        (2, lines) if e.what <= 2 => return Some(lines.replace("sdalow", "SDA low").replace("scllow", "SCL low").replace('+', " and ")),
-        (3, "imumotion") => "most of the IMU's motion window moved",
-        (3, "quiet") => "no moving IMU reading for the landed time",
-        (3, "quietnoalt") => "the IMU quiet for the longer time, with no altitude live all flight",
-        (3, "barodescent") => "the barometer falling",
-        (3, "imudead") => "the IMU missing, so the altitude decided",
-        (3, "bootairlimit") => "boot-air's uptime limit",
-        (3, "motionheld") => "moving without a break for the held time, altitude live and no climb",
-        (3, "quiethigh") => "quiet and flat for the long time, above half the climb",
-        (3, "moving") => "enough of the last slow IMU readings moved",
-        (3, "goodfix") => "enough good fixes in a row",
-        (4, "startrefused") => "the radio refused to start it",
-        (4, "finishfailed") => "it did not finish",
-        (4, "setupok") => "setup worked",
-        (4, "setupfailed") => "setup failed",
+        (1, "asleep") => "the IMU was asleep: after landing, it would not wake; any other time the board never asks it to sleep",
+        (1, "silent") => "every IMU report (acceleration, rotation, magnetometer, orientation) stopped coming",
+        (1, "partial") => "some IMU reports stopped coming while others still came",
+        (1, "stale") => "the driver is up but no fresh reading came in time",
+        (1, "notready") => "the driver is not running: the part did not start or was lost",
+        (1, "nopvt") => "bytes come from the GPS but no position message, fix or not",
+        (1, "nobytes") => "nothing at all comes from the GPS",
+        (1, "boot") => "every boot, before the IMU is first started: a reset of the processor leaves the IMU as it was, and twice that left it holding the I2C clock low",
+        (1, "busstuck") => "the I2C bus was stuck and the IMU was blamed, so it was reset before the bus clear",
+        (1, "noack") => "the IMU did not answer on I2C",
+        (1, "noreset") => "the IMU did not say it had finished resetting in time",
+        (1, "noenable") => "turning an IMU report back on failed",
+        (2, "clearok") => "both lines came back high and I2C started again",
+        (2, "clearlow") => "the data line was still low after the pulses, so I2C stays off until the next try",
+        (2, "clearsclheld") => "the clock line never came up, which pulsing cannot fix; I2C stays off and the IMU gets its reset pin before the next try",
+        (2, lines) if e.what <= 2 => {
+            let low: Vec<&str> = lines.split('+').map(|l| if l == "sdalow" { "the data line SDA" } else { "the clock line SCL" }).collect();
+            return Some(format!("{} {} low", low.join(" and "), if low.len() > 1 { "were" } else { "was" }));
+        }
+        (3, "imumotion") => "older firmware: most IMU readings over its motion window moved",
+        (3, "quiet") => "the IMU read no movement for long enough, with the altitude flat where the rule needs it",
+        (3, "quietnoalt") => "the IMU read no movement for the longer time, since no altitude was live at any point in the air",
+        (3, "barodescent") => "the barometer read a steady fall",
+        (3, "imudead") => "older firmware: the IMU gave no valid reading for a minute, so the altitude alone decided",
+        (3, "bootairlimit") => "boot-air ran to its time limit, whatever the sensors said",
+        (3, "motionheld") => "older firmware: moving without a break for its held time, altitude live and no climb",
+        (3, "quiethigh") => "older firmware: quiet and flat for a long time, above half the climb",
+        (3, "moving") => "an IMU reading at the slow rate showed movement",
+        (3, "goodfix") => "enough good GPS fixes in a row",
+        (3, "quietimu") => "the IMU read no movement for the longer landed time, whatever the altitude said",
+        (3, "tumbling") => "the IMU read fast spinning held for a moment, the way a falling board spins",
+        (3, "freefall") => "the IMU felt near zero g for a moment, the way a board does just after release",
+        (3, "climb") => "the altitude rose the set amount above where the board rested, on readings taken clear of a transmission",
+        (3, "motionhint") => "many IMU readings in the last few seconds showed movement: a drone running, the board handled or carried",
+        (3, "tilted") => "at a wake while asleep, gravity was more than the set angle from where the board lay when it fell asleep: it was turned or picked up",
+        (4, "startrefused") => "the radio refused to start sending",
+        (4, "finishfailed") => "the radio started but reported a failure at the end",
+        (4, "setupok") => "the setup worked",
+        (4, "setupfailed") => "the setup failed",
         _ => return None,
     };
     Some(said.to_string())
@@ -649,6 +700,7 @@ fn detail_words(e: &dump::SystemEvent) -> String {
         (2, 5) => plural(d as usize, "clock pulse"),
         (2, 6) => format!("quarantine {}", seconds(d as u64)),
         (3, 7) => format!("hAcc {} mm", d),
+        (3, 8) if e.reason == 16 => format!("{} deg", d),
         (4, 2) => format!("waited {}", seconds(d as u64)),
         (4, _) => format!("radio code {}", d as i32),
         (5, 1) => format!("next record {}", d),
@@ -726,7 +778,7 @@ fn phase_segments(runs: &[dump::SystemEvent], end_ms: u64) -> Vec<Segment> {
             2 | 4 => "ground",
             3 => "air, falling",
             7 => "landed, asleep",
-            8 if e.reason == 5 => "air",
+            8 if e.reason == 5 || e.reason == 14 => "air",
             8 => "landed, looking for a fix",
             _ => "a phase this build does not know",
         };
@@ -742,30 +794,36 @@ fn phase_segments(runs: &[dump::SystemEvent], end_ms: u64) -> Vec<Segment> {
 
 impl Segment {
     fn json(&self) -> String {
-        let (by, reason, count) = match &self.by {
+        let (by, reason, said, count) = match &self.by {
             Some(e) => {
                 let [_, what, _, reason] = run_words(e);
-                (format!("\"{}\"", what), format!("\"{}\"", reason), e.count)
+                (format!("\"{}\"", what), format!("\"{}\"", reason), opt_text(&reason_meaning(e)), e.count)
             }
-            None => (String::from("null"), String::from("null"), 0),
+            None => (String::from("null"), String::from("null"), String::from("null"), 0),
         };
         format!(
-            "{{\"fromMs\":{},\"toMs\":{},\"phase\":\"{}\",\"by\":{},\"reason\":{},\"count\":{},\"heldFix\":{}}}",
-            self.from_ms, self.to_ms, self.phase, by, reason, count, self.held_fix
+            "{{\"fromMs\":{},\"toMs\":{},\"phase\":\"{}\",\"by\":{},\"reason\":{},\"reasonMeaning\":{},\"count\":{},\"heldFix\":{}}}",
+            self.from_ms, self.to_ms, self.phase, by, reason, said, count, self.held_fix
         )
     }
 }
 
-// What a drop is looked at for: the packet field (accel and gyro are the length of their three
-// axes), what to call it, the unit, and the validity bit a reading needs to count
-const READINGS: [(&str, &str, &str, usize); 7] = [
-    ("envAlt", "barometer altitude", "m", 6),
-    ("gpsAlt", "GPS altitude", "m", 4),
-    ("accel", "linear acceleration", "m/s²", 0),
-    ("gyro", "rotation rate", "deg/s", 1),
-    ("pressure", "pressure", "hPa", 6),
-    ("temp", "temperature", "°C", 6),
-    ("battery", "cell voltage", "V", 5),
+// What a drop is looked at for: the packet field (accel, gyro and mag are the length of their
+// three axes), what to call it, the unit, and the validity bit a reading needs to count. The
+// counter has no bit of its own.
+const READINGS: [(&str, &str, &str, Option<usize>); 12] = [
+    ("envAlt", "barometer altitude", "m", Some(6)),
+    ("gpsAlt", "GPS altitude", "m", Some(4)),
+    ("lat", "GPS latitude", "°", Some(4)),
+    ("lon", "GPS longitude", "°", Some(4)),
+    ("accel", "linear acceleration", "m/s²", Some(0)),
+    ("gyro", "rotation rate", "deg/s", Some(1)),
+    ("mag", "magnetic field", "µT", Some(2)),
+    ("pressure", "pressure", "hPa", Some(6)),
+    ("temp", "temperature", "°C", Some(6)),
+    ("humidity", "humidity", "%RH", Some(6)),
+    ("battery", "cell voltage", "V", Some(5)),
+    ("counter", "packet counter, the last one sent", "", None),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -773,7 +831,7 @@ struct Range {
     key: &'static str,
     words: &'static str,
     unit: &'static str,
-    flag: &'static str,
+    flag: Option<&'static str>,
     lo: Option<(f64, u64)>,   // value and uptime, of the readings with the flag set
     hi: Option<(f64, u64)>,
     set: usize,
@@ -789,6 +847,7 @@ fn reading(d: &Decoded, key: &str) -> f64 {
     match key {
         "accel" => length(["ax", "ay", "az"]),
         "gyro" => length(["gx", "gy", "gz"]),
+        "mag" => length(["mx", "my", "mz"]),
         k => d.value(k).unwrap(),
     }
 }
@@ -797,13 +856,13 @@ fn ranges(rows: &[(u64, &Decoded)], held: &[(u64, u64)]) -> Vec<Range> {
     READINGS
         .iter()
         .map(|(key, words, unit, bit)| {
-            let mut r = Range { key, words, unit, flag: VALIDITY_KEYS[*bit], lo: None, hi: None, set: 0, clear: 0, held: 0 };
+            let mut r = Range { key, words, unit, flag: bit.map(|b| VALIDITY_KEYS[b]), lo: None, hi: None, set: 0, clear: 0, held: 0 };
             for (ms, d) in rows {
-                if !d.valid[*bit] {
+                if bit.is_some_and(|b| !d.valid[b]) {
                     r.clear += 1;
                     continue;
                 }
-                if *key == "gpsAlt" && held.iter().any(|(from, to)| ms >= from && ms <= to) {
+                if *bit == Some(4) && held.iter().any(|(from, to)| ms >= from && ms <= to) {
                     r.held += 1;
                     continue;
                 }
@@ -826,21 +885,27 @@ impl Range {
         let at = |v: &Option<(f64, u64)>| v.map_or((String::from("null"), String::from("null")), |(v, ms)| (decode::js_num(v), ms.to_string()));
         let (lo, lo_ms) = at(&self.lo);
         let (hi, hi_ms) = at(&self.hi);
+        let flag = self.flag.map_or_else(|| String::from("null"), |f| format!("\"{}\"", f));
         format!(
-            "{{\"key\":\"{}\",\"words\":\"{}\",\"unit\":\"{}\",\"flag\":\"{}\",\"min\":{},\"minMs\":{},\"max\":{},\"maxMs\":{},\"set\":{},\"clear\":{},\"heldFix\":{}}}",
-            self.key, self.words, self.unit, self.flag, lo, lo_ms, hi, hi_ms, self.set, self.clear, self.held
+            "{{\"key\":\"{}\",\"words\":\"{}\",\"unit\":\"{}\",\"flag\":{},\"min\":{},\"minMs\":{},\"max\":{},\"maxMs\":{},\"set\":{},\"clear\":{},\"heldFix\":{}}}",
+            self.key, self.words, self.unit, flag, lo, lo_ms, hi, hi_ms, self.set, self.clear, self.held
         )
     }
 
     fn line(&self) -> String {
         let clear = if self.clear > 0 { format!(", {} with it clear", self.clear) } else { String::new() };
         let held = if self.held > 0 { format!(", {} on a held fix left out", self.held) } else { String::new() };
-        match (self.lo, self.hi) {
-            (Some((lo, lo_ms)), Some((hi, hi_ms))) => format!(
-                "{}: {} {} at up={} ms to {} {} at up={} ms, of {} with the {} flag set{}{}",
-                self.words, lo, self.unit, lo_ms, hi, self.unit, hi_ms, plural(self.set, "reading"), self.flag, clear, held
-            ),
-            _ => format!("{}: no reading with the {} flag set{}{}", self.words, self.flag, clear, held),
+        let of = match self.flag {
+            Some(f) => format!("of {} with the {} flag set", plural(self.set, "reading"), f),
+            None => format!("in {}", plural(self.set, "record")),
+        };
+        let unit = if self.unit.is_empty() { String::new() } else { format!(" {}", self.unit) };
+        match (self.lo, self.hi, self.flag) {
+            (Some((lo, lo_ms)), Some((hi, hi_ms)), _) => {
+                format!("{}: {}{} at up={} ms to {}{} at up={} ms, {}{}{}", self.words, lo, unit, lo_ms, hi, unit, hi_ms, of, clear, held)
+            }
+            (_, _, Some(f)) => format!("{}: no reading with the {} flag set{}{}", self.words, f, clear, held),
+            (_, _, None) => format!("{}: no records", self.words),
         }
     }
 }
@@ -864,6 +929,7 @@ struct BootCheck {
     start_utc: Option<String>,
     anchors: usize,
     anchors_rejected: usize,
+    anchor_ms: Vec<u64>,             // every time record's uptime, rejected ones included
     csids: Vec<u8>,
     reset: Option<String>,
     reset_csr: Option<u32>,
@@ -877,10 +943,14 @@ struct BootCheck {
     ranges: Vec<Range>,
     end: End,
     space: Spacing,
+    record_spacing: Rates,
     sensors: Vec<Sensor>,
+    imu_first_valid_ms: Option<u64>,   // the first record with all four IMU flags set
     fresh: usize,
     bad_packet_crc: usize,
     verdict: String,
+    track: Vec<(u64, Decoded)>,
+    track_every: usize,
 }
 
 impl BootCheck {
@@ -1095,6 +1165,9 @@ impl BootCheck {
             );
         }
         if self.records > 0 {
+            let first = |ms: Option<u64>| ms.map_or_else(|| String::from("never"), |ms| format!("up={} ms", ms));
+            let each: Vec<String> = self.sensors.iter().map(|s| format!("{} {}", s.name, first(s.first_valid_ms))).collect();
+            line(out, format!("first record with the flag set: {}; all four IMU flags {}", each.join(", "), first(self.imu_first_valid_ms)));
             line(out, format!("all-fresh flag set on {} of {} records", self.fresh, self.records));
             for r in &self.ranges {
                 line(out, r.line());
@@ -1158,18 +1231,21 @@ impl BootCheck {
                     .map(|p| format!("{{\"fromMs\":{},\"ms\":{},\"toEnd\":{}}}", p.from_ms, p.len_ms, p.open))
                     .collect();
                 format!(
-                    "{{\"name\":\"{}\",\"clear\":{},\"records\":{},\"clearMs\":{},\"spells\":{},\"longest\":[{}]}}",
+                    "{{\"name\":\"{}\",\"clear\":{},\"records\":{},\"clearMs\":{},\"spells\":{},\"longest\":[{}],\"firstValidMs\":{},\"lastValidMs\":{},\"spacing\":{}}}",
                     s.name,
                     s.clear,
                     s.records,
                     s.clear_ms,
                     s.spells,
-                    spells.join(",")
+                    spells.join(","),
+                    opt(&s.first_valid_ms),
+                    opt(&s.last_valid_ms),
+                    s.spacing.json()
                 )
             })
             .collect();
         format!(
-            "{{\"n\":{},\"records\":{},\"firstMs\":{},\"lastMs\":{},\"startUtc\":{},\"anchors\":{},\"anchorsRejected\":{},\"csids\":[{}],\"resetCsr\":{},\"reset\":{},\"hardwareWatchdog\":{},\"dropped\":{},\"droppedEvents\":[{}],\"otherEvents\":[{}],\"systemEvents\":[{}],\"systemRaw\":[{}],\"events\":[{}],\"eventsLeftOut\":{},\"phases\":[{}],\"ranges\":[{}],\"end\":\"{}\",\"endReset\":{},\"fastMs\":{},\"steadyMs\":{},\"gapMs\":{},\"gaps\":[{}],\"spacingChanges\":[{}],\"uptimeBackward\":{},\"sensors\":[{}],\"fresh\":{},\"badPacketCrc\":{},\"verdict\":\"{}\"}}",
+            "{{\"n\":{},\"records\":{},\"firstMs\":{},\"lastMs\":{},\"startUtc\":{},\"anchors\":{},\"anchorsRejected\":{},\"anchorMs\":[{}],\"csids\":[{}],\"resetCsr\":{},\"reset\":{},\"hardwareWatchdog\":{},\"dropped\":{},\"droppedEvents\":[{}],\"otherEvents\":[{}],\"systemEvents\":[{}],\"systemRaw\":[{}],\"events\":[{}],\"eventsLeftOut\":{},\"phases\":[{}],\"ranges\":[{}],\"end\":\"{}\",\"endReset\":{},\"fastMs\":{},\"steadyMs\":{},\"gapMs\":{},\"gaps\":[{}],\"spacingChanges\":[{}],\"uptimeBackward\":{},\"recordSpacing\":{},\"sensors\":[{}],\"imuFirstValidMs\":{},\"fresh\":{},\"badPacketCrc\":{},\"verdict\":\"{}\",\"track\":{}}}",
             self.n,
             self.records,
             self.first_ms,
@@ -1177,6 +1253,7 @@ impl BootCheck {
             opt_text(&self.start_utc),
             self.anchors,
             self.anchors_rejected,
+            join_ids(&self.anchor_ms),
             join_ids(&self.csids),
             opt(&self.reset_csr),
             opt_text(&self.reset),
@@ -1198,11 +1275,45 @@ impl BootCheck {
             gaps.join(","),
             changes.join(","),
             self.space.backward,
+            self.record_spacing.json(),
             sensors.join(","),
+            opt(&self.imu_first_valid_ms),
             self.fresh,
             self.bad_packet_crc,
-            esc(&self.verdict)
+            esc(&self.verdict),
+            self.track_json()
         )
+    }
+
+    // The records for the flight view, a column each. GPS only where its flag is set, the
+    // rest as logged with the flags beside them: the page draws a reading whose flag is
+    // clear as clear, and never decides for itself which readings to believe.
+    fn track_json(&self) -> String {
+        let column = |name: &str, digits: i32, gps: bool| {
+            let scale = 10f64.powi(digits);
+            let cells: Vec<String> = self
+                .track
+                .iter()
+                .map(|(_, d)| match d.value(name) {
+                    Some(v) if v.is_finite() && (!gps || d.valid[4]) => ((v * scale).round() / scale).to_string(),
+                    _ => String::from("null"),
+                })
+                .collect();
+            format!("\"{}\":[{}]", name, cells.join(","))
+        };
+        let ms: Vec<String> = self.track.iter().map(|(ms, _)| ms.to_string()).collect();
+        let valid: Vec<String> = self.track.iter().map(|(_, d)| d.value("validity").unwrap_or(0.0).to_string()).collect();
+        let mut cols = vec![format!("\"ms\":[{}]", ms.join(",")), format!("\"valid\":[{}]", valid.join(","))];
+        for (name, digits) in [("lat", 7), ("lon", 7), ("gpsAlt", 2)] {
+            cols.push(column(name, digits, true));
+        }
+        for (name, digits) in [
+            ("envAlt", 2), ("qi", 5), ("qj", 5), ("qk", 5), ("qr", 5), ("gx", 1), ("gy", 1), ("gz", 1), ("ax", 2), ("ay", 2), ("az", 2),
+            ("mx", 1), ("my", 1), ("mz", 1), ("temp", 2), ("pressure", 1), ("humidity", 2), ("battery", 2),
+        ] {
+            cols.push(column(name, digits, false));
+        }
+        format!("{{\"every\":{},{}}}", self.track_every, cols.join(","))
     }
 }
 
@@ -1232,6 +1343,7 @@ fn check_boot(dump: &Dump, b: &dump::BootReport, several_boards: bool) -> BootCh
     let end_ms = runs.iter().map(|r| r.last_ms as u64).fold(b.last_ms, u64::max);
     let phases = phase_segments(&runs, end_ms);
     let held: Vec<(u64, u64)> = phases.iter().filter(|s| s.held_fix).map(|s| (s.from_ms, s.to_ms)).collect();
+    let track_every = decoded.len().div_ceil(TRACK_KEPT).max(1);
     let mut boot = BootCheck {
         n: b.n,
         records: mine.len(),
@@ -1240,6 +1352,7 @@ fn check_boot(dump: &Dump, b: &dump::BootReport, several_boards: bool) -> BootCh
         start_utc: b.anchored.then(|| utc((b.uptime0_ms + b.first_ms as i64).max(0) as u64)),
         anchors: b.anchors_used,
         anchors_rejected: b.anchors_rejected,
+        anchor_ms: dump.anchors.iter().filter(|a| a.boot == b.n).map(|a| a.ms).collect(),
         csids: b.csids.clone(),
         reset: b.reset_csr.map(dump::reset_words),
         reset_csr: b.reset_csr,
@@ -1268,13 +1381,17 @@ fn check_boot(dump: &Dump, b: &dump::BootReport, several_boards: bool) -> BootCh
             .collect(),
         ranges: ranges(&decoded, &held),
         runs,
-        phases,
         end: End::NotInLog,
         space: spacing(&ms),
-        sensors: sensors(&good),
+        record_spacing: rates(&ms, &phases),
+        sensors: sensors(&good, &phases),
+        phases,
+        imu_first_valid_ms: good.iter().find(|(_, v)| v[..4].iter().all(|b| *b)).map(|(ms, _)| *ms),
         fresh: good.iter().filter(|(_, v)| v[FRESH_BIT]).count(),
         bad_packet_crc: packets.len() - good.len(),
         verdict: String::new(),
+        track: decoded.iter().step_by(track_every).map(|(ms, d)| (*ms, (*d).clone())).collect(),
+        track_every,
     };
     boot.make_verdict(several_boards);
     boot
@@ -1774,6 +1891,22 @@ struct RxHeard {
     first_t: Option<f64>,
     last_t: Option<f64>,
     longest_quiet_ms: u64,
+    // spreading factor -> packets, radio errors. The line's own sf= where it has one (an
+    // SDR's), else what the receiver's header said at the time.
+    by_sf: BTreeMap<u8, (u64, u64)>,
+}
+
+impl RxHeard {
+    fn sf_words(&self) -> String {
+        self.by_sf
+            .iter()
+            .map(|(sf, (packets, errors))| {
+                let errors = if *errors > 0 { format!(" {}", plural(*errors as usize, "radio error")) } else { String::new() };
+                format!("SF{} {}{}", sf, plural(*packets as usize, "packet"), errors)
+            })
+            .collect::<Vec<String>>()
+            .join(", ")
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -1887,6 +2020,10 @@ impl LogCheck {
                 r.last_t.map_or(String::from("none"), |t| self.when(t)),
                 seconds(r.longest_quiet_ms)
             ));
+            // a receiver on one factor all along has said it already
+            if r.by_sf.len() > 1 || (r.sf.is_none() && !r.by_sf.is_empty()) {
+                out.push_str(&format!("    by spreading factor: {}\n", r.sf_words()));
+            }
         }
         if self.bad_length > 0 {
             out.push_str(&format!("  {} packets of the wrong length\n", self.bad_length));
@@ -1934,8 +2071,13 @@ impl LogCheck {
             .receivers
             .iter()
             .map(|r| {
+                let by_sf: Vec<String> = r
+                    .by_sf
+                    .iter()
+                    .map(|(sf, (packets, errors))| format!("{{\"sf\":{},\"packets\":{},\"radioErrors\":{}}}", sf, packets, errors))
+                    .collect();
                 format!(
-                    "{{\"key\":\"{}\",\"id\":{},\"sf\":{},\"lines\":{},\"packets\":{},\"badCrc\":{},\"radioErrors\":{},\"boots\":{},\"firstT\":{},\"lastT\":{},\"longestQuietMs\":{}}}",
+                    "{{\"key\":\"{}\",\"id\":{},\"sf\":{},\"lines\":{},\"packets\":{},\"badCrc\":{},\"radioErrors\":{},\"boots\":{},\"firstT\":{},\"lastT\":{},\"longestQuietMs\":{},\"bySf\":[{}]}}",
                     esc(&r.key),
                     opt_text(&r.id),
                     opt_text(&r.sf),
@@ -1946,7 +2088,8 @@ impl LogCheck {
                     r.boots,
                     opt(&r.first_t),
                     opt(&r.last_t),
-                    r.longest_quiet_ms
+                    r.longest_quiet_ms,
+                    by_sf.join(",")
                 )
             })
             .collect();
@@ -2023,6 +2166,14 @@ fn check_log(name: &str, file: &str, text: &str, bytes: usize) -> LogCheck {
             rx.longest_quiet_ms = rx.longest_quiet_ms.max((l.t - before).max(0.0) as u64);
         }
         fleet.ingest(&ev, &l.rx, l.t);
+        let error = matches!(ev.kind, Kind::RxError { .. });
+        if error || matches!(ev.kind, Kind::Packet { decoded: Ok(_), .. }) {
+            let header = || fleet.receivers(l.t).iter().find(|r| r.key == l.rx).and_then(|r| r.sf());
+            if let Some(sf) = line_sf(&ev).or_else(header) {
+                let n = rx.by_sf.entry(sf as u8).or_default();
+                if error { n.1 += 1 } else { n.0 += 1 }
+            }
+        }
         let Kind::Packet { decoded: Ok(d), rssi, snr, .. } = &ev.kind else { continue };
         if !d.crc_ok {
             continue;
@@ -2081,6 +2232,7 @@ fn check_log(name: &str, file: &str, text: &str, bytes: usize) -> LogCheck {
                 first_t: r.first_t,
                 last_t: r.last_t,
                 longest_quiet_ms: extra.longest_quiet_ms,
+                by_sf: extra.by_sf,
             }
         })
         .collect();
@@ -2522,6 +2674,35 @@ I BOOT 0 c0: start test=flashdump\r\n";
     }
 
     #[test]
+    fn each_flag_says_when_it_was_first_set_and_the_imu_when_all_four_were() {
+        let text = [
+            rec(0, 0, 1000, ALL_SET & !IMU & !GPS),
+            rec(1, 0, 1050, ALL_SET & !0x0E & !GPS),
+            rec(2, 0, 19_400, ALL_SET & !GPS),
+            rec(3, 0, 19_450, ALL_SET & !0x01 & !GPS),
+            found(4),
+        ]
+        .concat();
+        let p = pull(&text);
+        let b = &p.boots[0];
+        let first = |name: &str| b.sensors.iter().find(|s| s.name == name).unwrap().first_valid_ms;
+        assert_eq!((first("accel"), first("gyro"), first("gps"), first("env")), (Some(1050), Some(19_400), None, Some(1000)));
+        assert_eq!(b.imu_first_valid_ms, Some(19_400), "accel alone at 1050 is not the IMU");
+        let printed = printed(&p);
+        assert!(
+            printed.contains("first record with the flag set: accel up=1050 ms, gyro up=19400 ms, mag up=19400 ms, quat up=19400 ms, gps never, soc up=1000 ms, env up=1000 ms; all four IMU flags up=19400 ms\n"),
+            "{}",
+            printed
+        );
+        let json = p.json();
+        assert!(json.contains("\"name\":\"gps\",\"clear\":4,\"records\":4,\"clearMs\":18450,\"spells\":1,\"longest\":[{\"fromMs\":1000,\"ms\":18450,\"toEnd\":true}],\"firstValidMs\":null,\"lastValidMs\":null,\"spacing\":{\"air\":null,\"ground\":null,\"none\":null}}"), "{}", json);
+        assert!(json.contains("\"firstValidMs\":1050,\"lastValidMs\":19400,"), "{}", json);
+        assert!(json.contains("\"imuFirstValidMs\":19400,"), "{}", json);
+        let never = pull(&[rec(0, 0, 1000, ALL_SET & !IMU), found(1)].concat());
+        assert!(never.json().contains("\"imuFirstValidMs\":null,"), "{}", never.json());
+    }
+
+    #[test]
     fn only_the_flags_count_and_a_value_is_never_judged() {
         // a battery of 0 V and a counter that cannot be: every flag set, so nothing to say
         let mut p = packet(65535, 17, ALL_SET | FRESH);
@@ -2698,6 +2879,34 @@ I BOOT 0 c0: start test=flashdump\r\n";
         let mut out = String::new();
         l.text(&mut out);
         assert!(out.contains("console: none in this log"), "{}", out);
+    }
+
+    #[test]
+    fn a_receiver_is_counted_by_the_sf_each_line_says_else_by_its_header() {
+        let text = [
+            String::from("# descent-ground log v1 started 2026-11-12T18:00:00.000Z\n"),
+            log_line(1000, "rx1", "#DG,RX,v1,id=9E8FF4,f=915.0,bw=125.0,sf=9,cr=7,sync=0x12,pre=8"),
+            log_line(2000, "rx1", &pkt(1, 13, -90.0, ALL_SET)),
+            log_line(2500, "rx1", "ERR,-7,-94.0,2.75"),
+            log_line(3000, "rx1", "#DG,RX,v1,id=9E8FF4,f=915.0,bw=125.0,sf=12,cr=7,sync=0x12,pre=8"),
+            log_line(4000, "rx1", &pkt(2, 13, -91.0, ALL_SET)),
+            log_line(5000, "cmd:1", "#DG,RX,v1,id=5D4E01,f=915.0,bw=125.0,cr=7,sync=0x12,pre=8,kind=sdr,sfs=7+8+9+10+11+12,fw=0.1.0"),
+            log_line(6000, "cmd:1", &format!("PKT,55,{},,9.5,100,sf=7,dbfs=-60.5", decode::bytes_to_hex(&packet(1, 5, ALL_SET)))),
+            log_line(6100, "cmd:1", &format!("PKT,55,{},,9.5,100,sf=12", decode::bytes_to_hex(&packet(3, 13, ALL_SET)))),
+            log_line(6200, "cmd:1", "ERR,-24,,-3.25,sf=12"),
+            log_line(6300, "cmd:1", "ERR,-1,,-3.25"),
+        ]
+        .concat();
+        let l = check_log("1800-ground.log", "x", &text, text.len());
+        let by = |key: &str| l.receivers.iter().find(|r| r.key == key).unwrap().by_sf.clone();
+        assert_eq!(by("rx1"), BTreeMap::from([(9, (1, 1)), (12, (1, 0))]));
+        // the ERR with no sf= and no header factor to fall back on is in radio errors, not here
+        assert_eq!(by("cmd:1"), BTreeMap::from([(7, (1, 0)), (12, (1, 1))]));
+        let mut out = String::new();
+        l.text(&mut out);
+        assert!(out.contains("    by spreading factor: SF9 1 packet 1 radio error, SF12 1 packet\n"), "{}", out);
+        assert!(out.contains("    by spreading factor: SF7 1 packet, SF12 1 packet 1 radio error\n"), "{}", out);
+        assert!(l.json().contains("\"bySf\":[{\"sf\":7,\"packets\":1,\"radioErrors\":0},{\"sf\":12,\"packets\":1,\"radioErrors\":1}]"), "{}", l.json());
     }
 
     #[test]
@@ -2886,14 +3095,14 @@ I BOOT 0 c0: start test=flashdump\r\n";
         assert_eq!(b.runs.iter().map(|r| r.first_ms).collect::<Vec<u32>>(), vec![300, 922, 5000]);
         let printed = printed(&p);
         assert!(
-            printed.contains("event up=922 to 930 ms bus jam on imu, sdalow (SDA low), 2 times, address 0x4A the last time: a bus line was low right after a transfer, blamed on that address\n"),
+            printed.contains("event up=922 to 930 ms bus jam on imu, sdalow (the data line SDA was low), 2 times, address 0x4A the last time: Right after a transfer with this part an I2C line was left held low, so this part is blamed. The board stops I2C and clears the bus by pulsing the clock line, pulsing the IMU's reset pin first if this is the IMU. A part that jams again soon after is put in quarantine.\n"),
             "{}",
             printed
         );
-        assert!(printed.contains("event up=300 to 300 ms sensor ok on env, bad for 8.7 s: a good reading again\n"), "{}", printed);
+        assert!(printed.contains("event up=300 to 300 ms sensor ok on env, bad for 8.7 s: The sensor gave a good reading again. The detail says how long it was bad.\n"), "{}", printed);
         let json = p.json();
         assert!(
-            json.contains("\"events\":[{\"firstMs\":300,\"lastMs\":300,\"count\":1,\"source\":\"sensor\",\"what\":\"ok\",\"part\":\"env\",\"reason\":\"none\",\"detail\":8663,\"detailWords\":\"bad for 8.7 s\",\"meaning\":\"a good reading again\",\"reasonMeaning\":null},"),
+            json.contains("\"events\":[{\"firstMs\":300,\"lastMs\":300,\"count\":1,\"source\":\"sensor\",\"what\":\"ok\",\"part\":\"env\",\"reason\":\"none\",\"detail\":8663,\"detailWords\":\"bad for 8.7 s\",\"meaning\":\"The sensor gave a good reading again. The detail says how long it was bad.\",\"reasonMeaning\":null},"),
             "{}",
             json
         );
@@ -2915,6 +3124,51 @@ I BOOT 0 c0: start test=flashdump\r\n";
     }
 
     #[test]
+    fn record_spacing_is_split_where_the_phase_events_split_the_boot() {
+        let text = [
+            rec(0, 0, 1000, ALL_SET),
+            rec(1, 0, 1050, ALL_SET),
+            rec(2, 0, 1100, ALL_SET),
+            system(3, 0, 2500, PHASE, 4, 1, 2, 1, 2000, 2000),
+            rec(4, 0, 10_000, ALL_SET),
+            rec(5, 0, 15_000, ALL_SET & !0x40),
+            rec(6, 0, 20_000, ALL_SET),
+            rec(7, 0, 25_000, ALL_SET),
+            system(8, 0, 30_000, PHASE, 1, 1, 1, 1, 30_000, 30_000),
+            rec(9, 0, 30_100, ALL_SET),
+            rec(10, 0, 30_200, ALL_SET),
+            found(11),
+        ]
+        .concat();
+        let p = pull(&text);
+        let b = &p.boots[0];
+        assert_eq!(b.record_spacing, Rates { air: Some(50), ground: Some(5000), unphased: None }, "steps across a phase change are left out");
+        let env = b.sensors.iter().find(|s| s.name == "env").unwrap();
+        assert_eq!((env.spacing.ground, env.last_valid_ms), (Some(10_000), Some(30_200)), "only records with the flag set");
+        assert!(p.json().contains("\"recordSpacing\":{\"air\":50,\"ground\":5000,\"none\":null},"), "{}", p.json());
+        let old = pull(&[rec(0, 0, 1000, ALL_SET), rec(1, 0, 1050, ALL_SET), found(2)].concat());
+        assert_eq!(old.boots[0].record_spacing, Rates { air: None, ground: None, unphased: Some(50) });
+    }
+
+    #[test]
+    fn a_tilted_wake_keeps_it_landed_and_says_the_angle() {
+        let text = [
+            rec(0, 0, 1000, ALL_SET),
+            system(1, 0, 40_000, PHASE, 1, 1, 1, 1, 30_000, 30_000),
+            system(2, 0, 95_000, PHASE, 2, 1, 2, 1, 90_000, 90_000),
+            system_detail(3, 0, 130_000, [PHASE, 7, 4, 10], 1, 125_000, 125_000, 2400),
+            system_detail(4, 0, 200_000, [PHASE, 8, 1, 16], 1, 185_000, 185_000, 30),
+            found(5),
+        ]
+        .concat();
+        let p = pull(&text);
+        let phases: Vec<&str> = p.boots[0].phases.iter().map(|s| s.phase).collect();
+        assert_eq!(phases, vec!["boot-air", "air", "landed, looking for a fix", "landed, asleep", "landed, looking for a fix"]);
+        let text = printed(&p);
+        assert!(text.contains("event up=185000 to 185000 ms phase awake on imu, tilted (at a wake while asleep, gravity was more than the set angle from where the board lay when it fell asleep: it was turned or picked up), 30 deg: Woke from asleep"), "{}", text);
+    }
+
+    #[test]
     fn phases_follow_the_phase_events_and_asleep_holds_the_fix() {
         let text = [
             reading_rec(0, 0, 1000, GPS, 0, 100_000, 0),
@@ -2927,7 +3181,10 @@ I BOOT 0 c0: start test=flashdump\r\n";
             reading_rec(7, 0, 140_000, GPS, 0, 999_000, 0),
             system(8, 0, 160_000, PHASE, 8, 1, 9, 1, 150_000, 150_000),
             reading_rec(9, 0, 170_000, GPS, 0, 120_000, 0),
-            found(10),
+            system_detail(10, 0, 180_000, [PHASE, 7, 4, 10], 1, 175_000, 175_000, 2400),
+            system(11, 0, 200_000, PHASE, 8, 2, 14, 1, 190_000, 190_000),
+            system(12, 0, 210_000, PHASE, 8, 2, 5, 1, 205_000, 205_000),
+            found(13),
         ]
         .concat();
         let p = pull(&text);
@@ -2941,18 +3198,22 @@ I BOOT 0 c0: start test=flashdump\r\n";
                 (50_000, 90_000, "air", false),
                 (90_000, 125_000, "landed, looking for a fix", false),
                 (125_000, 150_000, "landed, asleep", true),
-                (150_000, 170_000, "landed, looking for a fix", false),
+                (150_000, 175_000, "landed, looking for a fix", false),
+                (175_000, 190_000, "landed, asleep", true),
+                (190_000, 205_000, "air", false),
+                (205_000, 205_000, "air", false),
             ],
-            "imufast changes no phase"
+            "imufast changes no phase, woken by a climb (imudead on older firmware) is the air"
         );
         let gps_alt = b.ranges.iter().find(|r| r.key == "gpsAlt").unwrap();
         assert_eq!((gps_alt.lo, gps_alt.hi, gps_alt.set, gps_alt.held), (Some((100.0, 1000)), Some((300.0, 55_000)), 3, 1));
         let text = printed(&p);
         assert!(text.contains("phases, from the phase events: boot-air from up=0 ms, ground from up=37004 ms (bootairend, quiet), "), "{}", text);
-        assert!(text.contains("event up=125000 to 125000 ms phase asleep on gps, goodfix (enough good fixes in a row), hAcc 2400 mm: "), "{}", text);
+        assert!(text.contains("event up=125000 to 125000 ms phase asleep on gps, goodfix (enough good GPS fixes in a row), hAcc 2400 mm: Landed and holding a good GPS fix: "), "{}", text);
         assert!(text.contains("GPS altitude: 100 m at up=1000 ms to 300 m at up=55000 ms, of 3 readings with the gps flag set, 1 on a held fix left out\n"), "{}", text);
         let json = p.json();
-        assert!(json.contains("{\"fromMs\":125000,\"toMs\":150000,\"phase\":\"landed, asleep\",\"by\":\"asleep\",\"reason\":\"goodfix\",\"count\":1,\"heldFix\":true}"), "{}", json);
+        assert!(json.contains("{\"fromMs\":125000,\"toMs\":150000,\"phase\":\"landed, asleep\",\"by\":\"asleep\",\"reason\":\"goodfix\",\"reasonMeaning\":\"enough good GPS fixes in a row\",\"count\":1,\"heldFix\":true}"), "{}", json);
+        assert!(json.contains("\"phase\":\"boot-air\",\"by\":null,\"reason\":null,\"reasonMeaning\":null,"), "{}", json);
     }
 
     #[test]
@@ -2976,6 +3237,37 @@ I BOOT 0 c0: start test=flashdump\r\n";
         let json = p.json();
         assert!(json.contains("{\"key\":\"envAlt\",\"words\":\"barometer altitude\",\"unit\":\"m\",\"flag\":\"env\",\"min\":230,\"minMs\":1150,\"max\":250,\"maxMs\":1100,\"set\":3,\"clear\":1,\"heldFix\":0}"), "{}", json);
         assert!(printed(&p).contains("GPS altitude: no reading with the gps flag set, 4 with it clear\n"), "{}", printed(&p));
+    }
+
+    #[test]
+    fn the_track_keeps_every_good_record_and_gps_only_with_its_flag() {
+        let no_gps = ALL_SET & !GPS;
+        let with_fix = |n: u64, ms: u32, validity: u8| {
+            let mut p = packet(0, 17, validity);
+            p[0..4].copy_from_slice(&424_577_050i32.to_le_bytes());
+            p[4..8].copy_from_slice(&(-763_847_330i32).to_le_bytes());
+            p[12..16].copy_from_slice(&23_331i32.to_le_bytes());
+            p[34..36].copy_from_slice(&16_384i16.to_le_bytes());
+            let crc = dump::crc16(&p[..53]);
+            p[53..].copy_from_slice(&crc.to_le_bytes());
+            raw(n, 0xA5, 0, ms, &p)
+        };
+        let text = [with_fix(0, 1000, ALL_SET), with_fix(1, 1050, no_gps), found(2)].concat();
+        let json = pull(&text).json();
+        let at = json.find("\"track\":").expect("a track");
+        let track = &json[at..];
+        assert!(track.starts_with("\"track\":{\"every\":1,\"ms\":[1000,1050],\"valid\":[127,111],\"lat\":[42.457705,null],\"lon\":[-76.384733,null]"), "{}", track);
+        assert!(track.contains("\"envAlt\":[233.31,233.31]"), "the barometer is kept whatever the GPS flag says: {}", track);
+        assert!(track.contains("\"qi\":[0.50002,0.50002]"), "{}", track);
+    }
+
+    #[test]
+    fn a_long_boot_keeps_every_nth_record_in_its_track() {
+        let n = TRACK_KEPT * 2 + 1;
+        let text: String = (0..n).map(|i| rec(i as u64, 0, 1000 + 50 * i as u32, ALL_SET)).chain([found(n)]).collect();
+        let p = pull(&text);
+        assert_eq!((p.boots[0].track_every, p.boots[0].track.len()), (3, n.div_ceil(3)));
+        assert_eq!(p.boots[0].track[1].0, 1150, "the first record and every third after it");
     }
 
     #[test]

@@ -164,3 +164,9 @@
   #dash .ucard .u3 { flex-wrap: wrap; white-space: normal; }
   #replay .rp-prog { white-space: normal; }
 }
+
+/* The Map tab takes most of the column: the readings above still show, the map needs the room */
+@media (min-width: 1101px) {
+  #dash .right:has(#charts > .fv) { grid-template-rows: minmax(0, auto) minmax(min(600px, 78%), 3fr); }
+}
+#dash #charts > .fv { height: 100%; }

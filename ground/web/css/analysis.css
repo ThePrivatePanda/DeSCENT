@@ -23,30 +23,83 @@
 #screen-analysis .an-part > .note { margin: 6px 0 0; }
 #screen-analysis .an-part ul, #screen-analysis .an-part ol { margin: 0; padding-left: 20px; font-size: var(--t-label); line-height: 1.6; }
 
-/* The phases as the phase events cut them, sized by uptime, each one named */
-#screen-analysis .lane { position: relative; height: 34px; border-radius: var(--radius-sm); overflow: hidden; background: var(--color-neutral-200); }
-#screen-analysis .lane .seg {
+/* The boots ticked, end to end and each as wide as it ran: the phases as the phase events cut
+   them, then each sensor's flag on the same axis. Every row's cells share the flex-grow, so a
+   boot lines up from row to row */
+#screen-analysis .an-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 0 22px 10px; font-size: var(--t-label); }
+#screen-analysis .an-picks label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+#screen-analysis .an-picks button { padding: 2px 10px; font-size: var(--t-note); }
+#screen-analysis .mgrid { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 4px 12px; align-items: center; font-size: var(--t-label); }
+#screen-analysis .mrow { display: contents; }
+#screen-analysis .mbar { display: flex; min-width: 0; }
+#screen-analysis .mcell { position: relative; flex: 0 1 0; min-width: 4px; overflow: hidden; }
+#screen-analysis .mcell + .mcell { border-left: 2px solid var(--color-text); }
+#screen-analysis .mhead .mcell { height: 18px; font-size: var(--t-note); font-weight: 600; white-space: nowrap; }
+#screen-analysis .mhead .mcell span { display: block; padding-left: 5px; overflow: hidden; text-overflow: ellipsis; }
+#screen-analysis .mlane .mbar { border-radius: var(--radius-sm); overflow: hidden; }
+#screen-analysis .mlane .mcell { height: 34px; background: var(--color-neutral-200); }
+#screen-analysis .mlane .seg {
   position: absolute; top: 0; bottom: 0; display: flex; align-items: center; min-width: 2px; padding: 0 8px;
   background: var(--color-neutral-300); border-right: 2px solid var(--color-neutral-100); overflow: hidden;
 }
-#screen-analysis .lane .seg:nth-child(even) { background: var(--color-neutral-400); }
-#screen-analysis .lane .seg.held {
+#screen-analysis .mlane .seg:nth-child(even) { background: var(--color-neutral-400); }
+#screen-analysis .mlane .seg.held, #screen-analysis .nophase, #screen-analysis .norec {
   background: repeating-linear-gradient(135deg, var(--color-neutral-300) 0 6px, var(--color-neutral-200) 6px 12px);
 }
-#screen-analysis .lane .seg span { font: 600 12.5px/1 var(--font-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#screen-analysis .lane .tick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--color-text); }
-#screen-analysis .an-part .phaselist { margin-top: 8px; }
+#screen-analysis .nophase { position: absolute; inset: 0; }
+#screen-analysis .mlane .seg span { font: 600 12.5px/1 var(--font-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#screen-analysis .mlane .tick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--color-text); }
+#screen-analysis .mstrip .mcell { height: 12px; background: var(--color-neutral-700); }
+#screen-analysis .mstrip .off, #screen-analysis .mstrip .norec { position: absolute; top: 0; bottom: 0; }
+#screen-analysis .mstrip .off { background: var(--color-neutral-200); }
+#screen-analysis .an-merged .firsts { margin-top: 10px; }
+
+/* The charts under the strips. Each y axis takes the strips' label column and its gap, 64 px (48 px
+   narrow), so a plot starts and ends where the bar does */
+#screen-analysis .an-charts { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 8px; }
+#screen-analysis .an-charts .chart { padding: 6px 0 2px; border-radius: var(--radius-sm); }
+#screen-analysis .an-charts .chart h3 { display: flex; align-items: baseline; gap: 6px; padding: 0 8px 2px 64px; }
+#screen-analysis .an-charts .chart h3 .note { font-weight: 400; font-size: var(--t-note); }
+#screen-analysis .an-charts .chart h3 .readout { float: none; margin-left: auto; font-size: 14px; white-space: nowrap; }
+#screen-analysis .an-charts .chart h3 .readout small { font: 600 12.5px/1 var(--font-body); color: var(--color-text-70); margin-left: 6px; }
+#screen-analysis .an-charts .chart .none { height: 40px; margin: 0 8px 4px 64px; }
+#screen-analysis .an-charts .u-legend { padding-left: 64px; }
+
+/* What this pull holds */
+#screen-analysis .an-inv .inv td:first-child { font-weight: 600; white-space: nowrap; }
+#screen-analysis .an-inv .inv td.wrap { min-width: 24ch; max-width: 70ch; }
+#screen-analysis .an-part .phaselist { margin-top: 0; }
+#screen-analysis .bootno { display: inline-block; min-width: 6ch; color: var(--color-text-70); font-size: var(--t-note); }
+#screen-analysis code { font: 11.5px/1.3 var(--font-mono); color: var(--color-text-70); margin-left: 4px; }
+#screen-analysis .events td.said { white-space: normal; min-width: 36ch; max-width: 80ch; }
+#screen-analysis .events td.said code { margin-left: 0; }
 
 /* A validity flag over the boot's records: dark where it was clear */
 #screen-analysis .flags { display: grid; grid-template-columns: 52px minmax(120px, 1fr) minmax(0, 1.3fr); gap: 6px 12px; align-items: center; font-size: var(--t-label); }
 #screen-analysis .flag { display: contents; }
-#screen-analysis .flag .strip { position: relative; height: 12px; border-radius: 6px; overflow: hidden; background: var(--color-neutral-200); }
-#screen-analysis .flag .strip .off { position: absolute; top: 0; bottom: 0; background: var(--color-neutral-700); }
+#screen-analysis .flag .strip { position: relative; height: 12px; border-radius: 6px; overflow: hidden; background: var(--color-neutral-700); }
+#screen-analysis .flag .strip .off { position: absolute; top: 0; bottom: 0; background: var(--color-neutral-200); }
 
 @media (max-width: 700px) {
   #screen-analysis .sheet-head { padding: 14px 16px; }
   #screen-analysis .an-wrap { padding: 0 16px 8px; }
   #screen-analysis .an-part { padding: 4px 16px 12px; }
+  #screen-analysis .an-picks { padding: 0 16px 10px; }
+  #screen-analysis .mgrid { grid-template-columns: 40px minmax(0, 1fr); gap: 4px 8px; }
+  #screen-analysis .an-charts .chart h3, #screen-analysis .an-charts .u-legend { padding-left: 48px; }
+  #screen-analysis .an-charts .chart .none { margin-left: 48px; }
   #screen-analysis .flags { grid-template-columns: 52px minmax(0, 1fr); }
   #screen-analysis .flag .note { grid-column: 1 / -1; margin-bottom: 4px; }
 }
+
+/* The flight view and its clock; the cursor is drawn on the merged bar and the boot's flag strips too */
+#screen-analysis .an-flight { padding: 14px 22px 18px; display: flex; flex-direction: column; gap: 10px; }
+#screen-analysis .an-fhead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+#screen-analysis .an-fhead h3 { margin: 0; padding: 0; }
+#screen-analysis .an-fhead select { width: auto; }
+#screen-analysis .an-fnote { margin: 0; font-size: var(--t-note); }
+#screen-analysis .an-fview { height: min(68vh, 640px); min-height: 420px; }
+#screen-analysis .an-time { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#screen-analysis .an-fpos { flex: 1 1 260px; accent-color: var(--color-accent); height: 28px; }
+#screen-analysis .an-fwhen { font-weight: 700; min-width: 22ch; }
+#screen-analysis .an-cursor { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1px; background: var(--color-accent); z-index: 1; }

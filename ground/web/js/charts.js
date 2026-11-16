@@ -24,10 +24,11 @@
 
   // Tab -> panels -> series. `key` reads unit.history[key]; `rx` = per receiver.
   // A tab marked custom draws no plots: the page fills the panel itself. Runs is one,
-  // because a board's earlier runs are a list to act on, not a graph.
+  // because a board's earlier runs are a list to act on, not a graph; Map is the other.
   const TABS = [
     { id: 'overview', label: 'Overview', panels: [
-      { title: 'Cell voltage', unit: 'V', dec: 2, series: [{ key: 'battery', label: 'Cell voltage' }] },
+      // A LiPo's working span, so a few millivolts of noise don't fill the card. Readings outside it widen it
+      { title: 'Cell voltage', unit: 'V', dec: 2, span: [3.0, 4.2], series: [{ key: 'battery', label: 'Cell voltage' }] },
       { title: 'Pressure altitude', unit: 'm', dec: 1, series: [{ key: 'envAlt', label: 'Altitude' }] },
       { title: 'RSSI, best receiver', unit: 'dBm', dec: 1, series: [{ key: 'rssi', label: 'RSSI' }] },
       { title: 'SNR, best receiver', unit: 'dB', dec: 1, series: [{ key: 'snr', label: 'SNR' }] },
@@ -54,7 +55,25 @@
       { title: 'SNR per receiver', unit: 'dB', dec: 2, rx: 'snr' },
     ] },
     { id: 'runs', label: 'Runs', custom: true },
+    { id: 'map', label: 'Map', custom: true },
   ];
+
+  // The axes and grid of every chart on the page, Live's and Analysis's. The plain-hex aliases:
+  // getComputedStyle hands a color-mix() back unresolved. --ink is --color-text, --rule is
+  // --color-neutral-200. A faint horizontal grid only; the design has none, it stays to read values off.
+  function look() {
+    return {
+      axis: { stroke: alpha(css('--ink'), 0.7), ticks: { show: false }, font: '600 11px ' + css('--sans') },
+      grid: { stroke: css('--rule'), width: 1 },
+      ink: css('--ink'),
+    };
+  }
+
+  // One series in the accent, a little heavier; several in the series palette, so a receiver
+  // keeps the colour of its dot in the receivers panel
+  function line(accent, index, lineWidth) {
+    return accent ? { stroke: css('--accent'), width: 2.25 * lineWidth / 1.25 } : { stroke: seriesColor(index), width: lineWidth };
+  }
 
   const clock = (s) => new Date(s * 1000).toTimeString().slice(0, 8);
   const PLOT_H = 190;
@@ -170,29 +189,24 @@
           box.appendChild(n);
           return;
         }
-        // The plain-hex aliases: getComputedStyle hands a color-mix() back unresolved.
-        // --ink is --color-text, --rule is --color-neutral-200, --accent is --color-accent.
-        // A faint horizontal grid only; the design has none, it stays to read values off.
-        const axis = { stroke: alpha(css('--ink'), 0.7), ticks: { show: false }, font: '600 11px ' + css('--sans') };
-        const grid = { stroke: css('--rule'), width: 1 };
+        const { axis, grid } = look();
         const few = pd.data[0].length < 40;
         const single = pd.labels.length === 1;
-        // One series in the accent; several, and every receiver, in the series palette, so a
-        // receiver keeps the colour of its dot in the receivers panel
-        const accent = single && !panel.rx;
-        const width = accent ? 2.25 * opt.lineWidth / 1.25 : opt.lineWidth;
         const readout = box.querySelector('.readout');
         const opts = Object.assign(this.plotSize(box), {
           // One series: the title names it, so no legend; hover value goes next to the title.
           legend: { show: !single, live: true },
           cursor: { points: { size: 7 }, drag: { x: false, y: false } },
-          scales: { x: { time: true } },
+          scales: panel.span
+            ? { x: { time: true }, y: { range: (u, min, max) => [min == null ? panel.span[0] : Math.min(panel.span[0], min),
+                                                                 max == null ? panel.span[1] : Math.max(panel.span[1], max)] } }
+            : { x: { time: true } },
           axes: [Object.assign({ values: (u, splits) => splits.map(clock), grid: { show: false } }, axis), Object.assign({ size: 56, grid }, axis)],
-          series: [{ value: (u, v) => (v == null ? '—' : clock(v)) }].concat(pd.labels.map((l) => ({
-            label: l.label, stroke: accent ? css('--accent') : seriesColor(l.index), width, spanGaps: false,
+          series: [{ value: (u, v) => (v == null ? '—' : clock(v)) }].concat(pd.labels.map((l) => Object.assign({
+            label: l.label, spanGaps: false,
             points: { show: few, size: 4, width: 1 },
             value: (u, v) => (v == null ? '—' : +v.toFixed(5)),
-          }))),
+          }, line(single && !panel.rx, l.index, opt.lineWidth)))),
         });
         opts.hooks = {};
         const plot = { box, panel, readout, single };
@@ -264,6 +278,6 @@
     restyle() { this.sig = ''; if (this.last) this.update(...this.last); }
   }
 
-  (root.DG = root.DG || {}).Charts = Charts;
+  (root.DG = root.DG || {}).Charts = Object.assign(Charts, { look, line, number: readoutNum });
   root.DG.TABS = TABS;
 })(self);

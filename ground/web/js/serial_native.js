@@ -267,7 +267,7 @@
       // build: the carried image is picked by the module the app has for the board.
       if (o.embedded === 'bench' && o.module) q.set('module', o.module);
       if (o.embedded === 'built' || o.embedded === 'flight') {
-        const keys = [['module', o.module], ['csid', o.csid], ['sf', o.sf], ['dbm', o.dbm]];
+        const keys = [['module', o.module], ['csid', o.csid], ['sf', o.sf], ['dbm', o.dbm], ['log', o.log], ['mhz', o.mhz]];
         // One rate per slot, ground transmit, air transmit, ground log, air log: fixed0..3 in
         // ms, follow0..3 as 0 or 1, soc0..3 the thresholds and socms0..3 the intervals, comma
         // separated. layout says which block they are for.
@@ -345,6 +345,15 @@
         body: JSON.stringify({ sf: Number(sf) }),
       });
       if (!r.ok) throw new Error('receiver refused SF' + sf + ' (HTTP ' + r.status + ')');
+    }
+
+    // The T-Beam answers with its header, whose f= says whether it took it
+    async setFreq(key, mhz) {
+      const r = await fetch('/api/receiver/' + key + '/config', {
+        method: 'POST',
+        body: JSON.stringify({ freq: Number(mhz) }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
     }
   }
 

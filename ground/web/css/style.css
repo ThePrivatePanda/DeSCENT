@@ -91,6 +91,8 @@
   --ink-3: #5f5c5a;
   --accent: #c67139;
   --critical: #8c491a;
+  /* E and W lines on a board's console: red and amber, as consoles print them */
+  --console-e: #b3261e; --console-w: #8a5a00;
   --sans: "Figtree", system-ui, sans-serif;
   --mono: "Plex Mono", ui-monospace, Menlo, Consolas, monospace;
   --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
@@ -123,6 +125,7 @@
     --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b6b4b4' stroke-width='2.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     --bg: #1a1817; --panel: #2d2b2b; --sunk: #262322; --rule: #333030; --rule-strong: #444141;
     --ink: #f3f2f2; --ink-2: #c2c0c0; --ink-3: #b6b4b4; --critical: #f2a477;
+    --console-e: #ff8a80; --console-w: #f0b84a;
     --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
     --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
   }
@@ -140,6 +143,7 @@
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b6b4b4' stroke-width='2.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --bg: #1a1817; --panel: #2d2b2b; --sunk: #262322; --rule: #333030; --rule-strong: #444141;
   --ink: #f3f2f2; --ink-2: #c2c0c0; --ink-3: #b6b4b4; --critical: #f2a477;
+  --console-e: #ff8a80; --console-w: #f0b84a;
   --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
   --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
 }
@@ -627,8 +631,8 @@ p.step, p.outcome { margin-block: 8px; }
 .benchlive .boot .when { font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text-70); }
 .benchlive pre.raw { border-radius: 0; padding: 8px 16px; }
 .benchlive pre.raw .boot { display: block; background: var(--color-accent-100); color: var(--color-accent-800); font-weight: 600; border: 0; padding: 0; }
-.benchlive pre.raw .bad { color: var(--color-accent-700); }
-.benchlive pre.raw .warn { color: var(--color-accent-700); }
+.benchlive pre.raw .bad { color: var(--console-e); font-weight: 600; }
+.benchlive pre.raw .warn { color: var(--console-w); }
 .benchlive .grid { margin: 0 16px 10px; width: calc(100% - 32px); }
 
 /* A card a bench board has no use for until flight software is back: one line that opens it */
@@ -730,3 +734,45 @@ body:not([data-screen="live"]) .live-only { display: none; }
   .field { grid-template-columns: minmax(0, 1fr) 130px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* The flight view (flightmap.js) on Live, Replay and Analysis. Over imagery the marks keep their
+   own contrast whatever the theme: white casings, and labels white on a near-black pill. */
+.fv { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
+.fv-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.fv-bar select { width: auto; }
+.fv-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.fv-body { flex: 1 1 auto; min-height: 340px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+.fv-map { position: relative; min-height: 340px; border-radius: var(--radius-md); overflow: hidden; background: #2a2725; }
+.fv-side { width: 340px; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.fv-side[hidden] { display: none !important; }
+.fv-note {
+  position: absolute; z-index: 2; left: 50%; top: 12px; transform: translateX(-50%); max-width: calc(100% - 120px);
+  padding: 8px 16px; border-radius: 999px; background: rgba(20, 18, 17, .88); color: #fff; font: 600 14px/1.3 var(--font-body);
+}
+.fv-label, .fv-gap, .fv-station {
+  padding: 3px 10px; border-radius: 999px; background: rgba(20, 18, 17, .88); color: #fff;
+  font: 700 15px/1.25 var(--font-body); white-space: nowrap; pointer-events: none;
+}
+.fv-label small { font-size: 12.5px; font-weight: 600; }
+.fv-gap { font-size: 12.5px; font-weight: 600; outline: 2px dashed #fff; }
+.fv-station { background: #fff; color: #201e1d; outline: 2px solid #201e1d; }
+.fv-card { background: var(--color-neutral-100); border-radius: var(--radius-md); padding: 14px 16px; }
+.fv-cardhead { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.fv-cardhead b { font: var(--font-heading-weight) 18px/1.2 var(--font-heading); margin-right: auto; }
+.fv-swatch { flex: none; width: 14px; height: 14px; border-radius: 50%; }
+.fv-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin: 0; font-size: var(--t-body); }
+.fv-kv dt { color: var(--color-text-70); font-size: var(--t-label); }
+.fv-kv dd { margin: 0; overflow-wrap: anywhere; }
+.fv-kv .note, .fv-val .note { display: block; font-size: var(--t-note); }
+.fv-coords { font-size: 18px; }
+.fv-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.fv-readout { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px 18px; }
+.fv-readout > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fv-val b { font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
+.fv .maplibregl-ctrl-scale { font: 600 13px/1.2 var(--font-body); padding: 2px 6px; border-width: 3px; }
+.fv .maplibregl-ctrl-attrib { font: 12.5px/1.3 var(--font-body); }
+.fv .maplibregl-ctrl-group button { width: 36px; height: 36px; }
+@media (max-width: 1100px) {
+  .fv-body { grid-template-columns: minmax(0, 1fr); }
+  .fv-side { width: auto; }
+}

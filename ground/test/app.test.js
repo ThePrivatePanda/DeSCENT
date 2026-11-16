@@ -227,3 +227,27 @@ test('the drawer: a status field posts to the app, a graph field stays in this b
   assert.strictEqual(p.app.model.values.lowBatteryV, 3.7);
   assert.strictEqual(p.app.live.cfg.lowBatteryV, 3.7);
 });
+
+// 2026-11-16: the ChipSat's console on the ST-Link sat in the receivers strip as rx2
+test('a ChipSat console is never in the receivers strip', async () => {
+  const ports = {
+    ports: [
+      { key: 'rx1', port: '/dev/ttyUSB0', usb: '10c4:ea60', status: 'open', rxId: '72E53C', rxName: 'Mast', role: 'receiver', csid: null },
+      { key: 'rx2', port: '/dev/ttyACM2', usb: '0483:3754', status: 'open', rxId: null, role: 'console', csid: 9 },
+    ],
+    boards: [],
+    log: null,
+  };
+  const p = dashboard({ answer: (url) => (url === '/api/ports' ? { ok: true, status: 200, json: async () => ports } : null) });
+  await p.settle();
+  const ws = p.net.last().open();
+  // a receiver row for the console's key, as lines before it said what it was would leave
+  ws.send(numbered([{ kind: 'receiver', id: 'rx1', name: 'Mast', sf: 9, packets: 12, dups: 0, badCrc: 0, errors: 0, lastLine: Date.now() },
+    { kind: 'receiver', id: 'rx2', name: null, packets: 0, dups: 0, badCrc: 0, errors: 0, lastLine: Date.now() }, { kind: 'snapshot-end' }]));
+  await p.every(250);
+  const rows = p.$('receivers').innerHTML;
+  assert.match(rows, /data-rx="rx1"/);
+  assert.doesNotMatch(rows, /data-rx="rx2"/);
+  await p.fire('btn-connect', 'click');
+  assert.strictEqual(p.$('toast').textContent, '1 receiver found');
+});

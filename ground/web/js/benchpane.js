@@ -1,5 +1,6 @@
 // Sensor bench card on a ChipSat's sheet: the bench console per part, the receivers' tally,
-// the starts and the raw console. chipsats.js draws its head and says which board is up.
+// the starts and the raw console. On any other board, the raw console alone, in the Console
+// card. chipsats.js draws their heads and says which board is up.
 (function () {
   'use strict';
   const A = window.DGApp;
@@ -17,14 +18,20 @@
   };
   // event lines (bus clear, quarantine), shown as printed instead of parsed
   const VERBATIM = ['BUS'];
-  const RAW_SHOWN = 400;
+  // the filter offers these whether or not a line with one is still kept
+  const TAGS = ['BOOT', 'RST', 'PHASE', 'CYC', 'PKT', 'TX', 'RADIO', 'IMU', 'GPS', 'ENV', 'SOC', 'BUS', 'FLASH', 'SYS'];
+  const RAW_SHOWN = 2000;
 
   const state = {
-    row: null, port: '',   // the bench board on the sheet and its console, from chipsats.js
+    row: null, port: '',   // the board on the sheet and its console, from chipsats.js
+    bench: false,          // the whole bench card, else the raw console alone
     sessions: new Map(),   // board key of the console port -> DG.bench.Session
+    keys: new Map(),       // port -> key, kept so a port that has gone still shows what it said
     radio: new BN.Radio(),
-    paused: null,          // raw lines frozen at Pause
-    filter: '',            // tag, show only its raw lines
+    paused: null,          // lines the session had heard at Pause, its dropped ones included
+    filter: '',            // tag, show only its raw lines; the rest are kept, only hidden
+    follow: true,          // the raw console kept at its newest line, until scrolled up
+    top: 0,                // where it was scrolled to, put back after each redraw
   };
 
   const boards = () => (hub.boards || []).filter((b) => b.usb !== '1209:5741');   // never the drone's flight controller
@@ -34,12 +41,14 @@
     return state.sessions.get(key);
   }
   // Lines come in under the open port's key (rx1...). The app's boards list has no key,
-  // so it is looked up in hub.ports by the port's path.
+  // so it is looked up in hub.ports by the port's path. The app gives a port that comes
+  // back under the same path its old key, so its lines carry on in the same session.
   function keyOf(port) {
     const open = (hub.ports || []).find((p) => p.port === port);
-    if (open) return open.key;
     const b = boardOf(port);
-    return b ? b.key : undefined;
+    const key = open ? open.key : b ? b.key : state.keys.get(port);
+    if (key !== undefined) state.keys.set(port, key);
+    return key;
   }
   function sessionOn(port) {
     const key = port ? keyOf(port) : undefined;
@@ -64,7 +73,9 @@
   });
 
   const secs = (ms) => (ms === null || ms === undefined ? '' : ms < 10000 ? (ms / 1000).toFixed(1) + ' s' : Math.round(ms / 1000) + ' s');
-  const clock = (t) => new Date(t).toLocaleTimeString([], { hour12: false });
+  // toLocaleTimeString builds a formatter each call, too slow for 2000 lines twice a second
+  const hms = new Intl.DateTimeFormat([], { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false });
+  const clock = (t) => hms.format(t);
   const fieldsOf = (f) => Object.keys(f || {}).map((k) => '<span class="fv"><span class="k">' + esc(k) + '</span>=' + esc(f[k]) + '</span>').join(' ');
   // reset cause flags that were set
   const causeWords = (c) => (c ? Object.keys(c).filter((k) => k !== 'csr' && c[k] === '1').join(', ') || 'none set' : 'not printed');
@@ -129,34 +140,55 @@
         : '<p class="empty">No receiver has heard the bench yet. It keeps its radio off for the first 30 s after it starts.</p>') + '</div>';
   }
 
+  // The filter runs over every kept line on each draw, so switching it brings back lines
+  // that came in hidden
   function raw(s) {
-    const lines = state.paused || (s ? s.raw : []);
-    const shown = lines.filter((r) => !state.filter || (r.line && r.line.tag === state.filter)).slice(-RAW_SHOWN);
-    const tags = s ? [...new Set(s.raw.filter((r) => r.line).map((r) => r.line.tag))].sort() : [];
+    const lines = s ? s.raw : [];
+    const end = state.paused !== null ? Math.max(0, state.paused - s.dropped) : lines.length;
+    const shown = [];
+    let matched = 0;
+    for (let i = end - 1; i >= 0; i--) {
+      if (state.filter && lines[i].tag !== state.filter) continue;
+      if (matched++ < RAW_SHOWN) shown.push(lines[i]);
+    }
+    const tags = [...new Set([...TAGS, ...[...(s ? s.tags : [])].sort(), state.filter].filter(Boolean))];
     const pick = '<select data-filter="1" aria-label="Show only"><option value="">every line</option>' +
       tags.map((t) => '<option value="' + esc(t) + '"' + (t === state.filter ? ' selected' : '') + '>' + esc(t) + '</option>').join('') + '</select>';
-    const text = shown.map((r) => {
-      const cls = r.line && r.line.tag === 'BOOT' && r.line.event === 'start' ? 'boot' : r.line && r.line.level === 'E' ? 'bad' : r.line && r.line.level === 'W' ? 'warn' : '';
+    const text = shown.reverse().map((r) => {
+      const cls = r.start ? 'boot' : r.level === 'E' ? 'bad' : r.level === 'W' ? 'warn' : '';
       return '<span class="' + cls + '">' + esc(clock(r.t) + '  ' + r.text) + '</span>';
     }).join('\n');
+    const older = [
+      matched > RAW_SHOWN ? 'showing the newest ' + RAW_SHOWN + ' that match' : '',
+      s && s.dropped ? 'the oldest ' + s.dropped + ' lines were let go to keep the newest ' + BN.RAW_KEPT : '',
+    ].filter(Boolean).join('; ');
     return '<div class="card"><h3>Console, as it arrived</h3><div class="line">' + pick +
-      ' <label class="check"><input type="checkbox" data-pause="1"' + (state.paused ? ' checked' : '') + '> Pause</label>' +
-      ' <span class="note">' + (s ? s.heard + ' lines, ' + s.other + ' not in the log format' : '') + '</span></div>' +
-      '<pre class="raw">' + (text || '<span class="muted">nothing yet</span>') + '</pre></div>';
+      ' <span class="note">' + matched + ' of ' + end + ' lines match</span>' +
+      ' <label class="check"><input type="checkbox" data-pause="1"' + (state.paused !== null ? ' checked' : '') + '> Pause</label>' +
+      ' <span class="note">' + (s ? s.heard + ' lines, ' + s.other + ' not in the log format, the last at ' + clock(s.lastT) : '') + '</span></div>' +
+      (older ? '<p class="note">' + esc(older) + '.</p>' : '') +
+      '<pre class="raw">' + (text || '<span class="muted">' + (end ? 'no line matches' : 'nothing yet') + '</span>') + '</pre></div>';
   }
 
-  function render() {
-    const el = $('cs-bench');
-    if (!el || !state.row) return;
-    const s = sessionOn(state.port);
+  function benchHtml(s) {
     const now = Date.now();
     const parts = s ? [...s.parts.values()].sort((x, y) => {
       const i = (p) => (ORDER.indexOf(p.tag) === -1 ? 99 : ORDER.indexOf(p.tag));
       return i(x) - i(y) || x.tag.localeCompare(y.tag);
     }) : [];
-    paint(el, banners(s) +
+    return banners(s) +
       (parts.length ? '<div class="parts">' + parts.map((p) => card(p, now)).join('') + '</div>' : '') +
-      radioCard(now) + starts(s) + raw(s));
+      radioCard(now) + starts(s) + raw(s);
+  }
+
+  function render() {
+    const el = $(state.bench ? 'cs-bench' : 'cs-console');
+    if (!el || !state.row) return;
+    const s = sessionOn(state.port);
+    paint(el, state.bench ? benchHtml(s) : raw(s));
+    // a redraw puts the console back at its top
+    const pre = el.querySelector('pre.raw');
+    if (pre) pre.scrollTop = state.follow && state.paused === null ? pre.scrollHeight : state.top;
   }
 
   const root = $('screen-chipsats');
@@ -175,23 +207,32 @@
     render();
   });
 
+  // scroll does not bubble, so it is caught on the way down
+  root.addEventListener('scroll', (e) => {
+    const pre = e.target;
+    if (!pre.classList || !pre.classList.contains('raw')) return;
+    state.top = pre.scrollTop;
+    state.follow = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8;
+  }, true);
+
   root.addEventListener('change', (e) => {
     const t = e.target;
     if (t.getAttribute('data-filter')) state.filter = t.value;
     else if (t.getAttribute('data-pause')) {
       const s = sessionOn(state.port);
-      state.paused = t.checked && s ? s.raw.slice() : null;
+      state.paused = t.checked && s ? s.dropped + s.raw.length : null;
     } else return;
     render();
   });
 
   // chipsats.js says which board is up after each of its own redraws, which can put a new,
-  // empty #cs-bench on the page, so this draws at once as well as on the timer
+  // empty #cs-bench or #cs-console on the page, so this draws at once as well as on the timer
   A.benchPane = {
-    show(row, port) {
-      if (!row || (state.row && state.row.uid !== row.uid)) state.paused = null;
+    show(row, port, bench) {
+      if (!row || (state.row && state.row.uid !== row.uid) || (port || '') !== state.port) Object.assign(state, { paused: null, follow: true, top: 0 });
       state.row = row;
       state.port = port || '';
+      state.bench = !!bench;
       render();
     },
     sessionOn, talking,

@@ -46,7 +46,7 @@ test('the four vendored fonts are on disk and in the offline list', () => {
     assert.ok(fs.existsSync(path.join(WEB, 'vendor', 'fonts', f)), f + ' on disk');
     assert.ok(list.includes('vendor/fonts/' + f), f + ' in sw.js');
   }
-  assert.match(sw, /const CACHE = 'descent-ground-v15'/);
+  assert.match(sw, /const CACHE = 'descent-ground-v16'/);
 });
 
 test('Plex Sans is gone, Plex Mono stays for hex', () => {

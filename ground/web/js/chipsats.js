@@ -363,6 +363,49 @@
 
   const seconds = (ms) => String(Number((ms / 1000).toFixed(3)));
 
+  // Compiled in, not in the block: what a build gets unless told otherwise (config.h), and so what
+  // the carried image runs. A level leaves out every line above it
+  const BUILT_LOG = 4;
+  const BUILT_MHZ = '915.0';
+  const LOG_LEVELS = ['nothing', 'errors', '+ warnings', '+ info', '+ debug'];
+  const mhzWords = (v) => Number(v).toFixed(1);
+  // The band the app builds for, in the 0.1 MHz a T-Beam is told. '' when it will do
+  function mhzStop(v) {
+    const f = Number(String(v).trim());
+    if (String(v).trim() === '' || !Number.isFinite(f)) return 'Fill in the carrier frequency first.';
+    if (f < 902 || f > 928) return 'The carrier frequency has to be 902.0 to 928.0 MHz, the US band.';
+    if (Math.abs(f * 10 - Math.round(f * 10)) > 1e-6) return 'The carrier frequency goes in 0.1 MHz steps.';
+    return '';
+  }
+
+  // What the last write asked the build for, kept in this browser per board: {log, mhz, at}
+  const writtenKey = (uid) => 'dg-written-' + uid;
+  function written(uid) {
+    try { const w = JSON.parse(store.get(writtenKey(uid)) || 'null'); return w && typeof w === 'object' ? w : null; } catch (e) { return null; }
+  }
+  // The newest start line on the board's console that names its log level: {t, log, mhz}, mhz ''
+  // from firmware that does not print it. From benchpane.js's session, so only what this page heard
+  function bootSaid(r) {
+    const s = A.benchPane && r.uid ? A.benchPane.sessionOn(isBench(r) ? consoleFor(r) : watchedPort(r)) : null;
+    const boot = s ? s.boots.slice().reverse().find((b) => b.fields.log !== undefined) : null;
+    return boot ? { t: boot.t, log: Number(boot.fields.log), mhz: boot.fields.mhz === undefined ? '' : mhzWords(boot.fields.mhz) } : null;
+  }
+  // What the board runs as far as this page knows: its last start line, unless it has been written
+  // since, else the last write. null when neither
+  function runs(r) {
+    const said = bootSaid(r);
+    const last = r.uid ? written(r.uid) : null;
+    return said && (!last || said.t >= last.at) ? said : last;
+  }
+  // The T-Beams being read, each with the frequency its header last said ('' before one has)
+  function tbeams() {
+    return (hub.ports || []).filter((p) => p.role === 'receiver' && p.status === 'open' && !p.key.startsWith('cmd:') && p.rxKind !== 'sdr')
+      .map((p) => {
+        const heard = A.live.receivers.get(p.key);
+        return { key: p.key, name: B.receiverName(p.key, p, heard), mhz: heard && heard.info.f ? mhzWords(heard.info.f) : '' };
+      });
+  }
+
   // The draft as the boxes hold it: id, SF, power, and per phase the switch, the thresholds and
   // the gaps of both columns. From a block, or blank when there is none. No defaults anywhere
   // (2026-10-31, the user's call): a blank box stays blank until someone types in it.
@@ -380,6 +423,7 @@
       d['p' + n + 'f'] = !!(tx && tx.follow);
       for (let k = 0; k < B.BANDS - 1; k++) d['p' + n + 'soc' + k] = tx ? String(tx.percent[k]) : '';
       for (let k = 0; k < B.BANDS; k++) d['p' + n + 'ms' + k] = tx ? seconds(tx.intervalMs[k]) : '';
+      if (n === B.GROUND) return;
       d['p' + n + 'l'] = log ? seconds(log.fixedMs) : '';
       for (let k = 0; k < B.BANDS; k++) d['p' + n + 'lms' + k] = log ? seconds(log.intervalMs[k]) : '';
     });
@@ -403,23 +447,25 @@
   // The boxes start from the block read off the board, else from what this browser remembers
   // of it, else empty. n is the B.PHASES index (0 ground, 1 air). p<n>f is the phase's battery
   // switch and p<n>soc<k> its thresholds in %, one set for both columns. p<n>s and p<n>ms<k> are
-  // the transmit gap and bands in seconds, p<n>l and p<n>lms<k> the log ones.
+  // the transmit gap and bands in seconds, p<n>l and p<n>lms<k> the log ones. The ground has no log
+  // boxes: its transmit boxes are the ground rate, written to both of its slots.
+  // The log level and the frequency are not in the block: they start at what the board runs, else
+  // at what a build gets.
   function buildDraft(r) {
     const was = r.onProbe && !state.stale && state.read ? state.read.settings : null;
     if (!state.build || state.build.uid !== r.uid) {
-      if (was) {
-        state.build = draftFrom(r.uid, was);
-        remember(r.uid, state.build);
-      } else {
-        const kept = remembered(r.uid);
-        state.build = kept ? Object.assign(draftFrom(r.uid, null), kept, { uid: r.uid }) : draftFrom(r.uid, null);
-      }
+      state.build = was ? draftFrom(r.uid, was) : Object.assign(draftFrom(r.uid, null), remembered(r.uid), { uid: r.uid });
+      const now = runs(r);
+      state.build.log = now ? Number(now.log) : BUILT_LOG;
+      state.build.mhz = now && now.mhz ? now.mhz : BUILT_MHZ;
+      if (was) remember(r.uid, state.build);
     }
     return state.build;
   }
 
   // Slots in the block's order: ground transmit, air transmit, ground log, air log. The switch
-  // and the thresholds go to both of a phase's slots; the firmware treats them independently.
+  // and the thresholds go to both of a phase's slots, and the ground rate to both ground slots; the
+  // firmware treats them independently.
   // With the switch off the band table is not consulted by the firmware, and its boxes are not
   // on the sheet, yet the app wants one for every slot: then every band is the one gap the
   // operator typed, and thresholds nobody typed are the firmware's own table. Nothing the
@@ -452,10 +498,12 @@ async function buildAndFlash() {
     if (state.peek) await state.peek;
     try {
       const settings = Object.assign({ csid: d.csid, sf: d.sf, dbm: d.dbm }, ratesAsked(d));
+      const options = how.way === 'build' ? { log: Number(d.log), mhz: mhzWords(d.mhz) } : { log: BUILT_LOG, mhz: BUILT_MHZ };
       await hub.chipFlash(Object.assign({ uid: r.uid, backup: state.backup }, settings,
-        how.way === 'build' ? { embedded: 'built', module: r.module } : { embedded: 'flight' }));
-      // kept once the flash has ended well, for the next time this board has no block
-      state.sent = { uid: r.uid, draft: Object.assign({}, d) };
+        how.way === 'build' ? Object.assign({ embedded: 'built', module: r.module }, options) : { embedded: 'flight' }));
+      // kept once the flash has ended well, for the next time this board has no block, and to
+      // hold the board's next start line against
+      state.sent = { uid: r.uid, draft: Object.assign({}, d), written: Object.assign({ at: Date.now() }, options) };
       toast(how.way === 'build' ? 'Building the flight software for ' + nameOf(r) : 'Flashing ' + nameOf(r));
     } catch (e) {
       state.buildError = e.missing ? CANNOT : (e.message || String(e));
@@ -472,10 +520,12 @@ async function buildAndFlash() {
     const stop = !r.module ? 'Choose the radio module in Identity and radio first.'
       : how.stop ? how.stop
         : !r.onProbe ? 'Put the board on the ST-Link and press Read the board.'
-          : busy() ? 'Something else is running on this board.' : B.draftStop(d);
+          : busy() ? 'Something else is running on this board.'
+            : B.draftStop(d) || (how.way === 'build' ? mhzStop(d.mhz) : '');
     const buildOff = stop ? ' disabled' : '';
     const say = (v) => (String(v).trim() === '' ? '—' : String(v));
-    const summary = 'board ' + say(d.csid) + ', ' + B.MODULE[r.module || 'le'] + ', SF' + say(d.sf) + ', ' + say(d.dbm) + ' dBm';
+    const options = how.way === 'build' ? ', log level ' + say(d.log) + ', ' + say(d.mhz) + ' MHz' : ', log level ' + BUILT_LOG + ', ' + BUILT_MHZ + ' MHz';
+    const summary = 'board ' + say(d.csid) + ', ' + B.MODULE[r.module || 'le'] + ', SF' + say(d.sf) + ', ' + say(d.dbm) + ' dBm' + options;
     return { d, how, stop, buildOff, summary };
   }
 
@@ -524,11 +574,12 @@ async function buildAndFlash() {
           (AIR_MS[Number(d.sf)] ? AIR_MS[Number(d.sf)] + ' ' : '') + 'ms on air per packet', onBoard(t.rows[1].onBoard, differs.sf)) +
         field('Transmit power', wrapChanged(pick('dbm', powers, d.dbm, (v) => v + ' dBm'), differs.dbm),
           'The rows the ' + (r.module || 'le').toUpperCase() + ' module has.', onBoard(t.rows[2].onBoard, differs.dbm)) +
-      '</div></div>';
+        buildOptionFields(r, d, how, wrapChanged, field, onBoard) +
+      '</div>' + tbeamWarning(r) + '</div>';
 
-    // Ground and air, one table each: how often it logs to the chip and how often it transmits,
-    // a row per battery band. The switch and the thresholds are the phase's, for both columns. The
-    // board works out the phase from its altitude.
+    // Ground and air, one table each, a row per battery band. The ground has one ground rate, the
+    // gap after a packet and between records; the air how often it logs to the chip and how often it
+    // transmits. The switch and the thresholds are the phase's, for both columns.
     const numBox = (field, value, label, unit, size) => '<input type="text" inputmode="numeric" data-keep="build:' + field + '" data-build="' + field + '"' +
       ' value="' + esc(String(value)) + '" placeholder="' + unit + '" aria-label="' + label + '" size="' + size + '">';
     const WHAT = ['Switched on, on the bench or the drone, and again once landed.', 'From the climb through the release and the fall.'];
@@ -541,31 +592,42 @@ async function buildAndFlash() {
       const cell = (key, was, zero, what) => {
         const value = d[key];
         return '<td>' + wrapChanged(numBox(key, value, what, 's', 5), was.changed) + ' <span class="u">s</span>' +
-          (String(value).trim() !== '' && Number(value) === 0 ? '<span class="zero">' + zero + '</span>' : '') + '</td>';
+          (String(value).trim() !== '' && Number(value) === 0 ? zero.map((z) => '<span class="zero">' + z + '</span>').join('') : '') + '</td>';
       };
-      const board = (word, c) => '<div><span class="u">' + word + '</span> <span class="val' + (c.changed && c.was ? ' was' : '') + '">' + esc(c.was || '—') + '</span></div>';
+      const board = (word, c) => '<div>' + (word ? '<span class="u">' + word + '</span> ' : '') +
+        '<span class="val' + (c.changed && c.was ? ' was' : '') + '">' + esc(c.was || '—') + '</span></div>';
+      const ground = n === B.GROUND;
+      // The ground's two slots shown as one value when they agree, else each as it is
+      const one = ground && !!settings && B.sameRate(settings.transmit && settings.transmit[n], settings.log && settings.log[n]);
       const rows = B.phaseRows(settings, d, n).map((row) => {
         const fixed = row.key === B.FIXED;
-        return '<tr><th scope="row">' + label(row.key) + '</th>' +
-          cell(fixed ? 'p' + n + 'l' : 'p' + n + 'lms' + row.key, row.log, B.logZero(), ph.label + ' log gap') +
-          cell(fixed ? 'p' + n + 's' : 'p' + n + 'ms' + row.key, row.transmit, 'back to back', ph.label + ' transmit gap') +
-          (settings ? '<td class="board">' + board('log', row.log) + board('transmit', row.transmit) + '</td>' : '') + '</tr>';
+        const boxes = ground
+          ? cell(fixed ? 'p0s' : 'p0ms' + row.key, { changed: row.log.changed || row.transmit.changed },
+            ['back to back, every reading (20 Hz):', 'the chip is full in about half an hour'], 'Ground rate')
+          : cell(fixed ? 'p' + n + 'l' : 'p' + n + 'lms' + row.key, row.log, [B.logZero()], ph.label + ' log gap') +
+            cell(fixed ? 'p' + n + 's' : 'p' + n + 'ms' + row.key, row.transmit, ['back to back'], ph.label + ' transmit gap');
+        const onIt = one ? board('', row.transmit) : board('transmit', row.transmit) + board('log', row.log);
+        return '<tr><th scope="row">' + label(row.key) + '</th>' + boxes +
+          (settings ? '<td class="board">' + (ground ? onIt : board('log', row.log) + board('transmit', row.transmit)) + '</td>' : '') + '</tr>';
       }).join('');
       const said = t.rows[3 + n];
+      const columns = ground ? '<th scope="col">Ground rate</th>' : '<th scope="col">Log every</th><th scope="col">Transmit every</th>';
       return '<div class="phase' + (differs[ph.key] ? ' changed' : '') + '">' +
         '<div class="phase-name"><span class="dot' + (n ? ' on' : '') + '"></span>' + ph.label + '</div>' +
         '<div class="phase-what">' + WHAT[n] + '</div>' +
-        '<label class="check"><input type="checkbox" data-build="p' + n + 'f"' + (follow ? ' checked' : '') + '> Set by battery level (changes both columns)</label>' +
-        '<div class="ratewrap"><table class="rates"><thead><tr><th scope="col">Battery</th><th scope="col">Log every</th><th scope="col">Transmit every</th>' +
+        '<label class="check"><input type="checkbox" data-build="p' + n + 'f"' + (follow ? ' checked' : '') + '> Set by battery level' + (ground ? '' : ' (changes both columns)') + '</label>' +
+        '<div class="ratewrap"><table class="rates"><thead><tr><th scope="col">Battery</th>' + columns +
           (settings ? '<th scope="col">On the board</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
-        '<p class="hint">Log: the gap between records, 0 is every reading (20 Hz). Transmit: the gap after a packet, 0 is back to back.</p>' +
+        (ground ? '<p class="hint">The gap after a packet, and between records kept on the chip. 0 is back to back and every reading (20 Hz).</p>'
+          : '<p class="hint">Log: the gap between records, 0 is every reading (20 Hz). Transmit: the gap after a packet, 0 is back to back.</p>') +
         (said.apart ? '<p class="hint">' + esc(said.apart) + '</p>' : '') +
         (said.older.length ? onBoard(said.older.join('; '), true) : '') + '</div>';
     });
-    const phaseCard = '<div class="pane step">' + head(2, 'Phases', 'by altitude') +
+    const phaseCard = '<div class="pane step">' + head(2, 'Phases', 'by motion and altitude') +
       '<div class="phases">' + subs.join('') + '</div>' +
-      '<p class="plain">The board picks the phase from altitude: air after a 15 m climb (30 m on GPS if the barometer is dead), ground again after 30 s at rest below half the climb, or after 3 min with the IMU still at any height. Release is not detected, so air covers the climb and the fall. After a reset it logs as air for up to 5 min while transmitting at the ground rate.</p>' +
-      '<p class="plain">On the ground the readings mostly stay in the board\'s RAM, and only one per ground log gap reaches flash. So the air\'s battery bands apply only while the board logs as air: the rest of the time the RAM fills at the air\'s Gauge unread gap, and a take-off still writes the 30 s before it.</p></div>';
+      '<p class="plain">The board picks the phase from its IMU and altitude. Air at the slightest hint: a tumble or a free fall, the IMU moving most of 2 s, or a 15 m climb (30 m on GPS if the barometer is dead). Ground again at any height once still 30 s with the altitude flat, or still a minute whatever the altitude says (3 min with no altitude all flight). Release is not detected, so air covers the climb and the fall. After a reset it logs and transmits at the air\'s rates until it has been still 30 s, 5 min at most.</p>' +
+      '<p class="plain">On the ground the readings mostly stay in the board\'s RAM, and only one per ground rate reaches flash. So the air\'s battery bands apply only while the board logs as air: the rest of the time the RAM fills at the air\'s Gauge unread gap, and a take-off still writes the 30 s before it.</p>' +
+      '<p class="plain">Landed with a fix held it sleeps and wakes once a ground rate: it looks for a fresh fix for up to 10 s (60 s every tenth time), sends one packet with the held or the fresh fix, and logs it. Turned more than 15 degrees or carried 15 m up, it stays awake.</p></div>';
 
     // What the write changes, compared with the block read off the board
     const changes = !settings ? [] : [
@@ -573,7 +635,7 @@ async function buildAndFlash() {
       ['Board id', t.rows[0].onBoard, String(d.csid), differs.csid],
       ['Spreading factor', t.rows[1].onBoard, 'SF' + d.sf, differs.sf],
       ['Transmit power', t.rows[2].onBoard, B.dbmWords(Number(d.dbm)), differs.dbm],
-    ].filter((c) => c[3]).concat(...B.PHASES.map((ph, n) => B.phaseChanges(settings, d, n)));
+    ].concat(optionChanges(r, d, how)).filter((c) => c[3]).concat(...B.PHASES.map((ph, n) => B.phaseChanges(settings, d, n)));
     const n = changes.length;
     const diff = !settings ? '' : '<p class="kicker">' + (n ? n + (n === 1 ? ' change' : ' changes') : 'No changes') + ' from the board</p>' +
       changes.map((c) => '<div class="chrow"><span>' + c[0] + '</span><span><span class="was">' + esc(c[1]) + '</span> → <b>' + esc(c[2]) + '</b></span></div>').join('');
@@ -583,19 +645,94 @@ async function buildAndFlash() {
       (stop ? '<p class="note">' + esc(stop) + '</p>' : '');
     const writeCard = '<div class="pane step write">' + head(3, 'Write') + diff +
       '<p class="plain">' + how.column + ' ' + esc(summary) + '. The rates are the Phases tables.</p>' +
-      '<p class="plain">' + esc([how.says, how.way === 'build' ? nextImage(r.module) : ''].filter(Boolean).join(' ')) + '</p>' +
+      '<p class="plain">' + esc([how.says, how.way === 'build' ? nextImage(r.module, d) : ''].filter(Boolean).join(' ')) + '</p>' +
       '<label class="check"><input type="checkbox" data-backup="1"' + (state.backup ? ' checked' : '') + '> Save what is on the board first</label>' +
-      go + (state.buildError ? '<p class="outcome bad">' + esc(state.buildError) + '</p>' : '') + '</div>';
+      go + (state.buildError ? '<p class="outcome bad">' + esc(state.buildError) + '</p>' : '') + readBack(r) + '</div>';
     return '<div class="cs-steps">' + idCard + phaseCard + writeCard + '</div>';
   }
 
-  function nextImage(module) {
+  // The log level and the frequency, beside the radio settings. Without a tree the carried image
+  // is written, so they are what it was built with and cannot be changed here.
+  function buildOptionFields(r, d, how, wrapChanged, field, onBoard) {
+    const build = how.way === 'build';
+    const off = build ? '' : ' disabled';
+    const log = build ? Number(d.log) : BUILT_LOG;
+    const mhz = build ? d.mhz : BUILT_MHZ;
+    const now = runs(r);
+    const from = now && now.t !== undefined ? 'at its last start' : 'last written';
+    const changed = optionChanges(r, d, how);
+    const level = '<select data-build="log" aria-label="Console log level"' + off + '>' + LOG_LEVELS.map((w, n) =>
+      '<option value="' + n + '"' + (n === log ? ' selected' : '') + '>' + n + ' ' + w + '</option>').join('') + '</select>';
+    const box = '<input type="text" inputmode="decimal" data-keep="build:mhz" data-build="mhz" value="' + esc(String(mhz)) + '"' +
+      ' placeholder="915.0" aria-label="Carrier frequency in MHz" size="8"' + off + '>';
+    const heard = [...new Set(tbeams().map((t) => t.mhz).filter(Boolean))];
+    const listen = heard.length ? ' The T-Beams listen on ' + heard.join(' and ') + ' MHz.' : ' No T-Beam has said its frequency.';
+    const carried = build ? '' : ' Compiled in: with no flight software tree here the carried image is written, at level ' + BUILT_LOG + ' on ' + BUILT_MHZ + ' MHz.';
+    return field('Console log level', wrapChanged(level, changed[0][3]),
+        'Lines above the level are not in the image. 3 is what to fly (V2_6_X_Code/README.md), 4 is what a build gets.' + carried,
+        now ? onBoard(now.log + ', ' + from, changed[0][3]) : '') +
+      field('Carrier frequency, MHz', wrapChanged(box, changed[1][3]),
+        '902.0 to 928.0, the US band, in 0.1 MHz steps.' + listen + carried,
+        now && now.mhz ? onBoard(now.mhz + ' MHz, ' + from, changed[1][3]) : '');
+  }
+
+  // The Write step's rows for the two, against what the board runs
+  function optionChanges(r, d, how) {
+    const now = runs(r);
+    const log = how.way === 'build' ? Number(d.log) : BUILT_LOG;
+    const mhz = how.way === 'build' ? String(d.mhz).trim() : BUILT_MHZ;
+    return [
+      ['Console log level', now ? String(now.log) : '', String(log), !!now && Number(now.log) !== log],
+      ['Carrier frequency', now && now.mhz ? now.mhz + ' MHz' : '', mhz + ' MHz', !!now && !!now.mhz && !mhzStop(mhz) && now.mhz !== mhzWords(mhz)],
+    ];
+  }
+
+  // What the board printed when it started after the last write, held against what was asked.
+  function readBack(r) {
+    const last = r.uid ? written(r.uid) : null;
+    if (!last) return '';
+    const asked = 'log level ' + last.log + ' on ' + last.mhz + ' MHz';
+    const head = 'Written ' + D.dayTime(new Date(last.at), new Date()) + ' at ' + asked + '.';
+    const said = bootSaid(r);
+    if (!said || said.t < last.at) {
+      return '<p class="outcome">' + esc(head + ' Its console has not printed a start line since' +
+        ((isBench(r) ? consoleFor(r) : watchedPort(r)) ? ', as far as this page has heard.' : ': choose its port in Console.')) + '</p>';
+    }
+    const board = 'log level ' + said.log + (said.mhz ? ' on ' + said.mhz + ' MHz' : ' and no frequency (its firmware does not print mhz=)');
+    if (said.log === Number(last.log) && said.mhz === last.mhz) return '<p class="outcome">' + esc(head + ' The board says the same at its start.') + '</p>';
+    return '<p class="outcome bad">' + esc(head + ' The board says ' + board + ' at its start, not ' + asked + '.') + '</p>';
+  }
+
+  // A board on a frequency no T-Beam listens on is heard by none of them. One button tells every
+  // T-Beam this board's frequency; nothing is sent without it.
+  function tbeamWarning(r) {
+    const now = runs(r);
+    if (!now || !now.mhz) return '';
+    const off = tbeams().filter((t) => t.mhz && t.mhz !== now.mhz);
+    if (!off.length) return '';
+    return '<p class="outcome bad">' + esc(nameOf(r) + ' transmits on ' + now.mhz + ' MHz, and ' +
+      off.map((t) => t.name + ' listens on ' + t.mhz + ' MHz').join(', ') + ', so ' + (off.length === 1 ? 'it hears' : 'they hear') + ' nothing from it.') +
+      ' <button data-tbeamfreq="' + esc(now.mhz) + '">Set every T-Beam to ' + esc(now.mhz) + ' MHz</button></p>';
+  }
+
+  async function setTBeams(mhz) {
+    const all = tbeams();
+    const failed = (await Promise.all(all.map((t) => hub.setFreq(t.key, mhz).then(() => '', (err) => t.name + ' (' + (err.message || err) + ')')))).filter(Boolean);
+    toast(failed.length ? 'Could not ask ' + failed.join(', ') + ' for ' + mhz + ' MHz'
+      : 'Asked ' + (all.length === 1 ? all[0].name : 'all ' + all.length + ' T-Beams') + ' for ' + mhz + ' MHz. Their headers say when it is taken');
+    render();
+  }
+
+  // Each log level and frequency is its own image; the app's part is the one a build gets by default
+  function nextImage(module, d) {
     const f = state.fsw;
     if (!f || !f.tree || !module) return '';
     const p = (f.parts || []).find((x) => x.part === 'flight-' + module);
     if (!p) return '';
-    if (p.built) return 'The image is the ' + p.built.words + '.';
-    if (p.failed) return 'It did not build from these sources last time; it is tried again.';
+    const base = Number(d.log) === BUILT_LOG && !mhzStop(d.mhz) && mhzWords(d.mhz) === BUILT_MHZ;
+    const built = base ? p.built : (p.variants || []).find((v) => v.log === Number(d.log) && !mhzStop(d.mhz) && mhzWords(v.mhz) === mhzWords(d.mhz));
+    if (built) return 'The image is the ' + built.words + '.';
+    if (base && p.failed) return 'It did not build from these sources last time; it is tried again.';
     return 'It is built from ' + (f.source && f.source.words ? f.source.words.replace(/^from /, '') : 'the tree') + ' first, about 13 seconds.';
   }
 
@@ -842,19 +979,34 @@ async function buildAndFlash() {
   // The console port for this board, as last chosen for it, while that port is still here.
   // The drone's flight controller shows up as a serial port too (ArduPilot, USB 1209:5741), and
   // three pulls were pointed at it on one day. It is never a console: not offered, not kept.
+  // Nor is a port the app has heard say it is a T-Beam.
   const isFlightController = (b) => b.usb === '1209:5741';
+  const isTBeam = (b) => b.role === 'receiver';
+  const isStLink = (b) => b.usb === '0483:3754';
 
-  // Else the port that last printed the log format (benchpane.js hears every port), else any free one.
+  // Else the console that last said it is this board (its settings line at boot names the
+  // csid), else the ST-Link the board is on, else any ST-Link, else the port that last printed
+  // the log format (benchpane.js hears every port), else any free one.
   function consoleFor(r) {
-    const usable = (hub.boards || []).filter((b) => !isFlightController(b));
-    const ports = usable.map((b) => b.port);
+    const usable = (hub.boards || []).filter((b) => !isFlightController(b) && !isTBeam(b));
     const kept = store.get('dg-console-' + (r.uid || ANY));
-    if (kept && ports.includes(kept)) return kept;
-    const talking = A.benchPane ? A.benchPane.talking(usable) : '';
+    if (kept && usable.some((b) => b.port === kept)) return kept;
+    const csid = r.uid ? csidOf(r) : null;
+    const named = csid === null ? null : usable.find((b) => b.csid !== null && b.csid !== undefined && Number(b.csid) === csid);
+    if (named) return named.port;
+    const serial = r.probe && r.probe.serial ? String(r.probe.serial).toLowerCase() : '';
+    const probe = serial && usable.find((b) => isStLink(b) && String(b.serial || '').toLowerCase() === serial);
+    if (probe) return probe.port;
+    const stlinks = usable.filter(isStLink);
+    const talking = A.benchPane ? A.benchPane.talking(stlinks.length ? stlinks : usable) : '';
     if (talking) return talking;
+    if (stlinks.length) return stlinks[0].port;
     const free = usable.find((b) => b.state !== 'receiver');
     return free ? free.port : '';
   }
+
+  // Why a port that should be read is not, said where its console is chosen
+  const heldNote = (b) => (b && b.error ? '<p class="outcome bad inpane">' + esc(b.port + ': ' + b.error) + '</p>' : '');
 
   // The rate a pull or a clear reads this board at, as last chosen for it.
   function baudFor(r) {
@@ -862,13 +1014,15 @@ async function buildAndFlash() {
     return BAUDS.includes(kept) ? kept : BAUDS[0];
   }
 
-  // One chooser per sheet: in Sensor bench on a bench board, in Flight log otherwise.
+  // One chooser per sheet: in Sensor bench on a bench board, in Console otherwise.
   function consoleChooser(r, port) {
-    const boards = hub.boards || [];
+    const boards = (hub.boards || []).filter((b) => !isTBeam(b));
     if (!boards.length) return '<span class="note">No serial port. Plug in the board\'s console.</span>';
+    const gone = port && !boards.some((b) => b.port === port);
     return '<select data-console="' + esc(r.uid || ANY) + '" aria-label="Serial port of this board\'s console">' +
+      (gone ? '<option selected disabled>' + esc(port) + ', not plugged in</option>' : '') +
       boards.map((b) => '<option value="' + esc(b.port) + '"' + (b.port === port ? ' selected' : '') + (isFlightController(b) ? ' disabled' : '') + '>' +
-        esc((b.name || b.port) + (isFlightController(b) ? ', the drone\'s flight controller' : b.state === 'receiver' ? ', being read as a receiver' : '')) + '</option>').join('') + '</select>';
+        esc((b.name || b.port) + (isFlightController(b) ? ', the drone\'s flight controller' : '')) + '</option>').join('') + '</select>';
   }
 
   // What the app last found on the board decides the layout. The console only agrees or not.
@@ -891,7 +1045,7 @@ async function buildAndFlash() {
   function benchCard(r) {
     const port = consoleFor(r);
     const b = (hub.boards || []).find((x) => x.port === port);
-    const reading = !!b && b.state === 'receiver';
+    const reading = !!b && b.state === 'receiver' && !b.error;
     const s = A.benchPane ? A.benchPane.sessionOn(port) : null;
     const source = r.onProbe && !state.stale ? 'running it, read off the board now'
       : s && s.bench ? 'the console says test=bench' : 'on it when last read';
@@ -899,14 +1053,37 @@ async function buildAndFlash() {
     return '<div class="pane bench"><h3>Sensor bench<span class="note">' + esc(source) + '</span></h3>' + consoleDisagrees(r) +
       '<div class="rows kvrows">' +
         '<div><span class="l">Console port</span>' + consoleChooser(r, port) +
-          (port && !reading ? '<button data-listen="' + esc(port) + '">Read this port</button>' : '') + (reading ? mark('good', 'being read') : '') + '</div>' +
+          (port && !reading && !(b && b.error) ? '<button data-listen="' + esc(port) + '">Read this port</button>' : '') + (reading ? mark('good', 'being read') : '') + '</div>' +
         '<div><span class="l">On the console</span><button data-radio="' + esc(port) + '"' + (reading ? '' : ' disabled') + '>Radio on/off</button>' +
           '<button data-clear="1">Clear this record</button>' + (reading ? '' : '<span class="note">Radio on/off needs the port read.</span>') + '</div>' +
         '<div><span class="l">Flight software</span><button data-buildembed="1"' + buildOff + '>Write flight software</button>' +
           '<span class="note">' + esc(stop || summary + '. Change it in Identity and radio below.') + '</span></div>' +
-      '</div>' +
+      '</div>' + heldNote(b) +
       (state.buildError ? '<p class="outcome bad inpane">' + esc(state.buildError) + '</p>' : '') +
       '<div id="cs-bench" class="benchlive"></div></div>';
+  }
+
+  // The console port chosen for a board stays its port while unplugged, so the Console card can
+  // say it has gone and pick its lines up again when it comes back under the same name.
+  // A kept port that has since said it is a T-Beam is not this board's.
+  function watchedPort(r) {
+    const kept = store.get('dg-console-' + r.uid);
+    const now = kept && (hub.boards || []).find((b) => b.port === kept);
+    return kept && !(now && isTBeam(now)) ? kept : consoleFor(r);
+  }
+
+  // The board's console as it arrived, for a board not on the bench. The lines are benchpane.js's,
+  // painted into #cs-console on its own timer.
+  function consoleCard(r) {
+    const port = watchedPort(r);
+    const b = (hub.boards || []).find((x) => x.port === port);
+    const reading = !!b && b.state === 'receiver' && !b.error;
+    return '<div class="pane console"><h3>Console</h3>' +
+      (port && !b ? '<p class="outcome bad inpane">' + esc(port) + ' is not plugged in. Lines from before it went are below; ' +
+        'they carry on if it comes back under the same name.</p>' : '') +
+      '<div class="rows kvrows"><div><span class="l">Port</span>' + consoleChooser(r, port) +
+        (b && !reading && !b.error ? '<button data-listen="' + esc(port) + '">Read this port</button>' : '') + (reading ? mark('good', 'being read') : '') + '</div></div>' +
+      heldNote(b) + '<div id="cs-console" class="benchlive"></div></div>';
   }
 
   // Panes a bench board has no use for until flight software goes back on. Open or shut is
@@ -939,7 +1116,8 @@ async function buildAndFlash() {
 
     const bench = isBench(r);
     const chooser = bench ? '<span class="val">' + esc(port || 'none') + '</span><span class="note">chosen in Sensor bench</span>'
-      : consoleChooser(r, port) + (boards.length ? '<span class="note">The board\'s serial console.</span>' : '');
+      : r.uid ? '<span class="val">' + esc(port || 'none') + '</span><span class="note">chosen in Console</span>'
+        : consoleChooser(r, port) + (boards.length ? '<span class="note">The board\'s serial console.</span>' : '');
     const offProbe = !(r.onProbe || r.id === ANY);
     const pullNote = offProbe ? 'Put the board on the ST-Link and press Read the board first.'
       : state.keepFsw ? 'Flashes the board twice. Takes minutes.' : 'Flashes the dump firmware. Takes minutes.';
@@ -1020,7 +1198,7 @@ async function buildAndFlash() {
           'These are what the next flight write uses.</span>', stepsHtml(r)) +
         fold('log', r, '<b>Flight logs</b><span class="note">Pull or clear the chip.</span>', logsCard(r));
     }
-    return headPane(r) + nowCard(r) + stepsHtml(r) + '<div class="cs-lower">' + logsCard(r) + imagesCard(r) + '</div>';
+    return headPane(r) + nowCard(r) + consoleCard(r) + stepsHtml(r) + '<div class="cs-lower">' + logsCard(r) + imagesCard(r) + '</div>';
   }
 
   function render() {
@@ -1036,7 +1214,8 @@ async function buildAndFlash() {
     paint($('cs-list'), listHtml());
     paint($('cs-sheet'), sheetHtml());
     const r = all.find((x) => x.id === state.sel);
-    if (A.benchPane) A.benchPane.show(r && r.uid && !r.unread && isBench(r) ? r : null, r ? consoleFor(r) : '');
+    if (A.benchPane && r && r.uid && !r.unread) A.benchPane.show(r, isBench(r) ? consoleFor(r) : watchedPort(r), isBench(r));
+    else if (A.benchPane) A.benchPane.show(null, '');
   }
 
   // ---------- doing things ----------
@@ -1178,6 +1357,8 @@ async function pull(anyConsole, baud) {
     const r = rows().find((x) => x.id === state.sel);
 
     if (at('data-read')) { read(at('data-read')); return; }
+    // benchpane.js reads the port; kept as this board's, so the card can say when it goes
+    if (at('data-listen') && r && r.uid) { store.set('dg-console-' + r.uid, at('data-listen')); return; }
     // All n opens in place
     if (at('data-allpulls')) {
       const key = 'pulls:' + (r ? r.uid : '');
@@ -1207,6 +1388,9 @@ async function pull(anyConsole, baud) {
       state.pick = null;
     } else if (at('data-buildembed')) {
       buildAndFlash();
+      return;
+    } else if (at('data-tbeamfreq')) {
+      setTBeams(at('data-tbeamfreq'));
       return;
     } else if (at('data-closejob')) {
       store.set('dg-closed-job', at('data-closejob'));
@@ -1291,9 +1475,10 @@ async function pull(anyConsole, baud) {
       const key = t.getAttribute('data-build');
       state.build[key] = !!t.checked;
       // Switching the battery on must not change logging until a box is edited, so the log
-      // bands start at the gap in use. Transmit keeps its table: those numbers are in view
+      // bands start at the gap in use. Transmit keeps its table: those numbers are in view, and
+      // on the ground they are the ground rate
       const phase = t.checked && key.match(/^p(\d)f$/);
-      if (phase) {
+      if (phase && Number(phase[1]) !== B.GROUND) {
         for (let k = 0; k < B.BANDS; k++) state.build['p' + phase[1] + 'lms' + k] = state.build['p' + phase[1] + 'l'];
       }
       state.buildError = '';
@@ -1362,7 +1547,10 @@ async function pull(anyConsole, baud) {
       if (kind === 'pull') {
         state.stale = 'pull';
       } else {
-        if (!j.error && state.sent && state.sent.uid === j.uid) remember(j.uid, state.sent.draft);
+        if (!j.error && state.sent && state.sent.uid === j.uid) {
+          remember(j.uid, state.sent.draft);
+          store.set(writtenKey(j.uid), JSON.stringify(state.sent.written));
+        }
         state.sent = null;
         // The job reads the board again once it has written it, and that read is the
         // sheet's, also when its settings came back different. Without it nobody knows

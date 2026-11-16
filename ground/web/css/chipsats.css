@@ -118,8 +118,8 @@
 #screen-chipsats .opts { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; font-size: 13px; }
 #screen-chipsats .opts .l, #screen-chipsats .says .l { min-width: 96px; color: var(--color-text-70); }
 #screen-chipsats .says { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; font-size: 12.5px; }
-#screen-chipsats .logs .inpane, #screen-chipsats .images .inpane, #screen-chipsats .bench .inpane { margin-inline: 0; }
-#screen-chipsats .logs .rows > div, #screen-chipsats .images .rows > div, #screen-chipsats .bench .rows > div { padding: 8px 0; }
+#screen-chipsats .logs .inpane, #screen-chipsats .images .inpane, #screen-chipsats .bench .inpane, #screen-chipsats .console .inpane { margin-inline: 0; }
+#screen-chipsats .logs .rows > div, #screen-chipsats .images .rows > div, #screen-chipsats .bench .rows > div, #screen-chipsats .console .rows > div { padding: 8px 0; }
 #screen-chipsats .logs .rows.pulls { border-top: 1px solid var(--color-neutral-200); }
 #screen-chipsats .logs .confirm, #screen-chipsats .images .confirm, #screen-chipsats .bench .confirm { margin: 0; }
 /* the row's buttons sit after the label on one line; the pull's two notes follow */
@@ -134,8 +134,8 @@
 #screen-chipsats .images .rows .val { font-size: 13px; }
 
 /* ---------- the sensor bench, first on a bench board ---------- */
-#screen-chipsats .pane.bench { padding: 18px 22px; gap: 10px; border-radius: var(--radius-lg); }
-#screen-chipsats .pane.bench > h3 { padding: 0; }
+#screen-chipsats .pane.bench, #screen-chipsats .pane.console { padding: 18px 22px; gap: 10px; border-radius: var(--radius-lg); }
+#screen-chipsats .pane.bench > h3, #screen-chipsats .pane.console > h3 { padding: 0; }
 #screen-chipsats .benchlive .card { padding: 0; background: var(--color-surface); overflow: hidden; }
 #screen-chipsats .benchlive .card h3 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; padding: 12px 16px 6px; font: var(--font-heading-weight) 16px/1.3 var(--font-heading); }
 #screen-chipsats .benchlive .card .line, #screen-chipsats .benchlive .card .boot { padding: 6px 16px; }
@@ -154,7 +154,7 @@
 
 @media (max-width: 700px) {
   #screen-chipsats .sheet-head, #screen-chipsats .pane.logs { padding: 14px 16px; }
-  #screen-chipsats .pane.step, #screen-chipsats .pane.bench { padding: 18px 16px; }
+  #screen-chipsats .pane.step, #screen-chipsats .pane.bench, #screen-chipsats .pane.console { padding: 18px 16px; }
   #screen-chipsats .form { grid-template-columns: minmax(0, 96px) minmax(0, 1fr); }
   #screen-chipsats .sheet-head .acts, #screen-chipsats .logs-top .acts { margin-left: 0; }
   #screen-chipsats input.nameit { font-size: 20px; min-height: 40px; }

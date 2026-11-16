@@ -11,14 +11,15 @@ const CS9 = { uid: UID9, name: 'CS9', module: 'le', lastSeen: 1, firmware: 'dump
 const CS12 = { uid: UID12, name: 'CS12', module: 'le', lastSeen: 2, firmware: 'flight', firmwareModule: 'le' };
 const RATE = (fixedMs, more) => Object.assign({ fixedMs, follow: false, percent: [75, 50, 35, 20], intervalMs: [10000, 30000, 60000, 120000, 180000] }, more || {});
 const FLAT = (ms, more) => RATE(ms, Object.assign({ intervalMs: [ms, ms, ms, ms, ms] }, more || {}));
-const block = (o) => Object.assign({ layoutVersion: 4, csid: 9, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, transmit: [RATE(60000), RATE(10000)], log: [FLAT(1000), FLAT(50)], olderSlots: [], reservedClear: true }, o);
-// untouched defaults with no block on the board, ground logs every 10 s
-// the fixture block's rates as the app is asked for them (slots: ground tx, air tx, ground log, air log)
+// the ground's two slots one ground rate, as the page writes them since 2026-11-16
+const block = (o) => Object.assign({ layoutVersion: 4, csid: 9, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, transmit: [RATE(60000), RATE(10000)], log: [FLAT(60000), FLAT(50)], olderSlots: [], reservedClear: true }, o);
+// the fixture block's rates as the app is asked for them (slots: ground tx, air tx, ground log, air
+// log): the ground rate, its table too, in both ground slots
 const BLOCK_RATES = { layout: 4 };
-[60000, 10000, 1000, 50].forEach((fixed, i) => {
+[60000, 10000, 60000, 50].forEach((fixed, i) => {
   BLOCK_RATES['fixed' + i] = String(fixed); BLOCK_RATES['follow' + i] = '0';
   BLOCK_RATES['soc' + i] = '75,50,35,20';
-  BLOCK_RATES['socms' + i] = i < 2 ? '10000,30000,60000,120000,180000' : Array(5).fill(fixed).join(',');
+  BLOCK_RATES['socms' + i] = i < 3 ? '10000,30000,60000,120000,180000' : Array(5).fill(fixed).join(',');
 });
 const readOf = (uid, firmware, settings) => ({ ok: true, uid, flashBytes: 262144, firmware, settings, settingsError: null, probe: PROBE });
 const DUMP = readOf(UID9, { kind: 'dump', current: true, id: '25118bdfafab456c' }, null);
@@ -33,11 +34,13 @@ const KEPT = () => ({ ['dg-draft-' + UID9]: JSON.stringify(REMEMBERED) });
 const FLIGHT = readOf(UID9, { kind: 'flight', module: 'le', id: 'c4fb204d8f79e725' }, block());
 
 // The screen with a fake app behind it. o.read is what a read answers, o.under what
-// answers the id check (the board that was read, unless a test says otherwise).
+// answers the id check (the board that was read, unless a test says otherwise). o.console loads
+// the console's own scripts, so lines said on a port reach the sheet as they do in the app.
 async function chipsats(o) {
   o = Object.assign({ screen: 'chipsats', chips: [CS9], probes: [PROBE], read: DUMP, logs: [], reads: 0, peeks: 0 }, o);
   const hub = {
-    native: true, ports: [], boards: o.boards || [],
+    native: true, ports: o.ports || [], boards: o.boards || [],
+    setFreq: async (key, mhz) => { (o.freqs = o.freqs || []).push([key, mhz]); },
     chips: async () => o.chips, chipProbes: async () => o.probes, logs: async () => o.logs, radio: async () => null,
     health: async () => o.health || null,
     chipRead: async () => { o.reads++; if (o.readFails) throw new Error('no board answered'); return o.read; },
@@ -52,11 +55,13 @@ async function chipsats(o) {
     hub.health = async () => { o.healths = (o.healths || 0) + 1; return o.health || null; };
     hub.radio = async () => { o.radios = (o.radios || 0) + 1; return null; };
   }
-  const p = page(['boardmodel.js', 'datamodel.js', 'chipsats.js'], hub, o);
+  const scripts = o.console ? ['bench.js', 'boardmodel.js', 'datamodel.js', 'chipsats.js', 'benchpane.js'] : ['boardmodel.js', 'datamodel.js', 'chipsats.js'];
+  const p = page(scripts, hub, o);
   await p.settle();
   p.parts.chipsats.show();
   await p.settle();
-  return Object.assign(p, { o, sheet: () => p.html('cs-sheet'), list: () => p.html('cs-list'), words: () => tidy(p.text('cs-sheet')) });
+  const say = (key, lines) => lines.forEach((l) => p.taps.forEach((tap) => tap(key, l, Date.now())));
+  return Object.assign(p, { o, say, sheet: () => p.html('cs-sheet'), list: () => p.html('cs-list'), words: () => tidy(p.text('cs-sheet')) });
 }
 // text() spaces out every tag, so "<b>CS9</b>." reads "CS9 ."
 const tidy = (t) => t.replace(/ ([,.;:?!)])/g, '$1');
@@ -78,11 +83,12 @@ test('a value on the board is struck through only when the build would replace i
   assert.deepStrictEqual(struck(p.sheet()), [['SF7', 2]]);
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1s' }, { tagName: 'INPUT', value: '0.5' });
   assert.deepStrictEqual(struck(p.sheet()), [['SF7', 2], ['10 s', 2]]);
-  // The log gap is its own box, in the same row.
+  // The air's log gap is its own box, in the same row.
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1l' }, { tagName: 'INPUT', value: '0.1' });
   assert.match(p.sheet(), /data-build="p1l" value="0.1"/);
-  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0l' }, { tagName: 'INPUT', value: '10' });
-  assert.deepStrictEqual(struck(p.sheet()), [['SF7', 2], ['1 s', 2], ['0.05 s', 2], ['10 s', 2]]);
+  // The ground rate is one box, its one value on the board struck once beside it.
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0s' }, { tagName: 'INPUT', value: '30' });
+  assert.deepStrictEqual(struck(p.sheet()), [['SF7', 2], ['60 s', 2], ['0.05 s', 2], ['10 s', 2]]);
 });
 
 // 2026-10-31: a one-press write put 255, SF7 and 14 dBm on a real board, because a board on the
@@ -93,30 +99,32 @@ test('a board with no settings block and nothing remembered starts with every bo
   const h = p.sheet();
   assert.match(h, /The dump firmware has no radio settings\./);
   assert.match(h, /data-build="csid" value=""/);
-  for (const k of ['p0s', 'p0l', 'p1s', 'p1l']) assert.match(h, new RegExp('data-build="' + k + '" value=""'), k);
+  for (const k of ['p0s', 'p1s', 'p1l']) assert.match(h, new RegExp('data-build="' + k + '" value=""'), k);
+  assert.doesNotMatch(h, /data-build="p0l/, 'the ground has one rate, no log box');
   assert.doesNotMatch(h, /value="7" selected|value="14" selected/, 'nothing picked');
   assert.match(h, /<select data-build="sf"><option value="" selected disabled hidden>—<\/option>/);
   assert.match(h, /data-buildembed="1"[^>]*disabled/);
-  assert.match(p.words(), /Fill in the board id, the spreading factor, the transmit power and 4 boxes in Phases first\./);
+  assert.match(p.words(), /Fill in the board id, the spreading factor, the transmit power and 3 boxes in Phases first\./);
   assert.match(p.words(), /Build with board —, LE, SF—, — dBm/);
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   assert.equal(p.o.flashed, undefined, 'nothing goes to the board');
   await p.fire('screen-chipsats', 'input', { 'data-build': 'csid' }, { tagName: 'INPUT', value: '9' });
   await p.fire('screen-chipsats', 'change', { 'data-build': 'sf' }, { tagName: 'SELECT', value: '7' });
   await p.fire('screen-chipsats', 'change', { 'data-build': 'dbm' }, { tagName: 'SELECT', value: '14' });
-  assert.match(p.words(), /Fill in 4 boxes in Phases first\./);
-  for (const [k, v] of [['p0s', '60'], ['p0l', '1'], ['p1s', '10']]) await p.fire('screen-chipsats', 'input', { 'data-build': k }, { tagName: 'INPUT', value: v });
+  assert.match(p.words(), /Fill in 3 boxes in Phases first\./);
+  for (const [k, v] of [['p0s', '60'], ['p1s', '10']]) await p.fire('screen-chipsats', 'input', { 'data-build': k }, { tagName: 'INPUT', value: v });
   assert.match(p.words(), /Fill in 1 box in Phases first\./);
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1l' }, { tagName: 'INPUT', value: '0.05' });
   assert.match(p.sheet(), /data-buildembed="1"(?![^>]*disabled)[^>]*>/);
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   const f = p.o.flashed;
   assert.equal(f.csid, '9'); assert.equal(f.sf, 7); assert.equal(f.dbm, 14);
-  assert.deepStrictEqual([f.fixed0, f.fixed1, f.fixed2, f.fixed3], ['60000', '10000', '1000', '50']);
+  assert.deepStrictEqual([f.fixed0, f.fixed1, f.fixed2, f.fixed3], ['60000', '10000', '60000', '50']);
   assert.doesNotMatch(JSON.stringify(f), /NaN|null/, 'no blank became a number');
   // the switch is off: the band table the app insists on is the typed gap in every band, and the
   // firmware's own thresholds, which it does not read while the switch is off
   assert.equal(f.socms0, '60000,60000,60000,60000,60000');
+  assert.equal(f.socms2, f.socms0, 'the ground rate in both ground slots');
   assert.equal(f.socms3, '50,50,50,50,50');
   assert.equal(f.soc0, '75,50,35,20');
 });
@@ -166,27 +174,32 @@ test('a flash that ends well remembers the draft it wrote, a flash that fails do
   assert.equal(kept.csid, '21'); assert.equal(kept.sf, 11); assert.equal(kept.p0s, '60');
 });
 
-test('each phase has one table: a switch and thresholds for both columns, a log and a transmit box per row', async () => {
+test('each phase has one table: the ground one ground rate, the air a log and a transmit box per row, a switch and thresholds for both', async () => {
   const p = await chipsats({ read: FLIGHT, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
   let h = p.sheet();
   assert.match(p.words(), /\bPhases\b/);
   assert.equal((h.match(/data-build="p\ds"/g) || []).length, 2, 'two phases, ground and air');
   assert.match(p.words(), /\bGround\b.*\bAir\b/);
-  assert.doesNotMatch(h, /Falling|Landed|Waiting/);
+  assert.doesNotMatch(h, /<\/span>(Falling|Landed|Waiting)<\/div>/, 'no phase of the old names');
   assert.match(h, /data-build="p0s" value="60"/);
   assert.match(h, /data-build="p1s" value="10"/);
   assert.doesNotMatch(h, /data-build="p2/);
-  assert.match(h, /data-build="p0l" value="1"/);
+  assert.doesNotMatch(h, /data-build="p0l/, 'no ground log box');
   assert.match(h, /data-build="p1l" value="0.05"/);
   assert.doesNotMatch(h, /No altitude source|blind|data-build="lb"/);
   assert.match(h, /30 m on GPS/);
-  assert.doesNotMatch(h, /writes nothing/);
-  assert.equal((h.match(/0 is every reading \(20 Hz\)/g) || []).length, 2, 'the same words under both phases');
-  assert.match(h, /On the ground the readings mostly stay in the board's RAM, and only one per ground log gap reaches flash\./);
+  assert.doesNotMatch(h, /writes nothing|half the climb|transmitting at the ground rate/);
+  assert.match(h, /The gap after a packet, and between records kept on the chip\. 0 is back to back and every reading \(20 Hz\)\./);
+  assert.equal((h.match(/0 is every reading \(20 Hz\)/g) || []).length, 1, 'the air says its log words');
+  assert.match(h, /On the ground the readings mostly stay in the board's RAM, and only one per ground rate reaches flash\./);
   assert.match(h, /the air's battery bands apply only while the board logs as air/);
-  assert.equal((h.match(/Set by battery level \(changes both columns\)/g) || []).length, 2, 'a switch per phase');
+  assert.match(h, /Landed with a fix held it sleeps and wakes once a ground rate/);
+  assert.match(h, /After a reset it logs and transmits at the air's rates until it has been still 30 s, 5 min at most\./);
+  assert.equal((h.match(/Set by battery level \(changes both columns\)/g) || []).length, 1, 'the air switch covers two columns');
+  assert.equal((h.match(/Set by battery level<\/label>/g) || []).length, 1, 'the ground switch one');
   assert.equal((h.match(/>Always</g) || []).length, 2, 'off, one row for each');
   assert.doesNotMatch(h, /Gauge unread<|data-build="p\dsoc0"|data-build="p\dlms0"/, 'no bands while nothing follows');
+  assert.match(p.words(), /Battery Ground rate On the board Always s 60 s The gap after a packet/, 'one value on the board, the two slots agreeing');
   assert.match(p.words(), /Battery Log every Transmit every On the board Always/);
   assert.deepStrictEqual(struck(h), []);
   // Ground on the battery: its bands appear, the air's do not, five rows and the gauge unread.
@@ -195,28 +208,24 @@ test('each phase has one table: a switch and thresholds for both columns, a log 
   assert.doesNotMatch(h, /data-build="p1soc0"/, 'only the ground has bands');
   assert.match(h, /data-build="p0soc0" value="75"/);
   assert.match(h, /data-build="p0ms4" value="180"/);
-  assert.match(h, /data-build="p0lms4" value="1"/);
+  assert.doesNotMatch(h, /data-build="p0lms/);
   assert.match(p.words(), /Above[^]*To[^]*To[^]*To[^]*Below 20 %[^]*Gauge unread/);
   assert.equal((h.match(/>Always</g) || []).length, 1);
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p0soc1' }, { tagName: 'INPUT', value: '60' });
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p0ms4' }, { tagName: 'INPUT', value: '300' });
-  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0lms4' }, { tagName: 'INPUT', value: '20' });
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1s' }, { tagName: 'INPUT', value: '5' });
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1l' }, { tagName: 'INPUT', value: '0' });
-  h = p.sheet();
   // the rates are the tables' and the Write step's rows, not a sentence of their own since 2026-10-31
   await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
   const f = p.o.flashed;
   assert.equal(f.layout, 4);
-  // ground transmit, then ground log: one flag and one set of thresholds, each its own gaps
+  // ground transmit and ground log: the one ground rate, its switch, thresholds and table, in both
   for (const i of [0, 2]) {
     assert.equal(f['follow' + i], '1');
     assert.equal(f['soc' + i], '75,60,35,20');
+    assert.equal(f['fixed' + i], '60000');
+    assert.equal(f['socms' + i], '10000,30000,60000,120000,300000');
   }
-  assert.equal(f.fixed0, '60000');
-  assert.equal(f.socms0, '10000,30000,60000,120000,300000');
-  assert.equal(f.fixed2, '1000');
-  assert.equal(f.socms2, '1000,1000,1000,1000,20000');
   for (const i of [1, 3]) {
     assert.equal(f['follow' + i], '0');
     assert.equal(f['soc' + i], '75,50,35,20');
@@ -247,29 +256,39 @@ test('the write step lists what changes row by row, and beside a 0 the box says 
   await p.fire('screen-chipsats', 'change', { 'data-build': 'p1f' }, { tagName: 'INPUT', type: 'checkbox', checked: true });
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1lms4' }, { tagName: 'INPUT', value: '5' });
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1lms0' }, { tagName: 'INPUT', value: '0' });
-  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0l' }, { tagName: 'INPUT', value: '0' });
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0s' }, { tagName: 'INPUT', value: '0' });
   const w = p.words();
   assert.match(w, /Air, below 20 %, log 0\.05 s → 5 s/);
   assert.match(w, /Air, above 75 %, log 0\.05 s → every reading/);
   assert.match(w, /Air, log by battery level off → on/);
   assert.match(w, /Air, transmit by battery level off → on/);
   assert.match(w, /Air, to 50 %, transmit 10 s → 30 s/);
-  assert.match(w, /Ground, always, log 1 s → every reading/);
+  assert.match(w, /Ground, always, ground rate 60 s → back to back, every reading/);
   assert.doesNotMatch(w, /Air, to 50 %, log/, 'a row that gives the same gap is not a change');
-  assert.match(p.sheet(), /<span class="zero">every reading<\/span>/);
-  assert.equal((p.sheet().match(/<span class="zero">every reading<\/span>/g) || []).length, 2, 'ground and air both say every reading');
+  assert.equal((p.sheet().match(/<span class="zero">every reading<\/span>/g) || []).length, 1, 'the air log says every reading');
+  // A ground rate of 0 is allowed, and the box says what it costs.
+  assert.match(p.sheet(), /<span class="zero">back to back, every reading \(20 Hz\):<\/span><span class="zero">the chip is full in about half an hour<\/span>/);
+  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
+  assert.deepStrictEqual([p.o.flashed.fixed0, p.o.flashed.fixed2], ['0', '0']);
   // A band threshold moved is one change, the page writes it to both columns.
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1soc3' }, { tagName: 'INPUT', value: '25' });
   assert.equal((p.words().match(/Air, threshold 4 20 % → 25 %/g) || []).length, 1);
 });
 
 test('a board whose log and transmit columns differ is told so and nothing more', async () => {
-  const apart = block({ log: [FLAT(1000, { follow: true }), FLAT(50, { percent: [70, 55, 30, 10] })] });
-  const p = await chipsats({ read: readOf(UID9, { kind: 'flight', module: 'le', id: 'c4fb204d8f79e725' }, apart),
-    chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  const chips = [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })];
+  const sheetFor = (settings) => chipsats({ read: readOf(UID9, { kind: 'flight', module: 'le', id: 'c4fb204d8f79e725' }, settings), chips });
+  let p = await sheetFor(block({ log: [FLAT(60000), FLAT(50, { follow: true })] }));
+  assert.match(p.words(), /On the board the log follows the battery and transmit does not\./);
+  p = await sheetFor(block({ log: [FLAT(60000), FLAT(50, { percent: [70, 55, 30, 10] })] }));
+  assert.match(p.words(), /On the board the thresholds differ: log 70, 55, 30, 10 %, transmit 75, 50, 35, 20 %\./);
+  // A ground written before the ground rate was one number: both values, and that they differ.
+  p = await sheetFor(block({ log: [FLAT(1000), FLAT(50)] }));
   const w = p.words();
-  assert.match(w, /On the board the log follows the battery and transmit does not\./);
-  assert.match(w, /On the board the thresholds differ: log 70, 55, 30, 10 %, transmit 75, 50, 35, 20 %\./);
+  assert.match(w, /Battery Ground rate On the board Always s transmit 60 s log 1 s/);
+  assert.match(w, /On the board the ground's transmit and log rates differ\. A write sets both to the ground rate\./);
+  assert.match(w, /Ground, always, log 1 s → 60 s/);
+  assert.doesNotMatch(w, /Ground, always, transmit/);
 });
 
 test('a board on firmware from before the two phases shows its other slots and is replaced in both', async () => {
@@ -289,8 +308,8 @@ test('a board from before the phases has empty rate boxes, and the write says so
   const h = p.sheet();
   assert.match(h, /data-build="csid" value="9"/, 'what the block has is used');
   assert.match(h, /data-build="p0s" value=""/, 'what it has not is empty, never a default');
-  assert.match(h, /data-build="p0l" value=""/);
-  assert.match(p.words(), /Fill in 4 boxes in Phases first\./);
+  assert.match(h, /data-build="p1l" value=""/);
+  assert.match(p.words(), /Fill in 3 boxes in Phases first\./);
 });
 
 test('a layout 2 block has transmit rates and no log gaps, and the write gives it them', async () => {
@@ -298,10 +317,10 @@ test('a layout 2 block has transmit rates and no log gaps, and the write gives i
     chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
   assert.match(p.sheet(), /data-build="p1s" value="10"/, 'its own transmit gap');
   assert.match(p.sheet(), /data-build="p1l" value=""/, 'and no log gap until one is typed');
-  assert.match(p.words(), /Fill in 2 boxes in Phases first\./);
-  await p.fire('screen-chipsats', 'input', { 'data-build': 'p0l' }, { tagName: 'INPUT', value: '1' });
+  assert.match(p.words(), /Fill in 1 box in Phases first\./);
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1l' }, { tagName: 'INPUT', value: '0.05' });
   assert.match(p.words(), /Air, log no log gaps → every 0\.05 s/);
+  assert.match(p.words(), /Ground, log no log gaps → every 60 s/, 'the ground rate goes in its log slot');
 });
 
 test("the drone's flight controller is never offered as a console", async () => {
@@ -314,6 +333,40 @@ test("the drone's flight controller is never offered as a console", async () => 
   const h = p.sheet();
   assert.match(h, /<option value="\/dev\/ttyACM0" disabled>\/dev\/ttyACM0, the drone's flight controller<\/option>/);
   assert.match(h, /<option value="\/dev\/ttyUSB0" selected>\/dev\/ttyUSB0<\/option>/, 'the CH340 is picked although it is second');
+});
+
+// 2026-11-16: the console card had the T-Beams to choose from, and the ST-Link's port was
+// open in the other copy of the app as a receiver
+test('a T-Beam is never offered as a console, and the board picks the console that named it', async () => {
+  const boards = [
+    { port: '/dev/ttyACM0', usb: '1a86:55d4', label: 'CH9102', serial: '58A1', key: 'a', state: 'receiver', name: '', role: 'receiver', csid: null },
+    { port: '/dev/ttyUSB0', usb: '10c4:ea60', label: 'CP2102', serial: '0001', key: 'b', state: 'receiver', name: 'Mast', role: 'receiver', csid: null },
+    { port: '/dev/ttyACM2', usb: '0483:3754', label: 'ST-Link', serial: '003A00', key: 'c', state: 'receiver', name: '', role: 'console', csid: 12 },
+    { port: '/dev/ttyACM3', usb: '0483:3754', label: 'ST-Link', serial: '004B00', key: 'd', state: 'receiver', name: '', role: 'console', csid: 9 },
+  ];
+  const p = await chipsats({ read: FLIGHT, boards, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  const h = p.sheet();
+  assert.doesNotMatch(h, /<option value="\/dev\/ttyACM0"|<option value="\/dev\/ttyUSB0"/);
+  assert.match(h, /<option value="\/dev\/ttyACM3" selected>/, 'CS9 said so on ttyACM3');
+
+  // nobody has said: the ST-Link the board is on, by the probe's serial
+  const quiet = boards.map((b) => Object.assign({}, b, { csid: null }));
+  quiet[2] = Object.assign({}, quiet[2], { serial: PROBE.serial });
+  const q = await chipsats({ read: FLIGHT, boards: quiet, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  assert.match(q.sheet(), /<option value="\/dev\/ttyACM2" selected>/);
+
+  // a choice kept from another day on a port that is now a T-Beam is not this board's
+  const kept = await chipsats({ read: FLIGHT, boards, storage: { ['dg-console-' + UID9]: '/dev/ttyUSB0' },
+    chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  assert.match(kept.sheet(), /<option value="\/dev\/ttyACM3" selected>/);
+});
+
+test('a console another program holds says so', async () => {
+  const boards = [{ port: '/dev/ttyACM2', usb: '0483:3754', label: 'ST-Link', serial: '003A00', key: 'c', state: 'receiver', name: '', role: 'console',
+    csid: null, error: 'held by another program, perhaps the other copy of this app' }];
+  const p = await chipsats({ read: FLIGHT, boards, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  assert.match(p.words(), /\/dev\/ttyACM2: held by another program, perhaps the other copy of this app/);
+  assert.doesNotMatch(p.sheet(), /being read/);
 });
 
 test('how a flash ended stays on screen until it is dismissed, on any screen', async () => {
@@ -744,6 +797,18 @@ test('a board running an image built here is named by where it came from, and so
   assert.equal(p.o.flashed.embedded, 'built');
 });
 
+test('another log level or frequency names its own image built here, or says it is built first', async () => {
+  const quiet = { part: 'flight-le', words: 'flight LE at log level 3 on 903.5 MHz built here 14:05 from abc1234', log: 3, mhz: 903.5 };
+  const fsw = FSW();
+  fsw.parts[0].variants = [quiet];
+  const p = await chipsats({ read: FLIGHT, fsw, health: HEALTH_ON, chips: [Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' })] });
+  assert.match(p.words(), /The image is the flight LE built here 14:02/);
+  await p.fire('screen-chipsats', 'change', { 'data-build': 'log' }, { tagName: 'SELECT', value: '3' });
+  assert.match(p.words(), /It is built from abc1234 \+ config\.h changed first, about 13 seconds\./, 'level 3 at 915.0 is not built yet');
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'mhz' }, { tagName: 'INPUT', value: '903.5' });
+  assert.match(p.words(), /The image is the flight LE at log level 3 on 903\.5 MHz built here 14:05 from abc1234\./);
+});
+
 test('an HP image not built yet says it is built from the tree first', async () => {
   const p = await chipsats({ fsw: FSW(), health: HEALTH_ON, chips: [Object.assign({}, CS9, { module: 'hp' })] });
   assert.match(p.sheet(), /It is built from abc1234 \+ config.h changed first, about 13 seconds./);
@@ -807,7 +872,7 @@ test('settings changed from the board are rows in Write, the board\'s value stru
   await p.fire('screen-chipsats', 'input', { 'data-build': 'p1l' }, { tagName: 'INPUT', value: '0.1' });
   assert.match(p.words(), /2 changes from the board Spreading factor SF7 → SF9 Air, always, log 0\.05 s → 0\.1 s/);
   // what it writes in full, by the way it writes
-  assert.match(p.words(), /Build with board 9, LE, SF9, 14 dBm\. The rates are the Phases tables\./);
+  assert.match(p.words(), /Build with board 9, LE, SF9, 14 dBm, log level 4, 915\.0 MHz\. The rates are the Phases tables\./);
 });
 
 test('the write button names the board, and a running flash takes its place', async () => {
@@ -1078,4 +1143,95 @@ test('a pull of an empty chip ends as a pulled log that says the chip is empty, 
   assert.match(w, /Flight log pulled: the chip is empty complete .*Records 0 of 0 Valid 0 Invalid 0/);
   assert.doesNotMatch(w, /failed/);
   assert.doesNotMatch(p.sheet(), /data-openlog="null"|data-csv="null"/);
+});
+
+const FLIGHT9 = Object.assign({}, CS9, { firmware: 'flight', firmwareModule: 'le' });
+const CONSOLE = { port: '/dev/ttyUSB0', key: 'usb-console-1', usb: '10c4:ea60', state: 'receiver', name: '' };
+const ON_CONSOLE = () => Object.assign(KEPT(), { ['dg-console-' + UID9]: CONSOLE.port });
+const TBEAM = (key, id, more) => Object.assign({ key, port: '/dev/tty' + key, usb: '303a:1001', status: 'open', role: 'receiver', rxId: id, rxKind: null }, more);
+
+test('the log level and the carrier frequency start at what a build gets and go to the build', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT9] });
+  assert.match(p.sheet(), /<select data-build="log"[^>]*>.*<option value="4" selected>4 \+ debug<\/option>/);
+  assert.match(p.sheet(), /data-build="mhz" value="915.0"/);
+  assert.match(p.words(), /3 is what to fly \(V2_6_X_Code\/README\.md\), 4 is what a build gets\./);
+  await p.fire('screen-chipsats', 'change', { 'data-build': 'log' }, { tagName: 'SELECT', value: '3' });
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'mhz' }, { tagName: 'INPUT', value: '903.5' });
+  assert.match(p.words(), /Build with board 9, LE, SF7, 14 dBm, log level 3, 903\.5 MHz\./);
+  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
+  assert.deepStrictEqual([p.o.flashed.embedded, p.o.flashed.log, p.o.flashed.mhz], ['built', 3, '903.5']);
+});
+
+test('without a tree the carried image is written, so its level and frequency cannot be changed', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT9], health: { fswTree: false, flightImages: [{ module: 'le' }] } });
+  assert.match(p.sheet(), /<select data-build="log" aria-label="Console log level" disabled>/);
+  assert.match(p.sheet(), /data-build="mhz" value="915.0"[^>]* disabled>/);
+  assert.match(p.words(), /the carried image is written, at level 4 on 915\.0 MHz\./);
+  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
+  assert.equal(p.o.flashed.embedded, 'flight');
+  assert.equal(p.o.flashed.log, undefined, 'the app is not asked for what it cannot build');
+});
+
+test('a frequency outside 902.0 to 928.0 MHz or off the 0.1 MHz steps is refused before anything goes', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT9] });
+  for (const [mhz, says] of [['928.1', /has to be 902\.0 to 928\.0 MHz, the US band\./], ['868', /the US band/],
+    ['903.55', /goes in 0\.1 MHz steps\./], ['', /Fill in the carrier frequency first\./], ['9o3', /Fill in the carrier frequency first\./]]) {
+    await p.fire('screen-chipsats', 'input', { 'data-build': 'mhz' }, { tagName: 'INPUT', value: mhz });
+    assert.match(p.words(), says, mhz);
+    assert.match(p.sheet(), /data-buildembed="1"[^>]*disabled/, mhz);
+    await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
+    assert.equal(p.o.flashed, undefined, mhz);
+  }
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'mhz' }, { tagName: 'INPUT', value: '902' });
+  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
+  assert.equal(p.o.flashed.mhz, '902.0');
+});
+
+test('after a write the start line on the console is held against what was asked, and a difference is said', async () => {
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT9], console: true, boards: [CONSOLE], storage: ON_CONSOLE() });
+  await p.fire('screen-chipsats', 'change', { 'data-build': 'log' }, { tagName: 'SELECT', value: '3' });
+  await p.fire('screen-chipsats', 'input', { 'data-build': 'mhz' }, { tagName: 'INPUT', value: '903.5' });
+  await p.fire('screen-chipsats', 'click', { 'data-buildembed': '1' });
+  p.jobs.chip = { running: false, what: 'flash', uid: UID9, steps: ['x'], error: null, read: FLIGHT };
+  await p.jobEnded('chip');
+  assert.deepStrictEqual(JSON.parse(p.storage['dg-written-' + UID9]).mhz, '903.5', 'remembered for the board');
+  assert.match(p.words(), /at log level 3 on 903\.5 MHz\. Its console has not printed a start line since, as far as this page has heard\./);
+  p.say(CONSOLE.key, ['I BOOT 0 c0: start log=4 mhz=915.000']);
+  await p.every(1000);
+  assert.match(p.words(), /The board says log level 4 on 915\.0 MHz at its start, not log level 3 on 903\.5 MHz\./);
+  assert.match(p.sheet(), /<p class="outcome bad">Written [^<]*The board says log level 4/);
+  p.say(CONSOLE.key, ['I BOOT 0 c0: start log=3 mhz=903.500']);
+  await p.every(1000);
+  assert.match(p.words(), /at log level 3 on 903\.5 MHz\. The board says the same at its start\./);
+  // a start line from firmware before mhz= says so instead of passing for a match
+  p.say(CONSOLE.key, ['I BOOT 0 c0: start log=3']);
+  await p.every(1000);
+  assert.match(p.words(), /The board says log level 3 and no frequency \(its firmware does not print mhz=\) at its start/);
+});
+
+test('the controls start at what was last written to the board, after a reload too', async () => {
+  const storage = Object.assign(KEPT(), { ['dg-written-' + UID9]: JSON.stringify({ log: 2, mhz: '910.0', at: 1 }) });
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT9], storage });
+  assert.match(p.sheet(), /<option value="2" selected>2 \+ warnings<\/option>/);
+  assert.match(p.sheet(), /data-build="mhz" value="910.0"/);
+  assert.match(p.words(), /On the board: 910\.0 MHz, last written/);
+});
+
+test('a board on another frequency than the T-Beams says so, and one press asks every T-Beam for it', async () => {
+  const storage = Object.assign(KEPT(), { ['dg-written-' + UID9]: JSON.stringify({ log: 3, mhz: '903.5', at: 1 }) });
+  const ports = [TBEAM('rx1', 'A4C1F3'), TBEAM('rx2', 'B00B00'), TBEAM('cmd:sdr', '5D4E01', { rxKind: 'sdr' })];
+  const p = await chipsats({ read: FLIGHT, chips: [FLIGHT9], storage, ports });
+  for (const [k, id, f] of [['rx1', 'A4C1F3', '915.0'], ['rx2', 'B00B00', '903.5'], ['cmd:sdr', '5D4E01', '915.0']]) {
+    p.live.receivers.set(k, { id, info: { f, sf: '7' } });
+  }
+  await p.every(1000);
+  assert.match(p.words(), /CS9 transmits on 903\.5 MHz, and T-Beam A4C1F3 listens on 915\.0 MHz, so it hears nothing from it\./);
+  assert.doesNotMatch(p.words(), /SDR 5D4E01 listens/, 'a program is never written to');
+  assert.equal(p.o.freqs, undefined, 'nothing is sent without the press');
+  await p.fire('screen-chipsats', 'click', { 'data-tbeamfreq': '903.5' });
+  assert.deepStrictEqual(p.o.freqs, [['rx1', '903.5'], ['rx2', '903.5']]);
+  p.live.receivers.get('rx1').info.f = '903.5';
+  await p.every(1000);
+  assert.doesNotMatch(p.words(), /hears nothing/);
+  assert.match(p.words(), /The T-Beams listen on 903\.5 MHz\./);
 });

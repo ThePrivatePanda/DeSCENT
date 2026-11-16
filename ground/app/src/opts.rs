@@ -8,9 +8,12 @@ DeSCENT ChipSat: flashes and reads ChipSats and T-Beam receivers, and serves the
 
   descent-ground [options]
   descent-ground check [--json] <pull folder, dump.txt, ground log, or a folder of those>
+  descent-ground check-receiver <file, or - for stdin>
 
   check             read a pull or a log and print what happened, worst first, then exit.
                     Opens no port and starts no server, so it runs beside a live app
+  check-receiver    read what an SDR receiver program printed and say which lines break
+                    docs/sdr-receiver.md, then what it heard. Exits 1 if any line does
   --port <n>        listen on this port only, and stop if it is taken
   --host <addr>     listen on this address instead of 127.0.0.1. 0.0.0.0 is every
                     interface. Anything that can reach it can flash a board, so this
@@ -32,6 +35,11 @@ descent-ground.conf beside the program:
 
   browser = no
   port = 8900
+
+An SDR receiver is a program the app starts and reads, through the shell, one line per
+receiver. It is started again if it stops:
+
+  receiver = ssh station sdr_rx
 ";
 
 // Running a build that is older than the dashboard next to it is the trap that cost an
@@ -89,6 +97,7 @@ pub struct Opts {
     pub port: Option<u16>,
     pub host: Option<String>,
     pub stop: bool,
+    pub receivers: Vec<String>,   // command lines, from the file only
 }
 
 // The flag wins over the file, so a one-off run can always go the other way. A port
@@ -102,6 +111,10 @@ pub fn parse(args: &[String], conf: Option<&str>) -> Result<Opts, String> {
     let mut port = match conf {
         Some(text) => port_in_conf(text)?,
         None => None,
+    };
+    let receivers = match conf {
+        Some(text) => receivers_in_conf(text)?,
+        None => Vec::new(),
     };
     let mut help = false;
     let mut stop = false;
@@ -132,7 +145,7 @@ pub fn parse(args: &[String], conf: Option<&str>) -> Result<Opts, String> {
             }
         }
     }
-    Ok(Opts { open_browser, help, port, stop, host })
+    Ok(Opts { open_browser, help, port, stop, host, receivers })
 }
 
 // An address rather than a name, because a name that resolves to somewhere unexpected is
@@ -203,6 +216,27 @@ fn port_in_conf(text: &str) -> Result<Option<u16>, String> {
         };
     }
     Ok(None)
+}
+
+// Every receiver = line, the rest of the line as it was written: a command line can hold a #,
+// so only a whole line is a comment here.
+fn receivers_in_conf(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        if k.trim() != "receiver" {
+            continue;
+        }
+        if v.trim().is_empty() {
+            return Err(String::from("descent-ground.conf: receiver = wants the command line that starts the receiver program"));
+        }
+        out.push(v.trim().to_string());
+    }
+    Ok(out)
 }
 
 // Where logs and pulled flight logs go. Beside the program, unless the program is sitting
@@ -288,6 +322,15 @@ mod tests {
         // A bad file is still an error when the flag would have overridden it: the file
         // is wrong whichever way this run goes.
         assert!(!refused(&["--port", "8790"], Some("port = nope")).is_empty());
+    }
+
+    #[test]
+    fn each_receiver_line_is_a_command_kept_as_written() {
+        assert!(ok(&[], None).receivers.is_empty());
+        let conf = "port = 8900\nreceiver = python3 replay_receiver.py examples.txt\n# receiver = not this one\n\
+receiver=ssh station 'sdr_rx --gain 40 # high'\n";
+        assert_eq!(ok(&[], Some(conf)).receivers, ["python3 replay_receiver.py examples.txt", "ssh station 'sdr_rx --gain 40 # high'"]);
+        assert!(refused(&[], Some("receiver =  \n")).contains("wants the command line"));
     }
 
     #[test]

@@ -103,6 +103,42 @@ test('the list has a card per board: name, state word, SF, and its port and USB 
   assert.match(p.text('tb-list'), /Plugged in . 1 board USB serial/);
 });
 
+// 2026-11-16: the ST-Link's port was read as a T-Beam and listed here
+test('a ChipSat console is not a T-Beam, and a T-Beam that could not be opened says why', async () => {
+  const { o, p, rx } = rig();
+  o.boards = o.boards.concat([
+    { port: '/dev/ttyACM2', usb: '0483:3754', label: 'ST-Link', serial: '002F0028', key: 'k3', state: 'receiver', name: '', role: 'console' },
+    { port: '/dev/ttyACM3', usb: '1a86:7523', label: 'CH340', serial: '', key: 'k4', state: 'receiver', name: '', role: 'console' },
+  ]);
+  o.boards[1] = Object.assign({}, o.boards[1], { role: 'receiver', error: 'held by another program, perhaps the other copy of this app' });
+  o.ports = [o.ports[0]];
+  rx('rx1', 7);
+  p.parts.tbeams.show();
+  await p.settle();
+  const list = p.text('tb-list');
+  assert.match(list, /Plugged in . 3 boards/);
+  assert.doesNotMatch(p.html('tb-list'), /ttyACM2|ttyACM3/);
+  assert.match(list, /\/dev\/ttyUSB1 not opened USB 10C4:EA60 . held by another program, perhaps the other copy of this app/i);
+  await pick(p, '/dev/ttyUSB1');
+  assert.match(p.text('tb-sheet'), /\/dev\/ttyUSB1: held by another program, perhaps the other copy of this app/);
+});
+
+test('an SDR the app starts is listed under Programs by its id, with no sheet to pick', async () => {
+  const { o, p } = rig();
+  o.ports = o.ports.concat([
+    { key: 'cmd:1', port: 'ssh roof sdr_rx', usb: '', status: 'open', rxId: '5D4E01', rxKind: 'sdr', rxFw: '0.1.0' },
+    { key: 'cmd:2', port: 'sdr_rx --dev 1', usb: '', status: 'stopped', error: 'stopped, exit status: 1', rxId: null },
+  ]);
+  p.parts.tbeams.show();
+  await p.settle();
+  const list = p.text('tb-list');
+  assert.match(list, /Plugged in . 3 boards/);
+  assert.match(list, /Programs . 2/);
+  assert.match(list, /SDR 5D4E01 reading it kind sdr . fw 0\.1\.0 . cmd:1 . ssh roof sdr_rx/);
+  assert.match(list, /cmd:2 stopped no header yet . cmd:2 . sdr_rx --dev 1 stopped, exit status: 1/);
+  assert.doesNotMatch(p.html('tb-list'), /data-pick="(ssh|sdr_rx)/);
+});
+
 test('a board that is not a receiver says what Listen heard, once it has', async () => {
   const { p } = rig();
   p.parts.tbeams.show();
@@ -433,4 +469,71 @@ test('the watch card is in index.html under the list, and the head sentence is w
   p.parts.tbeams.show();
   await p.settle();
   assert.match(p.text('tb-sheet'), /The name is kept on the board\. Listen opens the port for 5 s and says what it heard\./);
+});
+
+// The user, 2026-11-16: "allow changing carrier frequency on the tbeam as well"
+function tunableRig() {
+  const r = rig();
+  r.o.ports = r.o.ports.map((p) => Object.assign({}, p, { role: 'receiver' }));
+  r.o.freqs = [];
+  r.hub.setFreq = async (key, mhz) => { r.o.freqs.push([key, mhz]); };
+  r.rx('rx1', 9);
+  r.feed = (text) => r.p.taps.forEach((fn) => fn('rx1', text, NOW + 300));
+  return r;
+}
+const FREQ = (f) => '#DG,RX,v1,id=72E53C,f=' + f + ',bw=125.0,sf=9,cr=7,sync=0x12,pre=8,name=,fw=1.2.2,sfchip=9,rx=1';
+
+test('Radio card: a T-Beam\'s frequency is typed, sent as an ask, and confirmed only by its header', async () => {
+  const { o, p, rx, feed } = tunableRig();
+  p.parts.tbeams.show();
+  await p.settle();
+  assert.match(p.html('tb-sheet'), /<input type="text" inputmode="decimal" class="tb-freq" data-freq="rx1" data-keep="freq:rx1" value="915.0"/);
+  assert.match(p.text('tb-sheet'), /Frequency MHz The board's own report\. Type 902\.0 to 928\.0 MHz to change it/);
+  await p.fire('screen-tbeams', 'change', { 'data-freq': 'rx1' }, { value: ' 903.5 ' });
+  assert.deepEqual(o.freqs, [['rx1', '903.5']]);
+  assert.match(p.text('tb-sheet'), /asked for 903\.5 MHz Asked at \d\d:\d\d:\d\d\. Waiting for the board's header\./);
+  // a header from before the command still says the old value, and settles nothing
+  feed(FREQ('915.0'));
+  assert.match(p.text('tb-sheet'), /asked for 903\.5 MHz/);
+  feed(FREQ('903.5'));
+  rx('rx1', 9, { info: { id: 'x', f: '903.5', bw: '125.0', sf: '9', cr: '7', sync: '0x12', pre: '8' } });
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /confirmed The board's header said 903\.5 MHz at \d\d:\d\d:\d\d\./);
+  assert.match(p.html('tb-sheet'), /data-freq="rx1"[^>]*value="903.5"/);
+  assert.equal(p.toasts[p.toasts.length - 1], 'Mast is on 903.5 MHz');
+});
+
+test('Radio card: a frequency outside the band or off the 0.1 MHz steps is not sent, and says why', async () => {
+  const { o, p } = tunableRig();
+  p.parts.tbeams.show();
+  await p.settle();
+  for (const [typed, why] of [['868.1', 'it has to be 902.0 to 928.0 MHz, the US band'], ['915.05', 'it goes in 0.1 MHz steps'], ['abc', 'it is not a number of MHz']]) {
+    await p.fire('screen-tbeams', 'change', { 'data-freq': 'rx1' }, { value: typed });
+    assert.match(p.text('tb-sheet'), new RegExp(typed.replace('.', '\\.') + ' MHz not sent ' + typed.replace('.', '\\.') + ' MHz not sent: ' + why + '\\.'));
+  }
+  assert.deepEqual(o.freqs, []);
+});
+
+test('Radio card: a T-Beam that refuses the frequency says so plainly', async () => {
+  const { p, feed } = tunableRig();
+  p.parts.tbeams.show();
+  await p.settle();
+  await p.fire('screen-tbeams', 'change', { 'data-freq': 'rx1' }, { value: '927.9' });
+  feed('#DG,ERR,freq');
+  await p.ticks(1);
+  assert.match(p.text('tb-sheet'), /refused 927\.9 MHz Mast refused 927\.9 MHz\. The board answered #DG,ERR,freq\./);
+});
+
+test('Radio card: the frequency of a port not sorted as a receiver, or an SDR, is shown and never sent', async () => {
+  const { o, p } = tunableRig();
+  o.ports[0] = Object.assign({}, o.ports[0], { role: 'unknown' });
+  p.parts.tbeams.show();
+  await p.settle();
+  assert.doesNotMatch(p.html('tb-sheet'), /data-freq=/);
+  assert.match(p.text('tb-sheet'), /Frequency 915\.0 MHz/);
+  await p.fire('screen-tbeams', 'change', { 'data-freq': 'rx1' }, { value: '903.5' });
+  o.ports[0] = Object.assign({}, o.ports[0], { role: 'receiver', rxKind: 'sdr' });
+  await p.fire('screen-tbeams', 'change', { 'data-freq': 'rx1' }, { value: '903.5' });
+  assert.deepEqual(o.freqs, []);
+  assert.match(p.toasts[p.toasts.length - 1], /Not sent: rx1 is not a T-Beam being read/);
 });

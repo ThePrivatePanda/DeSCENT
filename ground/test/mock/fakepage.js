@@ -22,6 +22,8 @@ function page(scripts, hub, o) {
   const el = (id) => (els[id] = els[id] || {
     id, html: '', dataset: {}, style: {},
     focus() {},
+    // painted markup is kept as text, so there is no element in it to find
+    querySelector: () => null,
     addEventListener(type, fn) { (handlers[id + ':' + type] = handlers[id + ':' + type] || []).push(fn); },
   });
   const jobs = { pull: null, chip: null, tbeam: null, heard };
@@ -34,6 +36,7 @@ function page(scripts, hub, o) {
     // page() stands for a reload.
     localStorage: { getItem: (k) => (k in storage ? storage[k] : null), setItem(k, v) { storage[k] = String(v); } },
     DG: {},
+    ResizeObserver: class { observe() {} disconnect() {} },
   };
   sandbox.window = sandbox;
   sandbox.self = sandbox;
@@ -59,7 +62,7 @@ function page(scripts, hub, o) {
     { getAttribute: (n) => (n in attrs ? attrs[n] : null), closest: () => null, blur() {}, tagName: 'BUTTON' }, more || {});
   const settle = () => new Promise((r) => setTimeout(r, 5));
   return {
-    parts, jobs, toasts, asks, opened, sfAsks: sandbox.DGApp.sfAsks, settle, target, storage, taps: sandbox.DGApp.taps, packetTaps: sandbox.DGApp.packetTaps, shell: sandbox.DGApp.shell,
+    parts, jobs, toasts, asks, opened, sfAsks: sandbox.DGApp.sfAsks, live: sandbox.DGApp.live, settle, target, storage, taps: sandbox.DGApp.taps, packetTaps: sandbox.DGApp.packetTaps, shell: sandbox.DGApp.shell,
     el, html: (id) => el(id).html,
     // What a person reads: tags out, entities back, runs of space as one
     text: (id) => el(id).html.replace(/<[^>]*>/g, ' ')

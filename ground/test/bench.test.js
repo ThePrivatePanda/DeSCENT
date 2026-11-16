@@ -143,3 +143,13 @@ test('the receivers count only the bench, and say what went missing', () => {
   assert.deepStrictEqual([three.heard, three.missed, three.restarts], [3, 1, 0]);
   assert.deepStrictEqual(one.rssi.slice(0, 1), [-40]);
 });
+
+test('the console is kept whole up to RAW_KEPT lines, then the oldest go and are counted, their tags remembered', () => {
+  const s = fed(['I PHASE 10 c0: ground why=start', 'garbage from booting']);
+  assert.deepStrictEqual(s.raw.map((r) => [r.tag, r.level, r.start]), [['PHASE', 'I', false], [null, null, false]]);
+  for (let i = 0; i < B.RAW_KEPT; i++) s.add(2000 + i, 'W GPS ' + i + ' c' + i + ': nofix');
+  assert.strictEqual(s.raw.length, B.RAW_KEPT);
+  assert.strictEqual(s.dropped, 2);
+  assert.ok(s.tags.has('PHASE'));
+  assert.strictEqual(fed(BOOT).raw[0].start, true);
+});

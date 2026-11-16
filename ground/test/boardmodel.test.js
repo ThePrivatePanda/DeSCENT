@@ -286,17 +286,27 @@ test('the radio table with no settings block is all dashes under the plain line'
 
 const RATE = (fixedMs, more) => Object.assign({ fixedMs, follow: false, percent: [75, 50, 35, 20], intervalMs: [10000, 30000, 60000, 120000, 180000] }, more || {});
 const FLAT = (ms, more) => RATE(ms, Object.assign({ intervalMs: [ms, ms, ms, ms, ms] }, more || {}));
-const BLOCK = { layoutVersion: 4, csid: 255, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, transmit: [RATE(60000), RATE(10000)], log: [FLAT(10000), FLAT(50)], olderSlots: [], reservedClear: true };
+// the ground's two slots one ground rate, as the page writes them since 2026-11-16
+const BLOCK = { layoutVersion: 4, csid: 255, module: 'le', sf: 7, dbm: 14, setBy: 'build', txIntervalMs: 10000, transmit: [RATE(60000), RATE(10000)], log: [FLAT(60000), FLAT(50)], olderSlots: [], reservedClear: true };
+// and one written before, its ground log apart from its transmit
+const APART = Object.assign({}, BLOCK, { log: [FLAT(10000), FLAT(50)] });
 
 test('a settings block fills the on-the-board column, one row per phase', () => {
   const s = BLOCK;
   const t = B.settingsTable(s, 'le');
-  assert.deepStrictEqual(t.rows.map((r) => r.onBoard), ['unconfigured (255)', 'SF7', '+14 dBm', 'every 60 s, log every 10 s', 'every 10 s, log every 0.05 s']);
+  assert.deepStrictEqual(t.rows.map((r) => r.onBoard), ['unconfigured (255)', 'SF7', '+14 dBm', 'every 60 s', 'every 10 s, log every 0.05 s']);
+  // A ground whose two slots differ shows both, and says so.
+  const apart = B.settingsTable(APART, 'le');
+  assert.equal(apart.rows[3].onBoard, 'every 60 s, log every 10 s');
+  assert.equal(apart.rows[3].apart, "On the board the ground's transmit and log rates differ. A write sets both to the ground rate.");
+  assert.equal(apart.rows[4].apart, '');
+  // One ground rate of 0 is both meanings at once.
+  assert.equal(B.settingsTable(Object.assign({}, s, { transmit: [RATE(0), RATE(10000)], log: [FLAT(0), FLAT(50)] }), 'le').rows[3].onBoard, 'back to back, every reading');
   assert.deepStrictEqual(t.rows.slice(3).map((r) => r.label), ['Ground', 'Air']);
   // older firmware can leave a different value in a spare slot
   const older = [{ phase: 1, name: 'falling', rate: RATE(1000), logMs: 50 }, { phase: 0, name: 'landed', rate: RATE(60000), logMs: 1000 }];
   assert.deepStrictEqual(B.settingsTable(Object.assign({}, s, { layoutVersion: 3, olderSlots: older }), 'le').rows.slice(3).map((r) => r.onBoard),
-    ['every 60 s, log every 10 s; landed slot every 60 s, log every 1 s', 'every 10 s, log every 0.05 s; falling slot every 1 s, log every 0.05 s']);
+    ['every 60 s; landed slot every 60 s, log every 1 s', 'every 10 s, log every 0.05 s; falling slot every 1 s, log every 0.05 s']);
   // A log gap of 0 is every reading, on the ground as in the air.
   assert.deepStrictEqual(B.settingsTable(Object.assign({}, s, { log: [FLAT(0), FLAT(0)] }), 'le').rows.slice(3).map((r) => r.onBoard),
     ['every 60 s, log every reading', 'every 10 s, log every reading']);
@@ -315,7 +325,7 @@ test('a settings block fills the on-the-board column, one row per phase', () => 
   // A phase on the battery says what it follows and what it falls back to; back to back is said.
   const ground = RATE(300000, { follow: true, percent: [90, 60, 30, 5], intervalMs: [0, 20000, 60000, 90000, 200000] });
   assert.equal(B.settingsTable(Object.assign({}, s, { transmit: [ground, RATE(10000)] }), 'le').rows[3].onBoard,
-    'by battery: back to back above 90 %, 20 s to 60 %, 60 s to 30 %, 90 s to 5 %, then 200 s (300 s when the gauge cannot be read), log every 10 s');
+    'by battery: back to back above 90 %, 20 s to 60 %, 60 s to 30 %, 90 s to 5 %, then 200 s (300 s when the gauge cannot be read), log every 60 s');
   assert.equal(B.settingsTable(Object.assign({}, s, { transmit: [RATE(60000), RATE(0)] }), 'le').rows[4].onBoard, 'back to back, log every 0.05 s');
   // A block from before the phases has one gap, the old falling one, shown under the air.
   const old = B.settingsTable(Object.assign({}, s, { layoutVersion: 1, txIntervalMs: 250, transmit: null, log: null }), 'le');
@@ -342,17 +352,14 @@ test('what the board says about a block it could not give is shown as it comes',
   assert.doesNotMatch(B.settingsTable(null, 'le').line, /written/);
 });
 
-// p0 is ground, p1 the air.
-const DRAFT = { csid: '255', sf: 7, dbm: 14 };
+// p0 is ground, p1 the air. The ground has no log boxes: p0s and p0ms<k> are its ground rate.
+const DRAFT = { csid: '255', sf: 7, dbm: 14, p1l: '0.05' };
 [60, 10].forEach((secs, n) => {
   DRAFT['p' + n + 's'] = String(secs); DRAFT['p' + n + 'f'] = false;
-  DRAFT['p' + n + 'l'] = n === 0 ? '10' : '0.05';
   [75, 50, 35, 20].forEach((p, k) => { DRAFT['p' + n + 'soc' + k] = String(p); });
-  [10, 30, 60, 120, 180].forEach((v, k) => {
-    DRAFT['p' + n + 'ms' + k] = String(v);
-    DRAFT['p' + n + 'lms' + k] = DRAFT['p' + n + 'l'];
-  });
+  [10, 30, 60, 120, 180].forEach((v, k) => { DRAFT['p' + n + 'ms' + k] = String(v); });
 });
+[0, 1, 2, 3, 4].forEach((k) => { DRAFT['p1lms' + k] = '0.05'; });
 
 test('a row is marked as replaced only when the build would change what the board holds', () => {
   const s = BLOCK;
@@ -368,7 +375,9 @@ test('a row is marked as replaced only when the build would change what the boar
   assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0soc2: '36' })).ground, true);
   assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0ms4: '181' })).ground, true);
   assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0ms4: '181' })).air, false);
-  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0lms4: '181' })).ground, true);
+  // The ground has no log boxes of its own; one whose slots differ is replaced by the ground rate.
+  assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p0lms4: '181', p0l: '1' })).ground, false);
+  assert.equal(B.buildDiffers(APART, 'le', same).ground, true);
   // A log gap differs on its own phase.
   assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1l: '0.1' })).air, true);
   assert.equal(B.buildDiffers(s, 'le', Object.assign({}, same, { p1l: '0.1' })).ground, false);
@@ -400,16 +409,20 @@ test('what a write changes is listed by row and column', () => {
     ['Air, to 20 %, transmit', '10 s', '120 s'], ['Air, below 20 %, transmit', '10 s', '180 s']]);
   // A band named as the design says it.
   assert.deepStrictEqual(changes({ p1f: true, p1lms4: '5' }, 1)[2], ['Air, below 20 %, log', '0.05 s', '5 s']);
-  // 0 in the words of the column and the phase.
-  assert.deepStrictEqual(changes({ p0l: '0', p0lms0: '10' }, 0), [['Ground, always, log', '10 s', 'every reading']]);
+  // 0 in the words of the column and the phase. The ground's one rate is both.
+  assert.deepStrictEqual(changes({ p0s: '0' }, 0), [['Ground, always, ground rate', '60 s', 'back to back, every reading']]);
   assert.deepStrictEqual(changes({ p1l: '0' }, 1), [['Air, always, log', '0.05 s', 'every reading']]);
   assert.deepStrictEqual(changes({ p1s: '0' }, 1), [['Air, always, transmit', '10 s', 'back to back']]);
   // A threshold is one row for both columns, and a value the table holds unused is still said.
   assert.deepStrictEqual(changes({ p0soc2: '36' }, 0), [['Ground, threshold 3', '35 %', '36 %']]);
-  assert.deepStrictEqual(changes({ p0ms4: '181' }, 0), [['Ground, below 20 % (not in use), transmit', '180 s', '181 s']]);
+  assert.deepStrictEqual(changes({ p0ms4: '181' }, 0), [['Ground, below 20 % (not in use), ground rate', '180 s', '181 s']]);
   // A column that had its own thresholds: only that column changes.
-  const own = Object.assign({}, BLOCK, { log: [FLAT(10000, { percent: [70, 50, 35, 20] }), FLAT(50)] });
-  assert.deepStrictEqual(changes({}, 0, own), [['Ground, log threshold 1', '70 %', '75 %']]);
+  const own = Object.assign({}, BLOCK, { log: [FLAT(60000), FLAT(50, { percent: [70, 50, 35, 20] })] });
+  assert.deepStrictEqual(changes({}, 1, own), [['Air, log threshold 1', '70 %', '75 %']]);
+  // A ground whose slots differ: its log slot takes the ground rate, gap and table, slot by slot.
+  assert.deepStrictEqual(changes({}, 0, APART), [['Ground, always, log', '10 s', '60 s'],
+    ['Ground, to 50 % (not in use), log', '10 s', '30 s'], ['Ground, to 35 % (not in use), log', '10 s', '60 s'],
+    ['Ground, to 20 % (not in use), log', '10 s', '120 s'], ['Ground, below 20 % (not in use), log', '10 s', '180 s']]);
   // A board that follows and a switch turned off: the Always box replaces every band.
   const follows = Object.assign({}, BLOCK, { log: [FLAT(10000), FLAT(50, { follow: true, intervalMs: [50, 100, 200, 500, 1000] })] });
   const off = changes({}, 1, follows);
@@ -439,6 +452,14 @@ test('the draft is one rate per column, and a half-typed box is never 0', () => 
   const d = Object.assign({}, DRAFT, { p1f: true, p1lms2: '0.2', p1s: '' });
   assert.deepStrictEqual(B.draftRate(d, 1, 'log'), { fixedMs: 50, follow: true, percent: [75, 50, 35, 20], intervalMs: [50, 50, 200, 50, 50] });
   assert.deepStrictEqual(B.draftRate(d, 0, 'transmit'), { fixedMs: 60000, follow: false, percent: [75, 50, 35, 20], intervalMs: [10000, 30000, 60000, 120000, 180000] });
+  assert.deepStrictEqual(B.draftRate(d, 0, 'log'), B.draftRate(d, 0, 'transmit'), 'the ground rate is both');
+  // Two slots are one rate when they give the same gap at every charge: a table behind a switch
+  // that is off is never read.
+  assert.equal(B.sameRate(RATE(60000), FLAT(60000)), true);
+  assert.equal(B.sameRate(RATE(60000), FLAT(10000)), false);
+  assert.equal(B.sameRate(RATE(60000, { follow: true }), FLAT(60000, { follow: true })), false);
+  assert.equal(B.sameRate(RATE(60000, { follow: true }), RATE(60000, { follow: true })), true);
+  assert.equal(B.sameRate(RATE(60000), null), false);
   assert.ok(Number.isNaN(B.draftRate(d, 1, 'transmit').fixedMs));
 });
 
@@ -464,6 +485,9 @@ test('a receiver goes by its own name, then the name kept for its id, then its i
   assert.equal(B.receiverName('rx1', { key: 'rx1', rxId: 'A4C1F3', name: '01' }, heard, { name: 'Left T-Beam' }), '01');
   // Web Serial and logs have no port entry at all.
   assert.equal(B.receiverName('rx3', null, { id: 'C3D4E5', info: {} }), 'T-Beam C3D4E5');
+  assert.equal(B.receiverName('cmd:1', { key: 'cmd:1', rxId: '5D4E01', rxKind: 'sdr' }, undefined), 'SDR 5D4E01');
+  assert.equal(B.receiverName('cmd:1', null, { id: '5D4E01', info: { kind: 'sdr' } }), 'SDR 5D4E01');
+  assert.equal(B.receiverName('cmd:1', { key: 'cmd:1', rxId: '5D4E01', rxKind: 'sdr', name: 'roof' }, undefined), 'roof');
   assert.equal(B.receiverName('rx3', null, undefined), 'rx3');
   assert.equal(B.receiverName('boot6', null, undefined), 'boot6');
 });
@@ -519,6 +543,15 @@ test('receivers for the bar: a name, a spreading factor and a state word', () =>
     { key: 'rx3', name: 'Spare', sf: '', word: 'nothing heard', cls: 'warn' },
     { key: 'rx4', name: 'rx4', sf: '', word: 'error', cls: 'bad' },
   ]);
+});
+
+test('a ChipSat console is not a receiver for the bar', () => {
+  const ports = [
+    { key: 'rx1', port: '/dev/ttyUSB0', status: 'open', rxId: 'A1F4C0', name: '01', role: 'receiver' },
+    { key: 'rx2', port: '/dev/ttyACM2', status: 'open', rxId: null, name: null, role: 'console' },
+    { key: 'rx3', port: '/dev/ttyUSB1', status: 'open', rxId: null, name: null, role: 'unknown' },
+  ];
+  assert.deepStrictEqual(B.receiverWords(ports, [], new Map(), 0).map((r) => r.key), ['rx1', 'rx3']);
 });
 
 test('a refusal over which board an image came from is told from any other', () => {
