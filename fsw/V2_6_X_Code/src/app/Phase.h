@@ -2,44 +2,14 @@
 
 #include <stdint.h>
 #include "../config.h"
+#include "../devices/SensorData.h"
 
 namespace ChipSatApp
 {
 
-// Where the sat is in its flight. A board is switched on mounted on the drone, often long before it
-// flies, so the phase sets how fast it transmits and how much the flash log keeps: slow and a trickle
-// on the ground, fast and everything in the air. Both come from the settings block, a transmit rate
-// and a log rate for each phase. Only the fall matters (decided 2026-11-07), so the IMU runs at 1 Hz
-// on the ground and at 20 Hz from the first sign of movement to the landing
-//
-//   Ground  switched on, and again once it has come to rest. kWakeMoving of the last kWakeReadings
-//           at 1 Hz moving puts the IMU at 20 Hz, and kWakeQuietMs without one back to 1 Hz. At
-//           20 Hz, the IMU moving for most of 10 s takes it to the air, as long as the altitude, if
-//           one is live, has also climbed kRiseGain. The window held kMotionHeldMs is the air with
-//           no climb, for a pressurised cabin
-//   Air     ends when no IMU reading has moved for kLandedMs (30 s), the barometer is not falling,
-//           and a live altitude has been flat those 30 s below half the climb. Flat and quiet for
-//           kLandedHighMs (5 min) is the ground at any height: a tree, a roof. With no altitude
-//           live all through the air, kGroundQuietMs (3 min) quiet instead: the BME280 reads
-//           nothing below 300 hPa, about 9 km, so a high fall that doesn't tumble has nothing else
-//           to hold it up
-//
-// The barometer alone never puts a board in the air. On 2026-11-01 its readings during 22 dBm
-// transmits read about 46 m high, which took desk boards to the air and kept one there 46 minutes.
-// So the climb and the flat are both judged on each second's lowest and highest reading: the
-// climb on the lowest, which the offset leaves alone, and the flat on both staying within
-// kFlatAltitude. A fall holds a board in the air when its readings fall 5 m/s for 3 s on both their
-// lowest and highest in each second, which an offset coming and going can't do. The IMU takes 8 s
-// of a running drone to call the air, 20 s on board 9's second drop of 2026-10-17 where the drone
-// often read quiet, and the flash log's 30 s ring keeps the take-off either way
-//
-// A gap in the IMU holds the phase and counts as no movement. Missing for kImuDeadMs, the phase
-// goes back to altitude: a climb of kRiseGain is the air, kLandedNoImuMs still below half of it
-// the ground
-//
-// Known limits: a board in water keeps moving and stays in the air, the quiet lines were set on the
-// old boards (grass in wind is not measured on the new ones), and a transmit offset that lifts some
-// seconds and not others reads as not flat
+// Where the sat is in its flight, on the ground or in the air. Along with boot-air it sets the
+// transmit and log rates (one of each per phase in the settings block) and the IMU's rate. What
+// decides each change, and why, is in docs/phases.md
 //
 // Same values as the old Waiting (0) and Rising (1) so old records still read. An old 3 (Landed) is
 // the ground, an old 2 (Falling, never entered) the air
@@ -49,8 +19,9 @@ enum class Phase : uint8_t
   Air = 1,
 };
 
-// After a reset the log starts in the air so a reset mid-flight still keeps the fall (decided
-// 2026-10-22), the radio on the ground. Boot-air ends at rest, in the air or at kBootAirMaxMs
+// After a reset the log and the transmit gap start as the air's so a reset mid-flight still keeps
+// the fall (the log decided 2026-10-22, the radio 2026-11-16), the phase on the ground. Boot-air ends
+// at rest, in the air or at kBootAirMaxMs
 constexpr Phase kPhaseAtBoot = Phase::Ground;
 constexpr bool kLogAirAtBoot = true;
 
@@ -71,18 +42,25 @@ public:
   // A fresh GPS altitude, from a trusted 3D fix only: before the fix the receiver says 0
   void gpsSample(uint32_t nowMs, float altitudeM);
 
-  // A fresh IMU reading: the magnitude of the linear acceleration and of the rotation rate
-  void imuSample(uint32_t nowMs, float accelMps2, float gyroRadPerSec);
+  // A fresh IMU reading: the magnitude of the linear acceleration and of the rotation rate, and of
+  // the acceleration the sensor feels, gravity included (about 9.8 at rest, near 0 falling free),
+  // and the orientation. NAN and all zeros for the last two when the orientation isn't known
+  void imuSample(uint32_t nowMs, float accelMps2, float gyroRadPerSec, float feltMps2,
+                 const ChipSatSensors::Quaternionf &orientation);
 
   // Called when the IMU's data is older than the controller trusts, every loop until it is back
   void imuLost(uint32_t nowMs);
 
-  Phase phase() const { return phase_; }   // what the radio follows
+  // Asleep after landing the controller found gravity turned since it fell asleep: the board was
+  // moved, so as a moving reading at 1 Hz, 20 Hz and the quiet timers from now
+  void tilted(uint32_t nowMs);
+
+  Phase phase() const { return phase_; }
 
   // True once after each change of phase, so the controller can act on it (transmit at once)
   bool changed();
 
-  bool logsAir() const { return phase_ == Phase::Air || bootAir_; }   // what the flash log follows
+  bool logsAir() const { return phase_ == Phase::Air || bootAir_; }   // what the flash log and transmit gap follow
   bool logChanged();   // true once after each change
 
   // 20 Hz: boot-air, the air, and the ground once something moved. 1 Hz otherwise
@@ -101,7 +79,7 @@ public:
   float aboveGroundM() const;
 
 private:
-  // One altitude source: its history for the rate, the ground it climbs from, the top it reached
+  // One altitude source: its history for the rate and the ground it climbs from
   struct Track
   {
     static constexpr uint8_t kHistory = 8;
@@ -112,11 +90,9 @@ private:
     float altM = 0.0f;
     float rateMps = 0.0f;
     float baselineM = 0.0f;
-    float peakM = 0.0f;
     bool have = false;
     uint32_t lastMs = 0;
     float riseGainM = 0.0f;   // how far above the baseline is the air, on this source
-    float stillM = 0.0f;      // how much it may wander and still be at rest, on this source
     float flatM = 0.0f;       // how far each second's lowest and highest may spread and still be flat
 
     // The second filling now, and the span of whole seconds before it that stayed flat
@@ -150,9 +126,9 @@ private:
   void judge(uint32_t nowMs);
   void enter(Phase next, uint32_t nowMs, uint8_t why, uint8_t part);   // ChipSatLog codes for the event
   uint8_t sourcePart() const;
-  uint8_t landing(uint32_t nowMs, Track *t, bool imuDead);   // the kWhy code, 0 still in the air
-  bool stillOnAltitude(uint32_t nowMs, Track *t, bool climbed);
+  uint8_t landing(uint32_t nowMs, Track *t);   // the kWhy code, 0 still in the air
   bool descending(uint32_t nowMs) const;
+  bool turned(uint32_t nowMs, const ChipSatSensors::Quaternionf &q);
   void clearSlot(uint32_t slot);
   void settle();
 
@@ -169,28 +145,30 @@ private:
   bool altitudeInAir_ = false;   // a source was live at some point of this air
   Bin bins_[ChipSatConfig::kDescentBins + 1];   // by time, the one filling and the kDescentBins before it
 
-  // The last kMotionWindowMs of IMU readings by time, one bit each for whether a slot got a reading
-  // and whether it moved. The slots a gap skips are empty, so a slow feed can't stretch the window
+  // The last kMotionWindowMs of IMU readings by time, a bit for each slot whose reading moved. The
+  // slots a gap skips are empty, so a slow feed can't stretch the window
   static constexpr uint32_t kMotionSlots = ChipSatConfig::kMotionWindowMs / ChipSatConfig::kMotionSlotMs;
-  uint8_t received_[kMotionSlots / 8] = {};
-  uint8_t moved_[kMotionSlots / 8] = {};
+  uint8_t moved_[(kMotionSlots + 7) / 8] = {};
   uint32_t lastSlot_ = 0;
-  uint16_t receivedCount_ = 0;
   uint16_t movedCount_ = 0;
-  uint32_t motionSinceMs_ = 0;   // the window has said moving from here on, continuously
 
-  uint8_t recent_ = 0;   // the last kWakeReadings at 1 Hz, newest in bit 0, a bit for each that moved
-
-  bool imuValid_ = false;
-  uint32_t imuLostMs_ = 0;   // the IMU missing since; from boot until its first reading
-  uint32_t stillSinceMs_ = 0;   // the last moving reading, falling reading or take-off
-
-  // the spell at rest on altitude that ends a flight once the IMU is dead
-  uint32_t quietSinceMs_ = 0;
-  float quietAltM_ = 0.0f;
-  bool inQuiet_ = false;
+  bool imuValid_ = false;   // readings coming. The window is kept through a gap but only counts while they are
+  uint32_t stillSinceMs_ = 0;   // the last moving reading, falling reading or take-off. No reading is quiet
 
   bool falling_ = false;   // descending() on the last judge, for the event when it starts
+
+  // the tumble: from its first reading over kTumbleRadPerSec to its last. A free fall: every reading
+  // under kFreeFallMps2 since
+  uint32_t spinSinceMs_ = 0;
+  uint32_t spinLastMs_ = 0;
+  bool weightless_ = false;
+  uint32_t weightlessSinceMs_ = 0;
+  uint32_t weightlessLastMs_ = 0;
+
+  // the orientation at the first reading of each of the last few seconds, by second
+  static constexpr uint32_t kTurnSlots = ChipSatConfig::kTurnSpanMs / 1000 + 2;
+  ChipSatSensors::Quaternionf turn_[kTurnSlots];
+  uint32_t turnSecond_[kTurnSlots] = {};
 };
 
 } // namespace ChipSatApp

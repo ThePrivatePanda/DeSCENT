@@ -51,7 +51,6 @@ void FlightPhase::envSample(uint32_t nowMs, float altitudeM)
     b.maxM = fmaxf(b.maxM, altitudeM);
   }
   baro_.riseGainM = kRiseGainM;
-  baro_.stillM = kQuietAltitudeM;
   baro_.flatM = kFlatAltitudeM;
   sample(baro_, nowMs, altitudeM);
 }
@@ -62,13 +61,12 @@ void FlightPhase::gpsSample(uint32_t nowMs, float altitudeM)
     return;
   }
   gps_.riseGainM = kRiseGainGpsM;
-  gps_.stillM = kQuietAltitudeGpsM;
   gps_.flatM = kFlatAltitudeGpsM;
   sample(gps_, nowMs, altitudeM);
 }
 
-// Every source keeps its own baseline and peak whether or not it is the one deciding, so the one
-// that takes over when the other dies is not starting from the air
+// Every source keeps its own baseline whether or not it is the one deciding, so the one that takes
+// over when the other dies is not starting from the air
 void FlightPhase::sample(Track &t, uint32_t nowMs, float altitudeM)
 {
   if (!t.have || nowMs - t.lastMs > kAltitudeStaleMs) {
@@ -112,13 +110,8 @@ void FlightPhase::sample(Track &t, uint32_t nowMs, float altitudeM)
 
   if (!t.have) {
     t.baselineM = altitudeM;
-    t.peakM = altitudeM;
     t.have = true;
-  } else if (phase_ == Phase::Air) {
-    if (altitudeM > t.peakM) {
-      t.peakM = altitudeM;
-    }
-  } else if (fabsf(t.rateMps) < kPhaseBaselineRateMps) {
+  } else if (phase_ != Phase::Air && fabsf(t.rateMps) < kPhaseBaselineRateMps) {
     // the ground is wherever it has been sitting: weather and a walk to the drone move it, a climb
     // does not get the chance to
     t.baselineM += (altitudeM - t.baselineM) * kPhaseBaselineGain;
@@ -126,24 +119,38 @@ void FlightPhase::sample(Track &t, uint32_t nowMs, float altitudeM)
   judge(nowMs);
 }
 
-void FlightPhase::imuSample(uint32_t nowMs, float accelMps2, float gyroRadPerSec)
+void FlightPhase::imuSample(uint32_t nowMs, float accelMps2, float gyroRadPerSec, float feltMps2,
+                            const ChipSatSensors::Quaternionf &orientation)
 {
   if (!isfinite(accelMps2) || !isfinite(gyroRadPerSec)) {
     return;
   }
   imuValid_ = true;
-  inQuiet_ = false;   // the spell on altitude only runs while the IMU is missing
   const bool moving = accelMps2 >= kQuietAccelMps2 || gyroRadPerSec >= kQuietGyroRadPerSec;
-  if (moving) {
+  if (moving || turned(nowMs, orientation)) {
     stillSinceMs_ = nowMs;
   }
-  if (!imuFast()) {
-    recent_ = static_cast<uint8_t>((recent_ << 1 | (moving ? 1U : 0U)) & ((1U << kWakeReadings) - 1U));
-    if (__builtin_popcount(recent_) >= kWakeMoving) {
-      waking_ = true;
-      recent_ = 0;
-      noteSystem(kSourcePhase, kPhaseImuFast, kPartImu, kWhyMoving, 0, nowMs);
+  // At 1 Hz the readings are a second apart, so neither spell can form there
+  if (gyroRadPerSec >= kTumbleRadPerSec) {
+    if (nowMs - spinLastMs_ > kSpellGapMs) {
+      spinSinceMs_ = nowMs;
     }
+    spinLastMs_ = nowMs;
+  }
+  if (feltMps2 < kFreeFallMps2) {
+    if (!weightless_ || nowMs - weightlessLastMs_ > kSpellGapMs) {
+      weightlessSinceMs_ = nowMs;
+    }
+    weightless_ = true;
+    weightlessLastMs_ = nowMs;
+  } else {
+    weightless_ = false;
+  }
+  // One moving reading at 1 Hz is 20 Hz: the start of a fall is the part that must not be lost, and
+  // a knock costs at most kWakeQuietMs at 20 Hz
+  if (moving && !imuFast()) {
+    waking_ = true;
+    noteSystem(kSourcePhase, kPhaseImuFast, kPartImu, kWhyMoving, 0, nowMs);
   }
 
   // Empty every slot since the last reading up to this one, which last held a reading a window ago.
@@ -156,23 +163,38 @@ void FlightPhase::imuSample(uint32_t nowMs, float accelMps2, float gyroRadPerSec
   const uint32_t at = slot % kMotionSlots;
   clearSlot(at);
   lastSlot_ = slot;
-  const uint8_t mask = static_cast<uint8_t>(1U << (at % 8));
-  received_[at / 8] |= mask;
-  receivedCount_++;
   if (moving) {
-    moved_[at / 8] |= mask;
+    moved_[at / 8] |= static_cast<uint8_t>(1U << (at % 8));
     movedCount_++;
   }
   judge(nowMs);
 }
 
+// Against the orientation kTurnSpanMs before, through the angle between the two: 2 acos |q1 . q2|.
+// All zeros is no orientation at all
+bool FlightPhase::turned(uint32_t nowMs, const ChipSatSensors::Quaternionf &q)
+{
+  if (q.i == 0.0f && q.j == 0.0f && q.k == 0.0f && q.real == 0.0f) {
+    return false;
+  }
+  const uint32_t second = nowMs / 1000 + 1;   // 0 is an empty slot
+  const uint32_t at = second % kTurnSlots;
+  if (turnSecond_[at] != second) {
+    turnSecond_[at] = second;
+    turn_[at] = q;
+  }
+  const uint32_t then = second - kTurnSpanMs / 1000;
+  const ChipSatSensors::Quaternionf &p = turn_[then % kTurnSlots];
+  if (second <= kTurnSpanMs / 1000 || turnSecond_[then % kTurnSlots] != then) {
+    return false;
+  }
+  const float dot = fabsf(p.i * q.i + p.j * q.j + p.k * q.k + p.real * q.real);
+  return dot < cosf(0.5f * kTurnedRad);
+}
+
 void FlightPhase::clearSlot(uint32_t at)
 {
   const uint8_t mask = static_cast<uint8_t>(1U << (at % 8));
-  if (received_[at / 8] & mask) {
-    receivedCount_--;
-    received_[at / 8] = static_cast<uint8_t>(received_[at / 8] & ~mask);
-  }
   if (moved_[at / 8] & mask) {
     movedCount_--;
     moved_[at / 8] = static_cast<uint8_t>(moved_[at / 8] & ~mask);
@@ -182,11 +204,17 @@ void FlightPhase::clearSlot(uint32_t at)
 // The window is left as it is: a gap only leaves its slots empty
 void FlightPhase::imuLost(uint32_t nowMs)
 {
-  if (imuValid_) {
-    imuValid_ = false;
-    imuLostMs_ = nowMs;
-  }
+  imuValid_ = false;
   judge(nowMs);
+}
+
+void FlightPhase::tilted(uint32_t nowMs)
+{
+  stillSinceMs_ = nowMs;
+  if (!imuFast()) {
+    waking_ = true;
+    noteSystem(kSourcePhase, kPhaseImuFast, kPartImu, kWhyTilted, 0, nowMs);
+  }
 }
 
 bool FlightPhase::changed()
@@ -224,22 +252,16 @@ float FlightPhase::aboveGroundM() const
 // The barometer while it is live, else GPS, else nothing
 FlightPhase::Track *FlightPhase::deciding(uint32_t nowMs)
 {
-  const AltitudeSource was = source_;
-  Track *t = nullptr;
   if (baro_.live(nowMs)) {
     source_ = AltitudeSource::Barometer;
-    t = &baro_;
-  } else if (gps_.live(nowMs)) {
+    return &baro_;
+  }
+  if (gps_.live(nowMs)) {
     source_ = AltitudeSource::Gps;
-    t = &gps_;
-  } else {
-    source_ = AltitudeSource::None;
+    return &gps_;
   }
-  // a spell at rest carries across, judged still from the new source's own altitude
-  if (source_ != was && t != nullptr) {
-    quietAltM_ = t->altM;
-  }
-  return t;
+  source_ = AltitudeSource::None;
+  return nullptr;
 }
 
 // The last kDescentBins whole seconds each lower than the one before by kDescentStepM, on both their
@@ -285,16 +307,10 @@ void FlightPhase::enter(Phase next, uint32_t nowMs, uint8_t why, uint8_t part)
   changed_ = true;
   bootAir_ = false;
   waking_ = false;
-  recent_ = 0;
   landed_ = next == Phase::Ground;
-  motionSinceMs_ = nowMs;
-  quietSinceMs_ = nowMs;
   if (next == Phase::Air) {
-    inQuiet_ = false;
     altitudeInAir_ = false;
     stillSinceMs_ = nowMs;
-    baro_.peakM = baro_.altM;
-    gps_.peakM = gps_.altM;
   } else {
     settle();
   }
@@ -304,7 +320,6 @@ void FlightPhase::enter(Phase next, uint32_t nowMs, uint8_t why, uint8_t part)
 // the ground is where it came to rest
 void FlightPhase::settle()
 {
-  inQuiet_ = false;
   baro_.baselineM = baro_.altM;
   gps_.baselineM = gps_.altM;
 }
@@ -320,60 +335,45 @@ void FlightPhase::judge(uint32_t nowMs)
     }
   }
   falling_ = falling;
-  // a gap holds the phase, only a dead IMU hands it to altitude
-  const bool imuDead = !imuValid_ && nowMs - imuLostMs_ > kImuDeadMs;
 
   if (phase_ != Phase::Air) {
-    // Most of the readings in the window moved, and most of the window has readings so a few after a
-    // gap or a reset can't decide. A live altitude has to have climbed too, on the lowest reading
-    // of the last whole second, or the window held a minute. Never on the barometer while the IMU
-    // is there
-    bool air = false;
-    uint8_t why = kWhyImuMotion;
-    if (imuValid_) {
-      const bool moving = static_cast<float>(receivedCount_) >= kMotionFilled * static_cast<float>(kMotionSlots) &&
-                          static_cast<float>(movedCount_) >= kMotionFraction * static_cast<float>(receivedCount_);
-      if (!moving) {
-        motionSinceMs_ = nowMs;
-      }
-      if (moving && (t == nullptr || t->lowM - t->baselineM >= t->riseGainM)) {
-        air = true;
-      } else if (moving && nowMs - motionSinceMs_ >= kMotionHeldMs) {
-        air = true;
-        why = kWhyMotionHeld;
-      }
-    } else {
-      motionSinceMs_ = nowMs;
-      if (imuDead && t != nullptr) {
-        air = t->altM - t->baselineM >= t->riseGainM;
-        why = kWhyImuDead;
-      }
+    // The air at the slightest hint (decided 2026-11-09). A fall needs no climb: the board may have
+    // been on the ground since a hover or a missed take-off, and a drop shorter than kRiseGainM never
+    // climbs back past the baseline. A climb needs nothing from the IMU: with transmit readings kept
+    // out the barometer can be taken at its word, and a drone climbs smoothly with its IMU often
+    // quiet (board 15's missed drop, 2026-11-08). It is judged on the last whole second's lowest
+    uint8_t why = 0;
+    if (imuValid_ && spinLastMs_ - spinSinceMs_ >= kTumbleMs && nowMs - spinLastMs_ <= kSpellGapMs) {
+      why = kWhyTumbling;
+    } else if (imuValid_ && weightless_ && weightlessLastMs_ - weightlessSinceMs_ >= kFreeFallMs &&
+               nowMs - weightlessLastMs_ <= kSpellGapMs) {
+      why = kWhyFreeFall;
+    } else if (imuValid_ && movedCount_ >= kHintMoving) {
+      why = kWhyMotionHint;
+    } else if (t != nullptr && t->lowM - t->baselineM >= t->riseGainM) {
+      why = kWhyClimb;
     }
-    if (air) {
-      enter(Phase::Air, nowMs, why, imuValid_ ? kPartImu : sourcePart());
+    if (why != 0) {
+      enter(Phase::Air, nowMs, why, why == kWhyClimb ? sourcePart() : kPartImu);
       return;
     }
     if (waking_ && nowMs - stillSinceMs_ >= kWakeQuietMs) {
       waking_ = false;
       noteSystem(kSourcePhase, kPhaseImuSlow, kPartImu, kWhyQuiet, 0, nowMs);
     }
-    // without this boot-air might never end and the chip would wrap over older flights. It has no
-    // climb to come down from, so any height will do
+    // without this boot-air might never end and the chip would wrap over older flights
     if (!bootAir_) {
       return;
     }
-    const bool rest = imuValid_ ? nowMs - stillSinceMs_ >= kLandedMs && (t == nullptr || t->flatFor(nowMs, kLandedMs))
-                                : stillOnAltitude(nowMs, t, false) && imuDead;
+    const bool rest = nowMs - stillSinceMs_ >= kLandedMs && (t == nullptr || t->flatFor(nowMs, kLandedMs));
     if (rest || nowMs >= kBootAirMaxMs) {
-      if (!rest) {
-        noteSystem(kSourcePhase, kPhaseBootAirEnd, kPartNone, kWhyBootAirLimit, 0, nowMs);
+      if (rest) {
+        noteSystem(kSourcePhase, kPhaseBootAirEnd, kPartImu, kWhyQuiet, 0, nowMs);
       } else {
-        noteSystem(kSourcePhase, kPhaseBootAirEnd, imuValid_ ? kPartImu : sourcePart(),
-                   imuValid_ ? kWhyQuiet : kWhyImuDead, 0, nowMs);
+        noteSystem(kSourcePhase, kPhaseBootAirEnd, kPartNone, kWhyBootAirLimit, 0, nowMs);
       }
       bootAir_ = false;
       logChanged_ = true;
-      quietSinceMs_ = nowMs;
       settle();
     }
     return;
@@ -382,53 +382,27 @@ void FlightPhase::judge(uint32_t nowMs)
   if (t != nullptr) {
     altitudeInAir_ = true;
   }
-  const uint8_t why = landing(nowMs, t, imuDead);
+  const uint8_t why = landing(nowMs, t);
   if (why != 0) {
-    enter(Phase::Ground, nowMs, why, why == kWhyImuDead ? sourcePart() : kPartImu);
+    enter(Phase::Ground, nowMs, why, kPartImu);
   }
 }
 
-// Quiet, and a live altitude flat below half the climb, or flat that much longer at any height.
-// Without a climb every height counts as low. With no altitude live all through the air,
-// kGroundQuietMs quiet, and with the IMU dead the altitude alone as before
-uint8_t FlightPhase::landing(uint32_t nowMs, Track *t, bool imuDead)
+// At any height: a drone's IMU is never quiet for long while it flies (decided 2026-11-16). The live
+// altitude flat as well lands it at kLandedMs, and kLandedImuMs lands it whatever the altitude does:
+// on 2026-11-08 the barometer kept boards lying still from ever reading flat. With no altitude live
+// all through the air, kGroundQuietMs quiet. An IMU with no readings is quiet, dead or in a gap
+// (decided 2026-11-16): the altitude is only the backup
+uint8_t FlightPhase::landing(uint32_t nowMs, Track *t)
 {
-  if (!imuValid_) {
-    return stillOnAltitude(nowMs, t, true) && imuDead ? kWhyImuDead : 0;
-  }
   const uint32_t quietMs = nowMs - stillSinceMs_;
   if (!altitudeInAir_) {
     return quietMs >= kGroundQuietMs ? kWhyQuietNoAlt : 0;
   }
-  if (t == nullptr) {
-    return quietMs >= kLandedMs ? kWhyQuiet : 0;
-  }
-  const float climbM = t->peakM - t->baselineM;
-  const bool low = climbM < t->riseGainM || t->lowM <= t->baselineM + 0.5f * climbM;
-  if (quietMs >= kLandedMs && low && t->flatFor(nowMs, kLandedMs)) {
+  if (quietMs >= kLandedMs && (t == nullptr || t->flatFor(nowMs, kLandedMs))) {
     return kWhyQuiet;
   }
-  return quietMs >= kLandedHighMs && t->flatFor(nowMs, kLandedHighMs) ? kWhyQuietHigh : 0;
-}
-
-// With the IMU missing: a drone hovering dead still is above half the climb, so this never lands it.
-// A drone that lands with the sat still on it is below. Without a climb every height counts as low.
-// It runs from the moment the IMU goes missing so a dead one has its spell already
-bool FlightPhase::stillOnAltitude(uint32_t nowMs, Track *t, bool climbed)
-{
-  if (t == nullptr) {
-    return false;   // nothing to judge by: stays as it is
-  }
-  const float halfway = t->baselineM + 0.5f * (t->peakM - t->baselineM);
-  const bool low = !climbed || t->altM <= halfway;
-  const bool still = low && fabsf(t->altM - quietAltM_) < t->stillM;
-  if (!inQuiet_ || !still) {
-    inQuiet_ = low;
-    quietSinceMs_ = nowMs;
-    quietAltM_ = t->altM;
-    return false;
-  }
-  return nowMs - quietSinceMs_ >= kLandedNoImuMs;
+  return quietMs >= kLandedImuMs ? kWhyQuietImu : 0;
 }
 
 } // namespace ChipSatApp

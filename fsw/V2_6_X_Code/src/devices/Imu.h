@@ -32,8 +32,9 @@ public:
   ChipSatPlatform::Status sleep();   // Ok if already asleep
   ChipSatPlatform::Status wake();    // Ok if it wasn't asleep
 
-  // All four reports at a new interval, turned on again as a wake does, no reset. Kept for any
-  // restart or wake after; NotReady while it is down or asleep, which then start at it
+  // All four reports at a new interval, no reset. Own driver: one Set Feature a service() call and
+  // no wait for the replies, the reports coming at the new rate are the check. Kept for any restart
+  // or wake after; NotReady while it is down or asleep, which then start at it
   ChipSatPlatform::Status setReportInterval(uint16_t ms);
   uint16_t reportIntervalMs() const { return reportIntervalMs_; }
 

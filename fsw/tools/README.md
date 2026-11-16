@@ -16,6 +16,14 @@ screen, with nothing installed, and replays or exports what it pulled from its D
 * imu_power_analyze.py - works out the per-phase current from a rig run
 * emit_firmware.sh - rebuilds everything ../firmware holds, the sensor bench images included, which CI
   checks against the source on every change. emit_radio_json.sh is the part of it that turns constants.h into radio.json
+* flight_review.py - for each boot of a pull: the firmware's phase events next to what the sensors show,
+  and whether every air stretch reached the chip at 20 Hz, gaps listed
+* find_landing.py - where a board came down: touchdown from the IMU going still, the GPS there, drawn on
+  satellite imagery. Pillow, and a network the first time
+* fall_replay.py, climb_replay.py - replay candidate fall and climb rules over pulls before they go in
+  the firmware
+* phase_replay.py - replays the whole phase rule set, landing included, over pulls: when each boot
+  would have been in the air, and what handling costs in air time, records and transmissions
 * test_descent_decode.py, test_imu_power_analyze.py - their tests, `python3 test_*.py`
 
 Older copies of the decoder, logger, rig and analysis scripts sit in ../V2_6_X_Tests/tools, from when

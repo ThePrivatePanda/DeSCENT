@@ -22,9 +22,9 @@ namespace ChipSatApp
 {
 
 // Boot sequence and the telemetry cycle. Landed after a flight it first puts the fall on the chip and
-// looks for a fix to hold (kFixRun in a row under the hAcc limit), then sleeps: GPS in standby, the
-// barometer and gauge read once per packet or record, records at the ground gap, Stop2 between them
-// (kDeepSleepWhenLanded). The IMU stays at 1 Hz throughout, so a board that moves wakes it all
+// looks for a fix to hold (kFixRun in a row under the hAcc limit), then sleeps: the IMU, GPS, radio
+// and flash chip off, Stop2 (kDeepSleepWhenLanded). Once a ground transmit gap it wakes for one
+// packet and its record, and a board turned or carried up stays awake (docs/phases.md)
 class FlightController
 {
 public:
@@ -65,13 +65,17 @@ private:
   bool configRadio();                  // false if any step failed
   void sampleSensors();     // each sensor at its own pace, nothing waits on the radio
   void followPhase();       // hands fresh readings to the phase and acts on a change
-  void followLanding();     // the fix to hold once landed, and asleep or awake
+  void followLanding();     // the fix to hold once landed, and asleep
   void goAsleep(uint32_t nowMs);
-  void wakeUp(uint8_t part, uint8_t why);
-  void readForPacket();     // asleep: the gauge and one barometer reading, just before a packet or record
-  void expectParts();       // tells Health how the parts are run now
-  void restUntilDue();      // asleep and nothing due
+  void wakeUp(uint8_t part, uint8_t why, uint32_t detail);
+  void cycleAsleep();       // one wake while asleep, the packet and its record
+  bool wakeImu();           // asleep, for one wake. false with no orientation after a pin reset
+  bool wakeIfMoved();       // asleep, a climb or a tilt wakes it for good
+  bool fixGood(uint32_t nowMs) const;   // the NAV-PVT last seen is a fix to hold
+  void readForPacket();     // asleep: the gauge and one barometer reading
+  void restUntilDue();      // asleep between wakes
   uint32_t imuMaxAgeMs() const;
+  const ChipSatSettings::Rate &transmitRate() const;
   uint32_t phaseTxIntervalMs(bool socOkay);
   void updateLogGaps(bool socOkay);
   void logIfDue();
@@ -122,7 +126,9 @@ private:
   uint32_t resetCsr_ = 0;
   uint32_t cycle_ = 0;   // for logging
   bool radioReady_ = false;
-  uint32_t lastTxMs_ = 0;
+  bool transmitting_ = false;
+  uint32_t txBeganMs_ = 0;
+  uint32_t lastTxMs_ = 0;   // when the last transmission ended
 
   bool asleep_ = false;
   bool airWrittenSaid_ = false;   // landed: the console has said the fall is on the chip
@@ -132,6 +138,9 @@ private:
   ChipSatSensors::GPSData bestFix_;   // of the run so far
   ChipSatSensors::GPSData heldFix_;   // what the packets carry asleep
   uint32_t jitter_ = 0;   // xorshift state for the landed transmit gap
+  uint32_t wakes_ = 0;    // asleep, for the longer fix search every kAsleepFixLongEvery
+  ChipSatSensors::Vector3f restUp_;   // which way was up in the IMU's frame as it fell asleep
+  bool restUpKnown_ = false;
 };
 
 } // namespace ChipSatApp

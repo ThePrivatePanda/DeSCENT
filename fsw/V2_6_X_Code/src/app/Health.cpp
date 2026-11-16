@@ -66,16 +66,12 @@ void Health::begin()
   imuUp_ = false;
 }
 
-void Health::expect(uint32_t readGapMs, bool gpsOn)
+void Health::expect(bool awake)
 {
-  const uint32_t now = system_.nowMs();
-  if (readGapMs != readGapMs_) {
-    readGapMs_ = readGapMs;
-    readsSinceMs_ = now;
-  }
-  if (gpsOn != gpsOn_) {
-    gpsOn_ = gpsOn;
-    gpsSinceMs_ = now;
+  if (awake != awake_) {
+    awake_ = awake;
+    readsSinceMs_ = system_.nowMs();
+    gpsSinceMs_ = readsSinceMs_;
   }
 }
 
@@ -89,11 +85,12 @@ SensorWatch &Health::watch(Part part)
   }
 }
 
-// Not ready: restartStep() has it. Nothing puts the IMU to sleep in flight, so asleep is a fault
+// Not ready: restartStep() has it. Only landed with a fix held is the IMU put to sleep, and it isn't
+// judged then; asleep any other time is a fault
 Seen Health::judgeImu(uint32_t nowMs, bool &partial)
 {
   partial = false;
-  if (!imuPart_.ready()) {
+  if (!imuPart_.ready() || !awake_) {
     imuUp_ = false;
     return Seen::Unknown;
   }
@@ -146,27 +143,25 @@ Seen Health::judgeImu(uint32_t nowMs, bool &partial)
 Seen Health::judgeEnv(uint32_t nowMs) const
 {
   const ChipSatSensors::EnvironmentalData &d = envPart_.data();
-  const uint32_t limitMs = kEnvStaleMs + readGapMs_;
-  if (d.updatedMs != 0 && nowMs - d.updatedMs <= limitMs) {
+  if (d.updatedMs != 0 && nowMs - d.updatedMs <= kEnvStaleMs) {
     return Seen::Good;
   }
-  return nowMs - readsSinceMs_ <= limitMs ? Seen::Unknown : Seen::Bad;
+  return nowMs - readsSinceMs_ <= kEnvStaleMs ? Seen::Unknown : Seen::Bad;
 }
 
 Seen Health::judgeGauge(uint32_t nowMs) const
 {
   const ChipSatSensors::StateOfChargeData &d = gaugePart_.data();
-  const uint32_t limitMs = kGaugeStaleMs + readGapMs_;
-  if (d.updatedMs != 0 && nowMs - d.updatedMs <= limitMs) {
+  if (d.updatedMs != 0 && nowMs - d.updatedMs <= kGaugeStaleMs) {
     return Seen::Good;
   }
-  return nowMs - readsSinceMs_ <= limitMs ? Seen::Unknown : Seen::Bad;
+  return nowMs - readsSinceMs_ <= kGaugeStaleMs ? Seen::Unknown : Seen::Bad;
 }
 
 // any NAV-PVT counts, fix or not. No fix must never reset the receiver, and in standby it says nothing
 Seen Health::judgeGps(uint32_t nowMs) const
 {
-  if (!gpsOn_) {
+  if (!awake_) {
     return Seen::Unknown;
   }
   if (gpsPart_.pvtSeen() && nowMs - gpsPart_.lastPvtMs() <= kGpsSilentMs) {

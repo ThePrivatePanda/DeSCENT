@@ -266,8 +266,13 @@ int main()
   imu.sleep();
   imu.wake();
   const int resetsBefore = hub.resets;
-  check(imu.setReportInterval(ChipSatConfig::kImuGroundIntervalMs) == Status::Ok && imu.reportIntervalMs() == 1000,
-        "1 Hz: the four reports turned on again");
+  start = fakeNow;
+  check(imu.setReportInterval(ChipSatConfig::kImuGroundIntervalMs) == Status::Ok && imu.reportIntervalMs() == 1000 &&
+        fakeNow == start, "1 Hz: the switch returns at once, nothing waited for");
+  for (int i = 0; i < 4; ++i) {
+    imu.service();
+    fakeNow += 10;
+  }
   check(hub.intervalUs[0] == 1000000 && hub.intervalUs[1] == 1000000 && hub.intervalUs[2] == 1000000 &&
         hub.intervalUs[3] == 1000000 && hub.resets == resetsBefore, "1 Hz: Set Feature at 1 000 000 us on all four, no reset");
   uint32_t updates = 0, lastMs = imu.data().linearAccelerationUpdatedMs;
@@ -280,8 +285,32 @@ int main()
   }
   printf("     %u reports in 10 s at 1 Hz\n", static_cast<unsigned int>(updates));
   check(updates >= 9 && updates <= 11, "1 Hz: about ten reports in 10 s");
-  check(imu.setReportInterval(ChipSatConfig::kImuReportIntervalMs) == Status::Ok && hub.intervalUs[3] == 50000,
-        "back to 20 Hz the same way");
+  // the loop goes on through the switch: no service() call longer than its reads, and readings at
+  // 20 Hz from the next 100 ms on, none lost to waiting
+  start = fakeNow;
+  check(imu.setReportInterval(ChipSatConfig::kImuReportIntervalMs) == Status::Ok && fakeNow == start,
+        "back to 20 Hz: the switch returns at once");
+  uint32_t longestService = 0, firstFastMs = 0, fastUpdates = 0;
+  lastMs = imu.data().linearAccelerationUpdatedMs;
+  for (const uint32_t until = start + 2000; fakeNow < until; fakeNow += 1) {
+    const uint32_t before = fakeNow;
+    imu.service();
+    longestService = std::max(longestService, fakeNow - before);
+    if (imu.data().linearAccelerationUpdatedMs != lastMs) {
+      lastMs = imu.data().linearAccelerationUpdatedMs;
+      if (hub.intervalUs[0] == 50000 && firstFastMs == 0) {
+        firstFastMs = lastMs;
+      }
+      fastUpdates += firstFastMs != 0 ? 1 : 0;
+    }
+  }
+  printf("     20 Hz from %u ms after the switch, %u readings in the rest of 2 s, longest service() %u ms\n",
+         static_cast<unsigned int>(firstFastMs - start), static_cast<unsigned int>(fastUpdates),
+         static_cast<unsigned int>(longestService));
+  check(hub.intervalUs[0] == 50000 && hub.intervalUs[1] == 50000 && hub.intervalUs[2] == 50000 &&
+        hub.intervalUs[3] == 50000, "back to 20 Hz: Set Feature at 50 000 us on all four");
+  check(longestService <= 5 && firstFastMs != 0 && firstFastMs - start <= 100 &&
+        fastUpdates + 1 >= (start + 2000 - firstFastMs) / 50, "back to 20 Hz: the loop never held, every reading kept");
   imu.sleep();
   check(imu.setReportInterval(ChipSatConfig::kImuGroundIntervalMs) == Status::NotReady && imu.reportIntervalMs() == 1000,
         "asleep: not sent, kept for the wake");

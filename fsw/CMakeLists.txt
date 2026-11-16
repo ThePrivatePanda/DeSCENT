@@ -43,6 +43,12 @@ add_compile_options(
   "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17;-fno-threadsafe-statics;-fno-rtti;-fno-exceptions;-fno-use-cxa-atexit>"
   "$<$<COMPILE_LANGUAGE:ASM>:-x;assembler-with-cpp>")
 add_compile_definitions(${CHIP_DEFINES} "$<$<COMPILE_LANGUAGE:C,CXX>:NDEBUG>")
+# the core and the sketch both, the buffer is inside HardwareSerial. kConsoleTxBufferBytes in config.h
+# says why, and UartArduino.cpp stops a build that doesn't have it
+add_compile_definitions(SERIAL_TX_BUFFER_SIZE=2048)
+# no core Serial (SerialLP1 on this variant): our ports are UartArduino.cpp's own, and nothing built
+# here names Serial. It would take that buffer too
+add_compile_definitions(HWSERIAL_NONE)
 
 # per-board settings from the build command, e.g. ./build.sh flash -DCHIPSAT_ID=12. Passed straight
 # through to the compiler; config.h guards every one of them with #ifndef
@@ -102,6 +108,17 @@ else()
   file(GLOB_RECURSE SKETCH_SOURCES CONFIGURE_DEPENDS ${SKETCH}/src/*.cpp ${SKETCH}/src/*.c)
 endif()
 set_source_files_properties("${SKETCH_INO}" PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-x;c++;-include;Arduino.h")
+
+# RadioLib and the core's SubGhz library, which its STM32WLx module talks to the radio through.
+# build.sh sets this only for a sketch that uses RadioLib. Linked as objects like arduino-cli does
+set(CHIPSAT_RADIOLIB "" CACHE PATH "RadioLib's folder, for a bench sketch that uses it")
+set(RADIOLIB_SOURCES "")
+set(RADIOLIB_INCLUDES "")
+if(CHIPSAT_RADIOLIB)
+  file(GLOB_RECURSE RADIOLIB_SOURCES CONFIGURE_DEPENDS "${CHIPSAT_RADIOLIB}/src/*.cpp")
+  list(APPEND RADIOLIB_SOURCES "${CORE}/libraries/SubGhz/src/SubGhz.cpp")
+  set(RADIOLIB_INCLUDES "${CHIPSAT_RADIOLIB}/src" "${CORE}/libraries/SubGhz/src")
+endif()
 
 add_executable(chipsat
   "${SKETCH_INO}"
@@ -289,12 +306,14 @@ add_executable(chipsat
   "${CORE}/libraries/Wire/src/utility/twi.c"
   "${CORE}/libraries/Wire/src/Wire.cpp"
   "${CORE}/libraries/IWatchdog/src/IWatchdog.cpp"
-  ${SPI_SOURCES})
+  ${SPI_SOURCES}
+  ${RADIOLIB_SOURCES})
 target_include_directories(chipsat PRIVATE ${COMMON_INCLUDES}
   "${CORE}/libraries/SrcWrapper/src"
   "${CORE}/libraries/Wire/src"
   "${CORE}/libraries/IWatchdog/src"
-  "${CORE}/libraries/SPI/src")
+  "${CORE}/libraries/SPI/src"
+  ${RADIOLIB_INCLUDES})
 
 target_link_options(chipsat PRIVATE
   ${CHIP_FLAGS} -Os --specs=nano.specs

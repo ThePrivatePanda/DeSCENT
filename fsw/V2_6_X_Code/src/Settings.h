@@ -52,9 +52,10 @@ constexpr size_t kOffSetBy       = 21;
 // instead (0/1), four thresholds in percent (falling, each 1 to 99) and five gaps in ms (uint32), one
 // per band. The fixed gap is what a rate uses when it does not follow the battery, and what it uses
 // while the gauge cannot be read when it does. Each slot stands alone: the dashboard writes the same
-// flag and thresholds to a phase's transmit and log slots, this firmware does not care.
+// flag and thresholds to a phase's transmit and log slots, and one ground rate to both ground slots;
+// this firmware does not care.
 // Transmit: 0 sends back to back. Air log: 0 is a record per IMU reading (every 50 ms). Ground log:
-// what's kept on the ground, 0 keeps nothing. 1 to 19 is refused in every log value, used or not
+// what's kept on the ground, 0 keeps every record. 1 to 19 is refused in every log value, used or not
 constexpr size_t kOffRates       = 22;
 constexpr size_t kRateBytes      = 29;
 constexpr size_t kRateFixed      = 0;

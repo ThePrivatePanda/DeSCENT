@@ -736,8 +736,9 @@ static void testGroundTrickle()
         "gap 0: ten minutes on the ground keep every 50 ms record and every anchor, the last 30 s still in the ring, nothing dropped");
 }
 
-// Landed and asleep: what the ring keeps goes to the chip at once, still one per ground gap, in
-// order after the air. Without the landed mode the ground holds it in RAM
+// Landed and asleep: every record goes to the chip at once, whatever the ground gap (the controller
+// makes one a wake, and the wakes move with the jitter), in order after the air. Without the landed
+// mode the ground holds them in RAM and keeps one per gap
 static void testLanded()
 {
   for (int landed = 1; landed >= 0; --landed) {
@@ -757,7 +758,7 @@ static void testLanded()
     check(!landed || (log.waiting() == 0 && log.airWritten()), "landed: the ring is on the chip after the fall");
     log.setLanded(landed != 0);
     bool atOnce = true;
-    for (int i = 0; i < 40; ++i) {   // a record every 5 s, the gap is 10 s from the fall's last: 19 kept
+    for (int i = 0; i < 40; ++i) {   // a record every 5 s against a 10 s gap
       log.append(packetNumbered(counter++), fakeNow);
       for (int pass = 0; pass < 10; ++pass) {
         log.ensureSpace();
@@ -773,12 +774,12 @@ static void testLanded()
     for (size_t i = 1; i < read.ms.size(); ++i) {
       if (read.ms[i - 1] >= landedMs) {
         ++after;
-        spaced = spaced && read.ms[i] - read.ms[i - 1] == 10000;
+        spaced = spaced && read.ms[i] - read.ms[i - 1] == 5000;
       }
     }
     if (landed) {
-      check(atOnce && read.strict && after == 18 && spaced && log.dropped() == 0,
-            "landed mode: each kept record on the chip within 100 ms, one per 10 s, in order after the fall");
+      check(atOnce && read.strict && after == 39 && spaced && log.dropped() == 0,
+            "landed mode: every record on the chip within 100 ms, all 40 against a 10 s gap, in order after the fall");
     } else {
       check(!atOnce && log.waiting() > 0, "without it the ground holds them in the ring");
     }

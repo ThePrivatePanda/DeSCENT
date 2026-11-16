@@ -19,15 +19,17 @@ From fsw/, with only CMake installed:
 The first run downloads everything into fsw/deps, pinned and checked by sha256: the Arduino STM32
 core 2.12.0 and CMSIS sources, the compiler, ninja and OpenOCD. Deleting deps/ and build/ is always safe
 
-Arduino IDE still works: Generic WLE5JCIx, upload method SWD. It's needed for the library drivers
+Arduino IDE still works: Generic WLE5JCIx, upload method SWD. It's needed for the library drivers,
+except RadioLib 7.1.2: build.sh fetches that for the bench sketches that use it (lrfhss_tx)
 
 - STM32 core 2.12.0
-- fly at log level 3 (`CHIPSAT_LOG_LEVEL`), level 4 prints enough to overflow the GPS port buffer
+- fly at log level 3 (`CHIPSAT_LOG_LEVEL`), level 4 prints enough to overflow the GPS port buffer. 4 is still what a build gets
+- 915.0 MHz unless built with `-DCHIPSAT_RADIO_FREQUENCY_MHZ=903.5` or the like. The first line at boot says both, `start log=4 mhz=915.000`. The ground app's ChipSats page builds with either and sets the T-Beams to match
 
 ## Notes
 
 - our own drivers for all five parts by default. The library versions still build, pick them per part in config.h (SparkFun BNO08x 1.0.6, SparkFun u-blox GNSS 2.2.28, Adafruit BME280 2.3.0, Adafruit MAX1704X 1.0.3, RadioLib 7.1.2)
-- two phases, ground and air, and two landed states after a flight, looking for a fix and asleep. The IMU decides and a live altitude has to agree. docs/phases.md has every rule. A release is not detected
+- two phases, ground and air, and two landed states after a flight, looking for a fix and asleep. The IMU decides and a live altitude has to agree, except a fall: tumbling a second or 150 ms near 0 g is the air at once. A 15 m climb is the air too, and so is the IMU moving half of 2 s: the air at the slightest hint, the ground after a long quiet. A minute with the IMU quiet lands a board at any height. docs/phases.md has every rule
 - a packet every 60 s on the ground and every 1 s in the air, as shipped
 - after any reset it logs as in the air but transmits at the ground rate until it really climbs, for 5 min at most, so a reboot mid-fall keeps the fall
 - the flash log is a ring over the whole chip, a full chip overwrites its oldest sector. The last 30 s sit in RAM, so a take-off writes the 30 s before it. On the ground one record per 10 s reaches the chip. It only stops, for the rest of a boot, after an erase that times out or 3 failed writes in a row, and says `W FLASH stopped` once

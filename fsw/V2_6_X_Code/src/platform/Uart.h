@@ -20,7 +20,7 @@ public:
   Status begin(uint32_t baud);
   void end();
 
-  // Blocks when the 64 byte TX buffer is full
+  // Blocks when the TX buffer is full, kConsoleTxBufferBytes
   size_t write(const uint8_t *data, size_t length);
   size_t write(const char *text);
 

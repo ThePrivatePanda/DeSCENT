@@ -6,6 +6,10 @@
 
 #include "../Uart.h"
 
+// Both ports get it, the define is the core's
+static_assert(SERIAL_TX_BUFFER_SIZE >= ChipSatConfig::kConsoleTxBufferBytes,
+              "build with -DSERIAL_TX_BUFFER_SIZE (CMakeLists.txt, or build_opt.h in the IDE)");
+
 namespace ChipSatPlatform
 {
 

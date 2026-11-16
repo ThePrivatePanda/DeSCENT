@@ -310,7 +310,7 @@ bool FlashLog::holding() const
 
 // A full ring drops its oldest, counted unless the ground had let it go anyway. On the ground a gap
 // only thins the packet records to one per gap; the time and event records are always kept, and with
-// a gap of 0 every packet too
+// a gap of 0 or landed every packet too
 void FlashLog::push(const uint8_t *bytes)
 {
   if (ringPending_ == kRing) {
@@ -323,7 +323,7 @@ void FlashLog::push(const uint8_t *bytes)
   const uint32_t uptimeMs = get32(&bytes[kLogUptimeOffset]);
   bool keep = true;
   if (bytes[0] == kLogTypePacket) {
-    keep = air_ || groundGapMs_ == 0 || !keptAny_ || uptimeMs - keptMs_ >= groundGapMs_;
+    keep = air_ || landed_ || groundGapMs_ == 0 || !keptAny_ || uptimeMs - keptMs_ >= groundGapMs_;
     if (keep) {
       keptAny_ = true;
       keptMs_ = uptimeMs;

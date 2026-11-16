@@ -22,6 +22,13 @@ using namespace ChipSatConstants;
          (imu.magnetometerValid ? 4U : 0U) | (imu.orientationValid ? 8U : 0U);
 }
 
+// Which way is up in the IMU's frame, a unit vector: the third row of the orientation's rotation to
+// the world. The heading doesn't move it
+static ChipSatSensors::Vector3f upOf(const ChipSatSensors::Quaternionf &q)
+{
+  return {2.0f * (q.i * q.k - q.real * q.j), 2.0f * (q.j * q.k + q.real * q.i), 1.0f - 2.0f * (q.i * q.i + q.j * q.j)};
+}
+
 FlightController::FlightController(ChipSatPlatform::System &system,
                                    ChipSatPlatform::I2cBus &i2c,
                                    ChipSatPlatform::Uart &console,
@@ -56,7 +63,10 @@ void FlightController::setup()
     static_cast<FlashLog *>(log)->poolSystem(event);
   }, &flashLog_);
 
-  LOG_BOOT(Boot, "start") { line.field("log", CHIPSAT_LOG_LEVEL); }
+  LOG_BOOT(Boot, "start") {
+    line.field("log", CHIPSAT_LOG_LEVEL);
+    line.field("mhz", kRadioFrequencyMhz, 3);
+  }
 
   // Before anything is configured, because the radio and the packets both need to know which board
   // this is. Reads the settings block if a tool wrote one, and stands on the compiled defaults if not
@@ -94,7 +104,7 @@ void FlightController::setup()
   // Radio before the sensors, so a sensor that hangs at boot still leaves one packet on air.
   // Never halts, a missing sensor just goes out invalid
   radioReady_ = configRadio();
-  txIntervalMs_ = ChipSatSettings::active().transmit[static_cast<size_t>(phase_.phase())].fixedMs;   // the boot phase's
+  txIntervalMs_ = transmitRate().fixedMs;   // boot-air's
   updateLogGaps(false);   // the gauge isn't up yet
   sendStatusPacket();
 
@@ -137,7 +147,7 @@ void FlightController::beginSensors()
 
   if (flash_.begin() == Status::Ok) {
     flashLog_.begin();
-    flashLog_.setAir(phase_.logsAir());   // boot-air, whatever the radio does
+    flashLog_.setAir(phase_.logsAir());   // boot-air
     const uint8_t csr[4] = {static_cast<uint8_t>(resetCsr_), static_cast<uint8_t>(resetCsr_ >> 8),
                             static_cast<uint8_t>(resetCsr_ >> 16), static_cast<uint8_t>(resetCsr_ >> 24)};
     flashLog_.appendEvent(kLogEventBoot, system_.nowMs(), csr, sizeof csr);
@@ -244,6 +254,14 @@ bool FlightController::configRadio()
 void FlightController::loop()
 {
   system_.feedWatchdog();
+  if (asleep_) {
+    if (transmitDue()) {
+      cycleAsleep();
+    } else {
+      restUntilDue();
+    }
+    return;
+  }
   imu_.service();
   gps_.service();
   sampleSensors();
@@ -252,19 +270,17 @@ void FlightController::loop()
 
   if (transmitDue()) {
     runCycle();
-  } else if (asleep_) {
-    restUntilDue();
   } else {
     system_.idleUntilTick();
   }
 }
 
-// The chip only stays up while something waits to be written or an erase runs. Stop2 until the
-// IMU's next report, the next packet or the next record, whichever comes first
+// Asleep between wakes. The chip only stays up while something waits to be written or an erase runs,
+// then Stop2 until the next wake, kSleepMaxMs at a time
 void FlightController::restUntilDue()
 {
-  if (flashLog_.waiting() > 0 || flashLog_.busy()) {
-    flash_.resume();
+  if (flashLog_.ready() && (flashLog_.waiting() > 0 || flashLog_.busy())) {
+    flashLog_.ensureSpace();
     system_.idleUntilTick();
     return;
   }
@@ -273,16 +289,135 @@ void FlightController::restUntilDue()
     system_.idleUntilTick();
     return;
   }
-  const uint32_t now = system_.nowMs();
-  uint32_t ms = imu_.reportIntervalMs();
-  const uint32_t txLeft = previousReadMs_ + txIntervalMs_ - now;
-  ms = txLeft < ms ? txLeft : ms;
-  const uint32_t logGap = logGapMs_[static_cast<size_t>(Phase::Ground)];
-  if (logGap != 0 && now - logWrittenMs_ < logGap && logWrittenMs_ + logGap - now < ms) {
-    ms = logWrittenMs_ + logGap - now;
-  }
   console_.flush();
-  system_.sleepFor(ms);
+  system_.sleepFor(previousReadMs_ + txIntervalMs_ - system_.nowMs());
+}
+
+// One wake while asleep. The IMU and the barometer first, for a board that was moved or carried up,
+// then a short look for a fresh fix, then the packet with the held fix or the fresh one, its record,
+// and back to sleep. The phase gets the barometer and no IMU readings: asleep is no movement until
+// gravity says otherwise. Health isn't run, an IMU that won't wake gets one pin reset a wake here
+void FlightController::cycleAsleep()
+{
+  const uint32_t startMs = system_.nowMs();
+  const bool imuUp = wakeImu();
+  readForPacket();
+  phase_.imuLost(startMs);
+  if (wakeIfMoved()) {
+    return;
+  }
+
+  gps_.wake();
+  const uint32_t searchMs = ++wakes_ % kAsleepFixLongEvery == 0 ? kAsleepFixLongMs : kAsleepFixMs;
+  const uint32_t searchFromMs = system_.nowMs();
+  bool fresh = false;
+  while (!fresh && system_.nowMs() - searchFromMs < searchMs) {
+    system_.waitMs(1);
+    imu_.service();
+    gps_.service();
+    if (system_.nowMs() - gpsReadMs_ >= kGpsIntervalMs) {
+      gps_.read();
+      gpsReadMs_ = system_.nowMs();
+    }
+    if (gps_.pvtSeen() && gps_.lastPvtMs() != pvtSeenMs_) {
+      pvtSeenMs_ = gps_.lastPvtMs();
+      fresh = fixGood(system_.nowMs());
+    }
+  }
+  const uint32_t searchedMs = system_.nowMs() - searchFromMs;
+  if (fresh) {
+    heldFix_ = gps_.data();
+  }
+  anchorUtc(system_.nowMs());   // the uptime drifts with the LSI in Stop2, this puts it right
+  gps_.standby();
+
+  // the readings from before the search are too old for the packet by now
+  if (system_.nowMs() - env_.data().updatedMs > kEnvMaxAgeMs) {
+    readForPacket();
+    if (wakeIfMoved()) {
+      return;
+    }
+  }
+
+  flash_.resume();
+  const uint32_t builtMs = system_.nowMs();
+  runCycle();
+  flashLog_.append(packet_, builtMs);
+  imu_.sleep();
+  if (!imuUp) {
+    ChipSatLog::noteSystem(ChipSatLog::kSourceSensor, ChipSatLog::kSensorAside, ChipSatLog::kPartImu,
+                           ChipSatLog::kWhyAsleep, txIntervalMs_, system_.nowMs());
+  }
+  LOG_I(Cyc, "asleep") {
+    line.field("nexts", txIntervalMs_ / 1000);
+    line.field("imu", imuUp);
+    line.field("fix", fresh);
+    line.field("searchms", searchedMs);
+    line.field("wakems", system_.nowMs() - startMs);
+  }
+}
+
+// Imu::wake() brings a healthy hub's readings within kImuWakeBudgetMs. One that doesn't gets one pin
+// reset and kImuWatchSettleMs more, and the wake goes on without it
+bool FlightController::wakeImu()
+{
+  const auto orientedSince = [this](uint32_t fromMs, uint32_t forMs) {
+    for (;;) {
+      const uint32_t now = system_.nowMs();
+      const ChipSatSensors::IMUData &imu = imu_.data();
+      if (imu_.ready() && imu.orientationValid && now - imu.orientationUpdatedMs <= now - fromMs) {
+        return true;
+      }
+      if (now - fromMs >= forMs) {
+        return false;
+      }
+      system_.waitMs(kImuFreshPollMs);
+      imu_.service();
+    }
+  };
+  // at 1 Hz the first readings can come after the wake has stopped waiting for them
+  imu_.setReportInterval(kImuReportIntervalMs);
+  const uint32_t startMs = system_.nowMs();
+  imu_.wake();
+  if (orientedSince(startMs, kImuWakeBudgetMs)) {
+    return true;
+  }
+  imu_.pinReset(ChipSatLog::kWhyAsleep);
+  return orientedSince(system_.nowMs(), kImuWatchSettleMs);
+}
+
+// Awake for good: a climb on the barometer, as anywhere on the ground, or gravity more than
+// kAsleepTiltRad from where it lay as it fell asleep. No orientation now is no tilt; none then and
+// this one is where it lies
+bool FlightController::wakeIfMoved()
+{
+  const uint32_t now = system_.nowMs();
+  const ChipSatSensors::EnvironmentalData &env = env_.data();
+  if (env.valid && env.updatedMs != envSeenMs_) {
+    envSeenMs_ = env.updatedMs;
+    phase_.envSample(now, env.altitudeM);
+  }
+  if (!phase_.landed()) {
+    wakeUp(ChipSatLog::kPartEnv, ChipSatLog::kWhyClimb, 0);
+    return true;
+  }
+  const ChipSatSensors::IMUData &imu = imu_.data();
+  if (!imu.orientationValid || now - imu.orientationUpdatedMs > imuMaxAgeMs()) {
+    return false;
+  }
+  const ChipSatSensors::Vector3f up = upOf(imu.orientation);
+  if (!restUpKnown_) {
+    restUp_ = up;
+    restUpKnown_ = true;
+    return false;
+  }
+  const float cosine = up.x * restUp_.x + up.y * restUp_.y + up.z * restUp_.z;
+  if (cosine >= cosf(kAsleepTiltRad)) {
+    return false;
+  }
+  phase_.tilted(now);
+  wakeUp(ChipSatLog::kPartImu, ChipSatLog::kWhyTilted, static_cast<uint32_t>(acosf(fmaxf(cosine, -1.0f)) * 57.29578f + 0.5f));
+  return true;
 }
 
 // Each sensor at its own pace. Nothing here waits for the radio, and nothing waits for a reading it
@@ -290,27 +425,24 @@ void FlightController::restUntilDue()
 void FlightController::sampleSensors()
 {
   const uint32_t now = system_.nowMs();
-  // asleep the barometer and gauge are read for each packet and record instead, the GPS not at all
-  if (!asleep_) {
-    if (!envMeasuring_) {
-      if (now - envStartedMs_ >= kEnvIntervalMs) {
-        envMeasuring_ = env_.startMeasurement() == Status::Ok;
-        envStartedMs_ = now;
-      }
-    } else if (now - envStartedMs_ >= kEnvConversionMs) {
-      env_.read();   // the conversion is over, so this doesn't wait
-      envMeasuring_ = false;
+  if (!envMeasuring_) {
+    if (now - envStartedMs_ >= kEnvIntervalMs) {
+      envMeasuring_ = env_.startMeasurement() == Status::Ok;
+      envStartedMs_ = now;
     }
+  } else if (now - envStartedMs_ >= kEnvConversionMs) {
+    env_.read();   // the conversion is over, so this doesn't wait
+    envMeasuring_ = false;
+  }
 
-    if (now - gpsReadMs_ >= kGpsIntervalMs) {
-      gps_.read();
-      gpsReadMs_ = now;
-    }
+  if (now - gpsReadMs_ >= kGpsIntervalMs) {
+    gps_.read();
+    gpsReadMs_ = now;
+  }
 
-    if (now - gaugeReadMs_ >= kGaugeIntervalMs) {
-      gauge_.read();
-      gaugeReadMs_ = now;
-    }
+  if (now - gaugeReadMs_ >= kGaugeIntervalMs) {
+    gauge_.read();
+    gaugeReadMs_ = now;
   }
   followPhase();
 }
@@ -318,6 +450,7 @@ void FlightController::sampleSensors()
 void FlightController::readForPacket()
 {
   gauge_.read();
+  envStartedMs_ = system_.nowMs();
   if (env_.startMeasurement() == Status::Ok) {
     system_.waitMs(kEnvConversionMs);
     env_.read();
@@ -341,14 +474,34 @@ void FlightController::followPhase()
     imuSeenMs_ = imu.linearAccelerationUpdatedMs;
     const ChipSatSensors::Vector3f &a = imu.linearAccelerationMps2;
     const ChipSatSensors::Vector3f &g = imu.gyroscopeRadPerSec;
-    phase_.imuSample(now, sqrtf(a.x * a.x + a.y * a.y + a.z * a.z), sqrtf(g.x * g.x + g.y * g.y + g.z * g.z));
+    // The BNO085 takes gravity out of the linear acceleration. Put back, from the third row of the
+    // orientation's rotation to the world, it is what the sensor feels: 9.8 at rest, 0 falling free
+    float felt = NAN;
+    ChipSatSensors::Quaternionf q{0.0f, 0.0f, 0.0f, 0.0f};
+    if (imu.orientationValid && now - imu.orientationUpdatedMs <= imuMaxAgeMs()) {
+      q = imu.orientation;
+      const ChipSatSensors::Vector3f up = upOf(q);
+      const float x = a.x + 9.80665f * up.x;
+      const float y = a.y + 9.80665f * up.y;
+      const float z = a.z + 9.80665f * up.z;
+      felt = sqrtf(x * x + y * y + z * z);
+    }
+    phase_.imuSample(now, sqrtf(a.x * a.x + a.y * a.y + a.z * a.z), sqrtf(g.x * g.x + g.y * g.y + g.z * g.z), felt, q);
   } else if (now - imuSeenMs_ > imuMaxAgeMs()) {
     phase_.imuLost(now);
   }
+  // A conversion that overlaps a transmission reads off, so it never reaches the phase: on 2026-11-08
+  // board 18 (22 dBm, SF12) read 11 m high for exactly its 3.2 s on air every packet and was never
+  // flat, and board 17 read up to 10 m off as a packet started. The first conversion started after
+  // the transmission ended was back on, so there is no settle. The packets and the log keep them all
   const ChipSatSensors::EnvironmentalData env = env_.data();
   if (env.valid && env.updatedMs != envSeenMs_) {
     envSeenMs_ = env.updatedMs;
-    phase_.envSample(now, env.altitudeM);
+    const bool readBeforeTx = now - env.updatedMs > now - txBeganMs_;
+    const bool startedAfterTx = !transmitting_ && now - envStartedMs_ <= now - lastTxMs_;
+    if (readBeforeTx || startedAfterTx) {
+      phase_.envSample(now, env.altitudeM);
+    }
   }
   // GPS altitude stands in for a dead barometer. The driver's valid is a trusted 3D fix, fresh
   const ChipSatSensors::GPSData gps = gps_.data();
@@ -376,6 +529,7 @@ void FlightController::followPhase()
   if (phase_.logChanged()) {
     flashLog_.setAir(phase_.logsAir());   // into the air this writes the ring's last 30 s
     LOG_I(Phase, "log") { line.field("air", phase_.logsAir()); }
+    txIntervalMs_ = phaseTxIntervalMs(gauge_.data().valid);
   }
   const uint16_t interval = phase_.imuFast() ? kImuReportIntervalMs : kImuGroundIntervalMs;
   if (imu_.reportIntervalMs() != interval) {
@@ -385,16 +539,11 @@ void FlightController::followPhase()
   followLanding();
 }
 
-// Movement starts the fix over: the board may have been carried. The air with the IMU dead comes
-// without waking, so being in the air at all wakes it
+// Movement starts the fix over: the board may have been carried
 void FlightController::followLanding()
 {
   const uint32_t now = system_.nowMs();
   if (!phase_.landed()) {
-    if (asleep_) {
-      wakeUp(phase_.altitudeSource() == AltitudeSource::Gps ? ChipSatLog::kPartGps : ChipSatLog::kPartEnv,
-             ChipSatLog::kWhyImuDead);
-    }
     return;
   }
   if (!airWrittenSaid_ && flashLog_.airWritten()) {
@@ -402,14 +551,8 @@ void FlightController::followLanding()
     LOG_I(Flash, "landed") { line.field("records", flashLog_.records()); }
   }
   if (phase_.imuFast()) {
-    if (asleep_) {
-      wakeUp(ChipSatLog::kPartImu, ChipSatLog::kWhyMoving);
-    }
     lookingSinceMs_ = now;
     fixRun_ = 0;
-    return;
-  }
-  if (asleep_) {
     return;
   }
 
@@ -418,9 +561,7 @@ void FlightController::followLanding()
     const bool gap = gps_.lastPvtMs() - pvtSeenMs_ > kGpsPvtMaxAgeMs;
     pvtSeenMs_ = gps_.lastPvtMs();
     const ChipSatSensors::GPSData &fix = gps_.data();
-    const uint32_t limitMm = now - lookingSinceMs_ >= kFixRelaxMs ? kFixFairMm : kFixGoodMm;
-    const bool good = fix.valid && fix.updatedMs == pvtSeenMs_ && fix.horizontalAccuracyMm < limitMm &&
-                      now - lookingSinceMs_ >= kFixAfterLandingMs;
+    const bool good = fixGood(now);
     if (!good || gap) {
       fixRun_ = 0;
     }
@@ -436,15 +577,30 @@ void FlightController::followLanding()
   }
 }
 
+// The receiver's trusted 3D fix in the NAV-PVT last seen, under the hAcc limit, and not too soon after
+// landing
+bool FlightController::fixGood(uint32_t nowMs) const
+{
+  const ChipSatSensors::GPSData &fix = gps_.data();
+  const uint32_t limitMm = nowMs - lookingSinceMs_ >= kFixRelaxMs ? kFixFairMm : kFixGoodMm;
+  return fix.valid && fix.updatedMs == pvtSeenMs_ && fix.horizontalAccuracyMm < limitMm &&
+         nowMs - lookingSinceMs_ >= kFixAfterLandingMs;
+}
+
 void FlightController::goAsleep(uint32_t nowMs)
 {
   asleep_ = true;
   heldFix_ = bestFix_;
   gps_.standby();
+  const ChipSatSensors::IMUData &imu = imu_.data();
+  restUpKnown_ = imu.orientationValid && nowMs - imu.orientationUpdatedMs <= imuMaxAgeMs();
+  restUp_ = upOf(imu.orientation);
+  imu_.sleep();
   flashLog_.setLanded(true);
   envMeasuring_ = false;
+  wakes_ = 0;
   jitter_ = (static_cast<uint32_t>(ChipSatSettings::active().csid) * 2654435761UL) ^ nowMs ^ 1U;
-  expectParts();
+  health_.expect(false);
   ChipSatLog::noteSystem(ChipSatLog::kSourcePhase, ChipSatLog::kPhaseAsleep, ChipSatLog::kPartGps,
                          ChipSatLog::kWhyGoodFix, heldFix_.horizontalAccuracyMm, nowMs);
   LOG_I(Phase, "asleep") {
@@ -453,31 +609,35 @@ void FlightController::goAsleep(uint32_t nowMs)
   }
 }
 
-void FlightController::wakeUp(uint8_t part, uint8_t why)
+// The IMU is already up, from the wake that found the reason
+void FlightController::wakeUp(uint8_t part, uint8_t why, uint32_t detail)
 {
   asleep_ = false;
   flash_.resume();
   flashLog_.setLanded(false);
   gps_.wake();
   txIntervalMs_ = phaseTxIntervalMs(gauge_.data().valid);
-  expectParts();
-  ChipSatLog::noteSystem(ChipSatLog::kSourcePhase, ChipSatLog::kPhaseAwake, part, why, 0, system_.nowMs());
-  LOG_I(Phase, "awake") { line.field("phase", static_cast<unsigned int>(phase_.phase())); }
+  health_.expect(true);
+  ChipSatLog::noteSystem(ChipSatLog::kSourcePhase, ChipSatLog::kPhaseAwake, part, why, detail, system_.nowMs());
+  LOG_I(Phase, "awake") {
+    line.field("phase", static_cast<unsigned int>(phase_.phase()));
+    line.field("why", static_cast<unsigned int>(why));
+    line.field("detail", detail);
+  }
 }
 
-// Asleep the barometer and gauge are read once a packet, so they may be a whole gap old, with the
-// jitter and the time on air
-void FlightController::expectParts()
+// Boot-air transmits at the air's rate as it logs at it (decided 2026-11-16): a reset mid-fall is
+// heard at the air's gap from the first packet
+const ChipSatSettings::Rate &FlightController::transmitRate() const
 {
-  health_.expect(asleep_ ? txIntervalMs_ + kLandedJitterMs + radio_.timeOnAirMs(sizeof(packet_)) : 0, !asleep_);
+  return ChipSatSettings::active().transmit[static_cast<size_t>(phase_.logsAir() ? Phase::Air : Phase::Ground)];
 }
 
-// The gap after a packet in this phase: its fixed gap, or its battery table when it follows the
-// battery and the gauge reads
+// The gap after a packet now: the rate's fixed gap, or its battery table when it follows the battery
+// and the gauge reads
 uint32_t FlightController::phaseTxIntervalMs(bool socOkay)
 {
-  return gapFromRate(ChipSatSettings::active().transmit[static_cast<size_t>(phase_.phase())], socOkay,
-                     gauge_.data().cellPercentage);
+  return gapFromRate(transmitRate(), socOkay, gauge_.data().cellPercentage);
 }
 
 // Both log gaps for the charge now. Whether the air's one is used is logIfDue's call, each record
@@ -546,11 +706,7 @@ void FlightController::logIfDue()
   // boot-air took the air's gap alone, and a board set to 0 on the ground and 200 s in the air
   // logged nothing for its first 30 s after a reset (board 18, 2026-11-06)
   const uint32_t airGap = phase_.logsAir() ? logGapMs_[static_cast<size_t>(Phase::Air)] : airFixed;
-  // Asleep only the ground gap: nothing will take off without waking it first
-  uint32_t interval = phase_.phase() == Phase::Air ? airGap : (groundGap < airGap ? groundGap : airGap);
-  if (asleep_) {
-    interval = groundGap;
-  }
+  const uint32_t interval = phase_.phase() == Phase::Air ? airGap : (groundGap < airGap ? groundGap : airGap);
   bool due;
   if (interval == 0) {
     // every reading: a record each time the IMU delivers a new one, or at its rate with it dead
@@ -566,9 +722,6 @@ void FlightController::logIfDue()
 
   if (due) {
     logWrittenMs_ = now;
-    if (asleep_) {
-      readForPacket();
-    }
     // the counter of the packet that last went out, not the one being built next: the counter only
     // moves on a transmission, and a record carrying the next one can't be lined up against a radio log
     bool allFresh = false;
@@ -624,9 +777,6 @@ void FlightController::runCycle()
   CycleReads reads;
   reads.gateMs = now;
 
-  if (asleep_) {
-    readForPacket();
-  }
   bool allDataFresh = false;
   buildPacket(packet_, allDataFresh, packetCounter_);
 
@@ -670,7 +820,6 @@ void FlightController::runCycle()
     jitter_ ^= jitter_ << 5;
     const uint32_t up = jitter_ % (2 * kLandedJitterMs + 1);
     txIntervalMs_ = txIntervalMs_ + up < kLandedJitterMs ? 0 : txIntervalMs_ + up - kLandedJitterMs;
-    expectParts();
   }
 
   previousReadMs_ = system_.nowMs();
@@ -679,12 +828,9 @@ void FlightController::runCycle()
     line.field("nextms", txIntervalMs_);
     line.field("logms", logGapMs_[static_cast<size_t>(phase_.logsAir() ? Phase::Air : Phase::Ground)]);
     line.field("phase", static_cast<unsigned int>(phase_.phase()));
-    line.field("battery", ChipSatSettings::active().transmit[static_cast<size_t>(phase_.phase())].fromSoc && reads.socOkay);
+    line.field("battery", transmitRate().fromSoc && reads.socOkay);
     line.field("durms", previousReadMs_ - reads.gateMs);
     line.field("stackfree", system_.stackUntouchedBytes());   // the least ever free between heap and stack
-  }
-  if (asleep_) {
-    LOG_I(Cyc, "asleep") { line.field("nexts", txIntervalMs_ / 1000); }
   }
 }
 
@@ -704,6 +850,8 @@ void FlightController::transmit()
   LOG_D(Tx, "send") { line.field("step", "start"); }
 
   const uint32_t startMs = system_.nowMs();
+  transmitting_ = true;
+  txBeganMs_ = startMs;
   led_.transmitStarted();
   Status status = radio_.startTransmit(reinterpret_cast<const uint8_t *>(&packet_), sizeof(packet_));
   if (status != Status::Ok && !freshSetup) {
@@ -721,8 +869,10 @@ void FlightController::transmit()
     while (!radio_.transmitDone() && system_.nowMs() - startMs <= timeoutMs) {
       system_.waitMs(1);
       imu_.service();
-      sampleSensors();
-      logIfDue();
+      if (!asleep_) {
+        sampleSensors();
+        logIfDue();
+      }
     }
     const bool done = radio_.transmitDone();
     status = radio_.finishTransmit();
@@ -731,6 +881,7 @@ void FlightController::transmit()
     }
   }
   led_.transmitEnded();
+  transmitting_ = false;
   lastTxMs_ = system_.nowMs();
   const uint32_t txMs = lastTxMs_ - startMs;
 

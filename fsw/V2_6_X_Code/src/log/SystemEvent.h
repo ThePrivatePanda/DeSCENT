@@ -14,7 +14,7 @@ namespace ChipSatLog
 {
 
 // source
-constexpr uint8_t kSourceSensor = 1;   // Health.cpp, a sensor's recovery ladder
+constexpr uint8_t kSourceSensor = 1;   // Health.cpp, a sensor's recovery ladder, and FlightController for an IMU that won't wake asleep
 constexpr uint8_t kSourceBus = 2;      // platform/I2cWatch.cpp
 constexpr uint8_t kSourcePhase = 3;    // Phase.cpp, and FlightController for asleep and awake
 constexpr uint8_t kSourceRadio = 4;    // FlightController::transmit
@@ -35,12 +35,12 @@ constexpr uint8_t kSensorRetry = 1;     // went bad, the driver only re-reads. d
 constexpr uint8_t kSensorDefer = 2;     // reset held in the air, the part still partly works. detail as retry
 constexpr uint8_t kSensorReset = 3;     // first reset: IMU soft reset, BME280 or gauge restart, GPS port. detail 1 if the driver said ok
 constexpr uint8_t kSensorRestart = 4;   // second reset: IMU pin reset, GPS hot start. detail as reset
-constexpr uint8_t kSensorAside = 5;     // resets didn't help, left alone. detail: backoff ms
+constexpr uint8_t kSensorAside = 5;     // resets didn't help, left alone. detail: backoff ms, asleep the gap to the next wake
 constexpr uint8_t kSensorOk = 6;        // a good reading again. detail: ms it was bad, reason 0
 constexpr uint8_t kSensorPinReset = 7;  // IMU NRST pulsed, whoever asked. reason: kWhyBoot, kWhyBusStuck, the restart's failure or the ladder's reason. detail: failed restarts in a row before it
 constexpr uint8_t kSensorDriverRestart = 8;   // the IMU driver's own background restart ended. detail 1 ok, 0 failed. reason: kWhyNoAck, kWhyNoReset, kWhyNoEnable, 0 when ok
 // reason, sensor
-constexpr uint8_t kWhyAsleep = 1;     // IMU
+constexpr uint8_t kWhyAsleep = 1;     // IMU, asleep when it shouldn't be, or asleep after landing and it won't wake
 constexpr uint8_t kWhySilent = 2;     // IMU, every report stopped
 constexpr uint8_t kWhyPartial = 3;    // IMU, some reports stopped
 constexpr uint8_t kWhyStale = 4;      // BME280 or gauge, ready but no fresh reading
@@ -72,22 +72,28 @@ constexpr uint8_t kWhyClearSclHeld = 3;   // SCL never came up, clocking can't h
 constexpr uint8_t kPhaseToAir = 1;
 constexpr uint8_t kPhaseToGround = 2;
 constexpr uint8_t kPhaseDescent = 3;       // the barometer started falling in the air, which holds it there
-constexpr uint8_t kPhaseBootAirEnd = 4;    // the log goes from boot-air to the ground, the radio phase doesn't move
-constexpr uint8_t kPhaseImuFast = 5;       // the IMU to 20 Hz on the ground. reason kWhyMoving
+constexpr uint8_t kPhaseBootAirEnd = 4;    // the log and transmit gap go from boot-air to the ground's, the phase doesn't move
+constexpr uint8_t kPhaseImuFast = 5;       // the IMU to 20 Hz on the ground. reason kWhyMoving, or kWhyTilted out of asleep
 constexpr uint8_t kPhaseImuSlow = 6;       // back to 1 Hz on the ground without going up. reason kWhyQuiet
-constexpr uint8_t kPhaseAsleep = 7;        // landed with a fix held: GPS standby, Stop2. part GPS, reason kWhyGoodFix, detail hAcc mm
-constexpr uint8_t kPhaseAwake = 8;         // out of it, everything on again. reason kWhyMoving, or kWhyImuDead for the air on altitude
+constexpr uint8_t kPhaseAsleep = 7;        // landed with a fix held: everything off, a wake each ground gap. part GPS, reason kWhyGoodFix, detail hAcc mm
+constexpr uint8_t kPhaseAwake = 8;         // out of it, everything on again. reason kWhyTilted (detail deg) or kWhyClimb; old records kWhyMoving, kWhyImuDead
 // reason, phase
-constexpr uint8_t kWhyImuMotion = 1;       // most of 10 s of IMU readings moved
+constexpr uint8_t kWhyImuMotion = 1;       // old records only: most of 10 s of IMU readings moved
 constexpr uint8_t kWhyQuiet = 2;           // no moving reading for kLandedMs (30 s)
 constexpr uint8_t kWhyQuietNoAlt = 3;      // kGroundQuietMs (3 min), no altitude live all flight
 constexpr uint8_t kWhyBaroDescent = 4;
-constexpr uint8_t kWhyImuDead = 5;         // IMU missing past kImuDeadMs, the altitude's climb or rest decided
+constexpr uint8_t kWhyImuDead = 5;         // old records only: the IMU missing a minute, the altitude's rest or climb decided
 constexpr uint8_t kWhyBootAirLimit = 6;    // kBootAirMaxMs of uptime
-constexpr uint8_t kWhyMotionHeld = 7;      // the motion window kMotionHeldMs with the altitude live and no climb
-constexpr uint8_t kWhyQuietHigh = 8;       // quiet and flat kLandedHighMs, above half the climb
-constexpr uint8_t kWhyMoving = 9;          // kWakeMoving of the last kWakeReadings at 1 Hz moved
+constexpr uint8_t kWhyMotionHeld = 7;      // old records only: the 10 s window moving a minute, no climb
+constexpr uint8_t kWhyQuietHigh = 8;       // old records only: quiet and flat 5 min, above half the climb
+constexpr uint8_t kWhyMoving = 9;          // a reading at 1 Hz moved
 constexpr uint8_t kWhyGoodFix = 10;        // kFixRun fixes in a row under the hAcc limit
+constexpr uint8_t kWhyQuietImu = 11;       // no moving reading for kLandedImuMs (1 min), whatever the altitude says
+constexpr uint8_t kWhyTumbling = 12;       // kTumbleRadPerSec held kTumbleMs
+constexpr uint8_t kWhyFreeFall = 13;       // the felt acceleration under kFreeFallMps2 for kFreeFallMs
+constexpr uint8_t kWhyClimb = 14;          // a climb of kRiseGainM (kRiseGainGpsM) on the live altitude
+constexpr uint8_t kWhyMotionHint = 15;     // kHintMoving moving readings in kMotionWindowMs
+constexpr uint8_t kWhyTilted = 16;         // asleep, gravity more than kAsleepTiltRad from where it lay
 
 // what, radio. detail is the radio's last code (int16, sign extended) unless it says otherwise
 constexpr uint8_t kRadioTxFail = 1;      // reason: kWhyStartRefused or kWhyFinishFailed

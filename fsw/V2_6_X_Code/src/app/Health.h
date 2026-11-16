@@ -27,10 +27,10 @@ public:
   // never from inside the TX wait. air includes the boot-air
   void service(bool air);
 
-  // How the controller runs the parts now: the longest it leaves the barometer and the gauge between
-  // readings (0 at their own pace), and whether the GPS is meant to be talking (not in standby). A
-  // change starts that part's limits again. The IMU's pace comes from the IMU itself
-  void expect(uint32_t readGapMs, bool gpsOn);
+  // Whether the parts are meant to be running: false landed with a fix held, the IMU asleep and the
+  // GPS in standby, and neither is judged (the controller doesn't call service() then either). A
+  // change starts every part's limits again. The IMU's pace comes from the IMU itself
+  void expect(bool awake);
 
   const SensorWatch &imuWatch() const { return imu_; }
   const SensorWatch &envWatch() const { return env_; }
@@ -62,8 +62,7 @@ private:
   SensorWatch gps_;
 
   uint32_t beganMs_ = 0;
-  uint32_t readGapMs_ = 0;
-  bool gpsOn_ = true;
+  bool awake_ = true;
   uint32_t readsSinceMs_ = 0;   // the barometer's and gauge's limits count from here
   uint32_t gpsSinceMs_ = 0;
   uint32_t lastActionMs_ = 0;

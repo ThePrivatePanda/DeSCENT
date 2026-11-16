@@ -4,7 +4,7 @@
   "slots": [
     {"name": "ground transmit", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000]},
     {"name": "air transmit", "fixedMs": 1000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 30000, 60000, 120000, 180000]},
-    {"name": "ground log", "fixedMs": 10000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [10000, 10000, 10000, 10000, 10000]},
+    {"name": "ground log", "fixedMs": 60000, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [60000, 60000, 60000, 60000, 60000]},
     {"name": "air log", "fixedMs": 50, "follow": false, "percent": [75, 50, 35, 20], "intervalMs": [50, 50, 50, 50, 50]}
   ],
   "le": {

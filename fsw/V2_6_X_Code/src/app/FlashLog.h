@@ -132,9 +132,9 @@ public:
   // before the controller says otherwise
   void setAir(bool air);
 
-  // Landed and asleep, records come one per ground gap and the chip sleeps between them, so the ring
-  // writes what it keeps at once, as in the air, instead of holding the last 30 s. Still thinned
-  // to the ground gap
+  // Landed and asleep, the controller makes one record a wake and the chip sleeps between them, so
+  // the ring writes them at once, as in the air, instead of holding the last 30 s. Every one is kept:
+  // the wakes move with the jitter and can come closer than the ground gap
   void setLanded(bool landed) { landed_ = landed; }
 
   // One packet record per this many ms is kept on the ground, plus every time and event record. 0

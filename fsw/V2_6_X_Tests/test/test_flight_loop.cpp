@@ -1,8 +1,10 @@
 // FlightController's loop on the laptop: the real phase, watchdogs, flash log and settings, fake
-// drivers and a chip kept in RAM, and the landed states down to the sleep between packets. Once per
+// drivers and a chip kept in RAM, and the landed states down to the wakes while asleep. Once per
 // module
 //   for m in 1 2; do g++ -std=gnu++17 -Wall -Wextra -Itest/mock -I../V2_6_X_Code/src -DCHIPSAT_RADIO_MODULE=$m test/test_flight_loop.cpp ../V2_6_X_Code/src/app/{FlightController,FlashLog,Phase,Health,SensorWatch,Telemetry,RateGap,ImuValidity}.cpp ../V2_6_X_Code/src/Settings.cpp ../V2_6_X_Code/src/log/Log.cpp -o /tmp/flightloop$m && /tmp/flightloop$m; done
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <memory>
@@ -18,6 +20,7 @@ using ChipSatApp::LogRecord;
 
 static uint32_t fakeNow = 0;
 static std::string captured;
+static unsigned long long consoleSentNs = 0;   // when the last byte queued on the console is out
 
 struct World
 {
@@ -29,11 +32,21 @@ struct World
   uint32_t fixFromMs = 0xFFFFFFFF;   // a trusted fix every second from here
   uint32_t fixHaccMm = 5000;         // plus 100 mm per second past each fifth, so the run's best is the fifth
   uint32_t fixMissingMs = 0xFFFFFFFF;   // this second's NAV-PVT never comes
+  uint32_t noFixFromMs = 0xFFFFFFFF;    // NAV-PVTs keep coming from here, none with a fix
+  uint32_t utcFromMs = 0xFFFFFFFF;      // the receiver has resolved time from here
   int standbys = 0;
   int wakes = 0;
   int gpsTouchedAsleep = 0;   // restarts while in standby
-  uint32_t standbyMs = 0;
+  uint32_t standbyMs = 0;     // the first standby, the one that is falling asleep
   std::vector<uint8_t> chipAtStandby;
+  bool gpsOn = true;
+  uint32_t gpsWokeMs = 0;
+  std::vector<uint32_t> searches;   // ms from each wake of the GPS to its standby
+  ChipSatSensors::Quaternionf orientation;   // lying flat
+  uint32_t fedMs = 0;
+  uint32_t longestUnfedMs = 0;   // between two feeds of the watchdog, from asleepFromMs on
+  uint32_t asleepFromMs = 0xFFFFFFFF;
+  int sleepsAwakeParts = 0;   // Stop2 with the IMU or the GPS still on
   std::vector<std::pair<uint32_t, uint16_t>> intervals;   // when the IMU was set to which interval
   bool radioAsleep = false;
   int radioSleeps = 0;
@@ -51,6 +64,10 @@ struct World
   bool gaugeValid = true;
   uint32_t imuStopsAtMs = 0xFFFFFFFF;   // no reports from here on, the hub still answers
   bool startFails = false;
+  bool onAir = false;
+  float txOffsetM = 0.0f;   // the barometer this far off on a conversion that overlaps a transmission
+  uint32_t knockEveryMs = 0;   // one moving reading this often
+  uint32_t envStartedMs = 0;
   std::string boot;   // the IMU's pin, Wire and the IMU's begin, in the order they ran
 };
 static World world;
@@ -63,6 +80,7 @@ static bool nextEraseHangs = false;
 static int programs = 0;
 static ChipSatApp::FlashLog *currentLog = nullptr;
 static ChipSatDevices::Flash *currentFlash = nullptr;
+static ChipSatDevices::Imu *currentImu = nullptr;
 
 // the packet records of one chip image between two uptimes, as uptimes in chip order
 static std::vector<uint32_t> packetsIn(const std::vector<uint8_t> &chip, uint32_t fromMs, uint32_t toMs)
@@ -78,32 +96,76 @@ static std::vector<uint32_t> packetsIn(const std::vector<uint8_t> &chip, uint32_
   return out;
 }
 
+static void fed()
+{
+  if (fakeNow >= world.asleepFromMs) {
+    world.longestUnfedMs = std::max(world.longestUnfedMs, fakeNow - world.fedMs);
+  }
+  world.fedMs = fakeNow;
+}
+
 namespace ChipSatPlatform
 {
 uint32_t System::nowMs() const { return fakeNow; }
-void System::waitMs(uint32_t ms) const { fakeNow += ms; }
+// the real one feeds the watchdog on every tick of it
+void System::waitMs(uint32_t ms) const
+{
+  fed();
+  fakeNow += ms;
+  fed();
+}
 void System::idleUntilTick() const {}
+// kSleepMaxMs at most and a feed before it, as the real one
 uint32_t System::sleepFor(uint32_t ms) const
 {
+  ms = std::min(ms, ChipSatConfig::kSleepMaxMs);
+  fed();
   world.sleeps.push_back(ms);
   world.sleepsWithRing += currentLog->waiting() > 0 ? 1 : 0;
   world.sleepsFlashOn += currentFlash->paused() ? 0 : 1;
+  world.sleepsAwakeParts += !currentImu->sleeping() || world.gpsOn ? 1 : 0;
   fakeNow += ms;
   return ms;
 }
 void System::startWatchdog(uint32_t) {}
-void System::feedWatchdog() const {}
+void System::feedWatchdog() const { fed(); }
 ResetCause System::readAndClearResetCause() { return ResetCause(); }
 void System::paintStack() {}
 uint32_t System::stackUntouchedBytes() const { return 1000; }
 
+// The console as HardwareSerial runs it: kConsoleTxBufferBytes queued at kConsoleBaud, and a write
+// that finds the buffer full waits there, the loop with it
+static void consoleSends(size_t length)
+{
+  const unsigned long long byteNs = 10ULL * 1000000000ULL / ChipSatConfig::kConsoleBaud;
+  const unsigned long long bufferNs = ChipSatConfig::kConsoleTxBufferBytes * byteNs;
+  for (size_t i = 0; i < length; ++i) {
+    consoleSentNs = std::max(consoleSentNs, fakeNow * 1000000ULL) + byteNs;
+    while (consoleSentNs - fakeNow * 1000000ULL > bufferNs) {
+      ++fakeNow;
+    }
+  }
+}
+
 Uart::Uart(UartPort port) : port_(port) {}
 Status Uart::begin(uint32_t) { return Status::Ok; }
-size_t Uart::write(const uint8_t *data, size_t length) { captured.append(reinterpret_cast<const char *>(data), length); return length; }
-size_t Uart::write(const char *text) { captured += text; return strlen(text); }
+size_t Uart::write(const uint8_t *data, size_t length)
+{
+  captured.append(reinterpret_cast<const char *>(data), length);
+  if (port_ == UartPort::Console) {
+    consoleSends(length);
+  }
+  return length;
+}
+size_t Uart::write(const char *text) { return write(reinterpret_cast<const uint8_t *>(text), strlen(text)); }
 size_t Uart::available() { return 0; }
 int Uart::read() { return -1; }
-void Uart::flush() {}
+void Uart::flush()
+{
+  if (port_ == UartPort::Console) {
+    fakeNow = std::max(fakeNow, static_cast<uint32_t>((consoleSentNs + 999999) / 1000000));
+  }
+}
 
 Status I2cBus::begin(uint32_t, uint32_t) { world.boot += "wire "; return Status::Ok; }
 bool I2cBus::recover(uint32_t) { return false; }
@@ -134,6 +196,10 @@ void Imu::service()
   data_.linearAccelerationValid = data_.gyroscopeValid = data_.magnetometerValid = data_.orientationValid = true;
   data_.linearAccelerationUpdatedMs = data_.gyroscopeUpdatedMs = data_.magnetometerUpdatedMs = data_.orientationUpdatedMs = at;
   data_.linearAccelerationMps2.x = fakeNow >= world.moveAtMs && fakeNow < world.landAtMs ? 5.0f : world.imuAccel;
+  data_.orientation = world.orientation;
+  if (world.knockEveryMs != 0 && at % world.knockEveryMs < reportIntervalMs_) {
+    data_.linearAccelerationMps2.x = 3.0f;
+  }
   for (uint8_t i = 0; i < 4; ++i) {
     ++events_[i];
   }
@@ -144,7 +210,8 @@ Status Imu::resetHub() { return Status::Ok; }
 Status Imu::fullRestart() { return Status::Ok; }
 void Imu::pinReset(uint8_t reason) { world.boot += "pin" + std::to_string(reason) + " "; }
 
-// a NAV-PVT a second from fixFromMs, each a trusted fix, its latitude the second it came. Never UTC
+// a NAV-PVT a second from fixFromMs, each a trusted fix up to noFixFromMs, its latitude the second it
+// came. UTC from utcFromMs
 Gps::Gps(ChipSatPlatform::Uart &port, ChipSatPlatform::System &system) : port_(port), system_(system) {}
 Status Gps::begin() { ready_ = true; return Status::Ok; }
 Status Gps::read() { return Status::Ok; }
@@ -156,10 +223,13 @@ void Gps::service()
   }
   pvtSeen_ = byteSeen_ = true;
   lastPvtMs_ = lastByteMs_ = second;
-  data_.valid = true;
+  data_.valid = fakeNow < world.noFixFromMs;
   data_.updatedMs = second;
   data_.latitudeE7 = 370000000 + static_cast<int32_t>(second / 1000);
   data_.horizontalAccuracyMm = world.fixHaccMm + (second / 1000 % 5) * 100;
+  utcValid_ = fakeNow >= world.utcFromMs;
+  utcUptimeMs_ = second;
+  utcEpoch_ = 1794800000 + second / 1000;
 }
 void Gps::restartPort() { world.gpsTouchedAsleep += standby_ ? 1 : 0; }
 void Gps::hotStart() { world.gpsTouchedAsleep += standby_ ? 1 : 0; }
@@ -167,25 +237,39 @@ void Gps::standby()
 {
   standby_ = true;
   data_.valid = false;
-  ++world.standbys;
-  world.standbyMs = fakeNow;
-  world.chipAtStandby = memory;
+  utcValid_ = false;
+  world.gpsOn = false;
+  if (++world.standbys == 1) {
+    world.standbyMs = fakeNow;
+    world.chipAtStandby = memory;
+  } else {
+    world.searches.push_back(fakeNow - world.gpsWokeMs);
+  }
 }
 Status Gps::wake()
 {
   standby_ = false;
+  world.gpsOn = true;
+  world.gpsWokeMs = fakeNow;
   ++world.wakes;
   return Status::Ok;
 }
 
 EnvSensor::EnvSensor(ChipSatPlatform::I2cBus &bus, ChipSatPlatform::System &system) : bus_(bus), system_(system) {}
 Status EnvSensor::begin() { ready_ = true; return Status::Ok; }
-Status EnvSensor::startMeasurement() { return Status::Ok; }
+Status EnvSensor::startMeasurement()
+{
+  world.envStartedMs = fakeNow;
+  return Status::Ok;
+}
 Status EnvSensor::read()
 {
   data_.valid = true;
   data_.updatedMs = fakeNow;
   data_.altitudeM = fakeNow >= world.climbAtMs && fakeNow < world.landAtMs ? world.groundM + world.climbM : world.groundM;
+  if (world.onAir || (!world.txEnd.empty() && world.txEnd.back() >= world.envStartedMs)) {
+    data_.altitudeM += world.txOffsetM;
+  }
   return Status::Ok;
 }
 bool EnvSensor::restart() { return true; }
@@ -216,6 +300,7 @@ Status Radio::startTransmit(const uint8_t *data, size_t length)
   world.txFromAwake += !world.txStart.empty() && !world.radioAsleep ? 1 : 0;
   world.radioAsleep = false;   // the HAL's wake, before the first command
   world.sent.emplace_back(data, data + length);
+  world.onAir = true;
   world.txStartedMs = fakeNow;
   world.txStart.push_back(fakeNow);
   return Status::Ok;
@@ -223,6 +308,7 @@ Status Radio::startTransmit(const uint8_t *data, size_t length)
 bool Radio::transmitDone() { return fakeNow - world.txStartedMs >= world.toaMs; }
 Status Radio::finishTransmit()
 {
+  world.onAir = false;
   world.txEnd.push_back(fakeNow);
   return Status::Ok;
 }
@@ -312,17 +398,18 @@ struct Board
   FlightController flight{system, i2c, console, gpsPort, imu, gps, env, gauge, radio, led, flash, log};
 };
 
-// The air at airAtMs: the IMU moves from 12 s before, enough at 1 Hz to wake it and fill the window
-// at 20 Hz, and the barometer climbs from the whole second before, so that second's lowest is the
-// climb on the first reading after airAtMs's whole second starts
+// The air at airAtMs: the barometer climbs from the whole second before, so that second's lowest is
+// the climb on the first reading after airAtMs's whole second starts, and the IMU moves from then
+// too, which wakes it on its 1 Hz reading and is the hint a second later
 static std::unique_ptr<Board> boot(uint32_t airAtMs)
 {
   fakeNow = 0;
   captured.clear();
+  consoleSentNs = 0;
   world = World();
   if (airAtMs != 0xFFFFFFFF) {
     world.climbAtMs = airAtMs - airAtMs % 1000 - 1000;
-    world.moveAtMs = airAtMs - 12000;
+    world.moveAtMs = world.climbAtMs;
   }
   std::fill(memory.begin(), memory.end(), 0xFF);
   eraseDoneMs = 0;
@@ -332,6 +419,7 @@ static std::unique_ptr<Board> boot(uint32_t airAtMs)
   std::unique_ptr<Board> board(new Board());
   currentLog = &board->log;
   currentFlash = &board->flash;
+  currentImu = &board->imu;
   board->flight.setup();
   return board;
 }
@@ -370,14 +458,21 @@ static size_t txAfter(uint32_t ms)
   return world.txStart.size();
 }
 
-// The ground gap is 60 s, so the first cycle's packet goes out at 60 s and is on air 60.0-60.5 s
+// Boot-air sends at the air's 1 s gap until it ends at rest at 30 s, and the ground's 60 s gap puts
+// the next packet at 90 s, on air 90.0-90.5 s. Barometer readings taken on air never reach the
+// phase, so the take-off inside it is the IMU's: a knock at 75 s puts it at 20 Hz, and a drone
+// starting at 89.3 s is the hint on its 20th moving reading, 90.25 s
 static void testChangeDuringTx()
 {
-  std::unique_ptr<Board> board = boot(60100);
-  runUntil(*board, 63000);
-  const size_t during = txAfter(59000);
-  check(during + 1 < world.txStart.size() && world.txStart[during] < 60100 && world.txEnd[during] > 60100,
-        "the climb lands inside a transmission");
+  std::unique_ptr<Board> board = boot(0xFFFFFFFF);
+  world.knockEveryMs = 75000;
+  world.moveAtMs = 89300;
+  runUntil(*board, 93000);
+  const size_t line = captured.find(": now phase=1");
+  const uint32_t airMs = line == std::string::npos ? 0 : static_cast<uint32_t>(atol(captured.c_str() + captured.rfind("I PHASE ", line) + 8));
+  const size_t during = txAfter(89000);
+  check(during + 1 < world.txStart.size() && world.txStart[during] < airMs && world.txEnd[during] > airMs,
+        "the take-off lands inside a transmission");
   if (during + 1 < world.txStart.size()) {
     const uint32_t wait = world.txStart[during + 1] - world.txEnd[during];
     printf("     next packet %u ms after that one ended\n", static_cast<unsigned int>(wait));
@@ -389,8 +484,12 @@ static void testChangeBetweenTx()
 {
   std::unique_ptr<Board> board = boot(70000);
   runUntil(*board, 72000);
+  const size_t line = captured.find(": now phase=1");
+  const uint32_t airMs = line == std::string::npos ? 0 : static_cast<uint32_t>(atol(captured.c_str() + captured.rfind("I PHASE ", line) + 8));
   const size_t next = txAfter(61000);
-  check(next < world.txStart.size() && world.txStart[next] >= 70000 && world.txStart[next] <= 70400,
+  printf("     the air at %u ms, the next packet at %u ms\n", static_cast<unsigned int>(airMs),
+         static_cast<unsigned int>(next < world.txStart.size() ? world.txStart[next] : 0));
+  check(airMs > 61000 && next < world.txStart.size() && world.txStart[next] >= airMs && world.txStart[next] <= airMs + 400,
         "a phase change between packets makes the next one due at once");
 }
 
@@ -480,7 +579,7 @@ static void testGroundLogBands()
 {
   std::unique_ptr<Board> board = boot(0xFFFFFFFF);
   followBattery(logRate(ChipSatApp::Phase::Ground), 2000, 500);
-  runUntil(*board, 115000);   // the first cycle is at 60 s, and the ring holds 29 s back
+  runUntil(*board, 115000);   // the gaps move at the first cycle, a second in, and the ring holds 29 s back
   uint32_t least, most, count;
   gapsBetween(62000, 85000, least, most, count);
   check(count > 8 && least >= 2000 && most <= 2100, "ground log follows the battery: one kept per 2 s");
@@ -511,8 +610,8 @@ static void testRingKeepsFixedGapOnGround()
   check(count > 500 && most <= 60, "the ring on the ground ignores the air's bands");
 }
 
-// Boot-air is the ground to the radio and the air to the log, so its bands apply. It can end between
-// two cycles, and the ring needs the fixed gap from that moment and not from the next cycle
+// Boot-air is the ground to the phase and the air to the log, so the air's bands apply. It can end
+// between two cycles, and the ring needs the fixed gap from that moment and not from the next cycle
 static void testBootAirLogBands()
 {
   std::unique_ptr<Board> board = boot(115000);
@@ -536,6 +635,47 @@ static void testBootAirLogBands()
   runUntil(*board, 118000);
   gapsBetween(endedMs + 100, 115000, least, most, count);
   check(count > 20 && most <= 60, "the fixed gap is back as soon as boot-air ends");
+}
+
+// Boot-air transmits at the air's gap, as it logs (decided 2026-11-16). Left still it ends at rest
+// about 30 s in and the next packets wait the ground's 60 s; flown out of it the gap stays the air's
+static void testBootAirTransmitGap()
+{
+  std::unique_ptr<Board> board = boot(0xFFFFFFFF);
+  while (board->log.air() && fakeNow < 60000) {
+    board->flight.loop();
+    ++fakeNow;
+  }
+  const uint32_t endedMs = fakeNow;
+  runUntil(*board, 160000);
+  uint32_t most = 0, count = 0;
+  for (size_t i = 1; i < world.txStart.size() && world.txStart[i] < endedMs; ++i) {
+    most = std::max(most, world.txStart[i] - world.txEnd[i - 1]);
+    ++count;
+  }
+  printf("     boot-air ended at %u ms, %u gaps before it, the longest %u ms\n", static_cast<unsigned int>(endedMs),
+         static_cast<unsigned int>(count), static_cast<unsigned int>(most));
+  check(endedMs < 32000 && count >= 15 && most <= 1010, "boot-air, still: a packet every air gap (1 s) until it ends at rest");
+  const size_t next = txAfter(endedMs);
+  bool ground = next > 0 && next + 1 < world.txStart.size();
+  for (size_t i = next; ground && i <= next + 1; ++i) {
+    const uint32_t gap = world.txStart[i] - world.txEnd[i - 1];
+    printf("     %u ms after boot-air ended: a packet %u ms after the last\n", static_cast<unsigned int>(world.txStart[i] - endedMs),
+           static_cast<unsigned int>(gap));
+    ground = gap >= 60000 && gap <= 60010;
+  }
+  check(ground, "after bootairend the next packets go at the ground gap (60 s)");
+
+  board = boot(11000);   // the drone starts and climbs at 10 s, still in boot-air
+  runUntil(*board, 40000);
+  most = 0;
+  count = 0;
+  for (size_t i = 1; i < world.txStart.size(); ++i) {
+    most = std::max(most, world.txStart[i] - world.txEnd[i - 1]);
+    ++count;
+  }
+  check(captured.find(": now phase=1") != std::string::npos && board->log.air() && count >= 20 && most <= 1010,
+        "boot-air into the air: a packet every air gap throughout");
 }
 
 // an erase that never finishes stops logging for the boot, said once
@@ -595,6 +735,7 @@ struct SystemRecord
 {
   uint8_t source, what, part, reason;
   uint16_t count;
+  uint32_t detail;
 };
 
 static std::vector<SystemRecord> systemOnChip()
@@ -605,7 +746,9 @@ static std::vector<SystemRecord> systemOnChip()
     if (ChipSatApp::decodeRecord(&memory[index * ChipSatApp::kLogRecordSize], r) && r.type == ChipSatApp::kLogTypeEvent &&
         r.eventKind == ChipSatApp::kLogEventSystem) {
       out.push_back({r.eventData[1], r.eventData[2], r.eventData[3], r.eventData[4],
-                     static_cast<uint16_t>(r.eventData[5] | r.eventData[6] << 8)});
+                     static_cast<uint16_t>(r.eventData[5] | r.eventData[6] << 8),
+                     static_cast<uint32_t>(r.eventData[15] | r.eventData[16] << 8 | r.eventData[17] << 16 |
+                                           static_cast<uint32_t>(r.eventData[18]) << 24)});
     }
   }
   return out;
@@ -628,6 +771,19 @@ static void testImuPinAtBoot()
   check(world.boot == "pin" + std::to_string(ChipSatLog::kWhyBoot) + " wire imu ", "boot: IMU pin reset, then Wire, then the IMU's begin");
 }
 
+// The ground app reads which level and frequency a board was built with off this line. Run with
+// -DCHIPSAT_RADIO_FREQUENCY_MHZ=903.5 as well; not another log level, the other checks read its lines
+static void testStartLine()
+{
+  std::unique_ptr<Board> board = boot(0xFFFFFFFF);
+  char want[64];
+  snprintf(want, sizeof want, ": start log=%d mhz=%.3f\r\n", CHIPSAT_LOG_LEVEL, static_cast<double>(ChipSatConfig::kRadioFrequencyMhz));
+  printf("%s", captured.substr(0, captured.find('\n') + 1).c_str());
+  // the cycle count goes on from the boot before, a test process is one board
+  check(captured.rfind("I BOOT 0 c", 0) == 0 && captured.find(want) + strlen(want) == captured.find('\n') + 1,
+        "boot: the first line says the log level and the frequency");
+}
+
 // The IMU's reports stop on the ground: the ladder's steps reach the chip, and the console as before
 static void testSystemSensor()
 {
@@ -648,17 +804,19 @@ static void testSystemPhase()
   std::unique_ptr<Board> board = boot(60100);
   runUntil(*board, 70000);
   check(onChip(kSourcePhase, kPhaseBootAirEnd, kPartImu, kWhyQuiet), "phase: boot-air ending at rest is on the chip");
-  check(onChip(kSourcePhase, kPhaseToAir, kPartImu, kWhyImuMotion), "phase: the take-off on IMU motion is on the chip");
+  check(onChip(kSourcePhase, kPhaseToAir, kPartImu, kWhyMotionHint) || onChip(kSourcePhase, kPhaseToAir, kPartEnv, kWhyClimb),
+        "phase: the take-off on the hint or the climb is on the chip");
 }
 
-// A radio that refuses to start: set up again once, then the packet is lost
+// A radio that refuses to start: set up again once, then the packet is lost. The first packet after
+// boot-air is at 90 s
 static void testSystemRadio()
 {
   using namespace ChipSatLog;
   std::unique_ptr<Board> board = boot(0xFFFFFFFF);
   runUntil(*board, 50000);
   world.startFails = true;
-  runUntil(*board, 110000);
+  runUntil(*board, 140000);
   check(onChip(kSourceRadio, kRadioResetup, kPartRadio, kWhySetupOk) &&
         onChip(kSourceRadio, kRadioTxFail, kPartRadio, kWhyStartRefused),
         "radio: the set up again and the refused start are on the chip");
@@ -674,7 +832,7 @@ static void testGroundGapRules()
   const ChipSatSettings::Rate groundWas = ground, airWas = air;
   struct Case { uint32_t groundMs, airMs; };
   for (Case c : {Case{20, 100000}, Case{0, 100000}}) {
-    // setup() reads the defaults again, and the ground gap moves at the first cycle, 60 s
+    // setup() reads the defaults again, and the ground gap moves at the first cycle, a second in
     std::unique_ptr<Board> board = boot(0xFFFFFFFF);
     ground.fromSoc = air.fromSoc = false;
     ground.fixedMs = c.groundMs;
@@ -691,7 +849,10 @@ static void testGroundGapRules()
     }
   }
 
-  std::unique_ptr<Board> board = boot(130000);   // the defaults, 10 s and 50 ms
+  std::unique_ptr<Board> board = boot(130000);
+  ground.fromSoc = air.fromSoc = false;
+  ground.fixedMs = 10000;
+  air.fixedMs = 50;
   runUntil(*board, 140000);
   uint32_t least, most, count;
   gapsBetween(40000, 130000 - 31000, least, most, count);
@@ -714,7 +875,7 @@ static void testGroundZeroReachesTheChipAtOnce()
   ground.fromSoc = air.fromSoc = false;
   ground.fixedMs = 0;
   air.fixedMs = 200000;
-  runUntil(*board, 72000);   // the first cycle, at 60 s, puts these gaps in force
+  runUntil(*board, 72000);   // the first cycle, a second in, puts these gaps in force
   uint32_t least, most, count;
   gapsBetween(61000, 71000, least, most, count);
   check(count >= 190 && most <= 60, "ground 0: the last 10 s are on the chip already, one record per IMU reading");
@@ -752,14 +913,14 @@ static void testGoodFix()
   const uint32_t landed = landedMs();
   const uint32_t good = world.standbyMs;
   printf("     landed %u ms, asleep %u ms\n", static_cast<unsigned int>(landed), static_cast<unsigned int>(good));
-  check(landed > 145000 && landed < 155000, "landing 30 s after the board came to rest below half the climb");
-  check(world.standbys == 1 && good >= landed + 34000 && good <= landed + 36000,
+  check(landed > 145000 && landed < 155000, "landing 30 s after the board came to rest");
+  check(world.standbys >= 1 && good >= landed + 34000 && good <= landed + 36000,
         "5 m fixes all along: asleep on the fifth from 30 s after landing");
 
   board = flyAndLand(100000, 5000);
   world.fixMissingMs = good - good % 1000 - 2000;   // the third of the five
   runUntil(*board, 230000);
-  check(world.standbys == 1 && world.standbyMs >= good + 2000, "a missing second inside the five starts them again");
+  check(world.standbys >= 1 && world.standbyMs >= good + 2000, "a missing second inside the five starts them again");
 
   board = flyAndLand(100000, 15000);
   runUntil(*board, landed + 290000);
@@ -773,7 +934,48 @@ static void testGoodFix()
   check(world.standbys == 0, "30 m fixes: never held, the GPS keeps trying");
 }
 
-// Landed with a fix held, then left ten minutes, then flown again
+static ChipSatSettings::Rate &transmitRate(ChipSatApp::Phase phase)
+{
+  auto &settings = const_cast<ChipSatSettings::Settings &>(ChipSatSettings::active());
+  return settings.transmit[static_cast<size_t>(phase)];
+}
+
+static size_t occurrences(const std::string &in, const char *text)
+{
+  size_t n = 0;
+  for (size_t at = in.find(text); at != std::string::npos; at = in.find(text, at + 1)) {
+    ++n;
+  }
+  return n;
+}
+
+// the packets that went out after ms
+static std::vector<ChipSatTelemetry::TelemetryPacket> sentAfter(uint32_t ms)
+{
+  std::vector<ChipSatTelemetry::TelemetryPacket> out;
+  for (size_t i = txAfter(ms); i < world.sent.size(); ++i) {
+    ChipSatTelemetry::TelemetryPacket p;
+    memcpy(&p, world.sent[i].data(), sizeof p);
+    out.push_back(p);
+  }
+  return out;
+}
+
+// Flown, landed at 120 s, asleep on its fifth fix about a minute later. The watchdog is watched from
+// the return on
+static std::unique_ptr<Board> asleep()
+{
+  std::unique_ptr<Board> board = flyAndLand(100000, 5000);
+  runUntil(*board, 230000);
+  world.asleepFromMs = fakeNow;
+  world.longestUnfedMs = 0;
+  world.sleeps.clear();
+  world.sleepsWithRing = world.sleepsFlashOn = world.sleepsAwakeParts = 0;
+  return board;
+}
+
+// Landed with a fix held and left ten minutes with fixes to be had: a wake each ground gap, a fresh
+// fix each wake, one packet and one record, and Stop2 between with everything off
 static void testAsleep()
 {
   std::unique_ptr<Board> board = flyAndLand(100000, 5000);
@@ -789,69 +991,310 @@ static void testAsleep()
          static_cast<unsigned int>(worst));
   check(fall.size() >= (landed - 1000 - 62000) / 50 && worst <= 50, "the whole fall, every 50 ms, is on the chip before anything sleeps");
 
-  const size_t sentBefore = world.sent.size();
-  const size_t txBefore = world.txStart.size();
   const size_t capturedAt = captured.size();
+  world.asleepFromMs = fakeNow;
   world.sleeps.clear();
   runUntil(*board, asleepMs + 600000);
-  check(world.standbys == 1 && world.wakes == 0 && world.gpsTouchedAsleep == 0, "asleep: standby once, the GPS left alone after");
-  check(captured.find("recover", capturedAt) == std::string::npos, "asleep ten minutes: Health touched nothing");
+  check(captured.find("recover", capturedAt) == std::string::npos && world.boot.find("pin1 ") == std::string::npos &&
+        world.gpsTouchedAsleep == 0, "asleep ten minutes: Health touched nothing, no pin reset, the GPS left alone in standby");
 
-  bool held = world.sent.size() > sentBefore + 5;
-  for (size_t i = sentBefore; i < world.sent.size(); ++i) {
-    ChipSatTelemetry::TelemetryPacket p;
-    memcpy(&p, world.sent[i].data(), sizeof p);
-    held = held && (p.sensorValidity & ChipSatTelemetry::kGPSValidBit) && (p.latitudeE7 - 370000000) % 5 == 0 &&
-           p.latitudeE7 > 370000000 + static_cast<int32_t>(landed / 1000);
+  const std::vector<ChipSatTelemetry::TelemetryPacket> sent = sentAfter(asleepMs);
+  bool fresh = sent.size() >= 9;
+  int32_t lastLat = 370000000 + static_cast<int32_t>(asleepMs / 1000);
+  for (const ChipSatTelemetry::TelemetryPacket &p : sent) {
+    fresh = fresh && (p.sensorValidity & ChipSatTelemetry::kGPSValidBit) && p.latitudeE7 > lastLat;
+    lastLat = p.latitudeE7;
   }
-  check(held, "asleep: every packet carries the best fix of the run, GPS valid");
+  check(fresh, "asleep, fixes to be had: each packet carries a fresh one, GPS valid");
 
   uint32_t least = 0xFFFFFFFF, most = 0;
   bool moved = false;
-  for (size_t i = txBefore + 1; i < world.txStart.size(); ++i) {
+  const size_t first = txAfter(asleepMs);
+  for (size_t i = first + 1; i < world.txStart.size(); ++i) {
     const uint32_t gap = world.txStart[i] - world.txEnd[i - 1];
     least = std::min(least, gap);
     most = std::max(most, gap);
-    moved = moved || gap != world.txStart[txBefore + 1] - world.txEnd[txBefore];
+    moved = moved || gap != world.txStart[first + 1] - world.txEnd[first];
   }
-  printf("     asleep: %u packets, gaps %u to %u ms, %u sleeps\n", static_cast<unsigned int>(world.txStart.size() - txBefore),
-         static_cast<unsigned int>(least), static_cast<unsigned int>(most), static_cast<unsigned int>(world.sleeps.size()));
-  check(least >= 58000 && most <= 62200 && moved, "asleep: the ground gap give or take 2 s, not the same each time");
-  check(countOf("asleep nexts=") >= world.txStart.size() - txBefore - 1, "one console line per packet while asleep");
+  uint32_t longestSearch = 0;
+  for (uint32_t ms : world.searches) {
+    longestSearch = std::max(longestSearch, ms);
+  }
+  printf("     asleep: %u packets, gaps %u to %u ms, %u sleeps, GPS on at most %u ms a wake\n", static_cast<unsigned int>(sent.size()),
+         static_cast<unsigned int>(least), static_cast<unsigned int>(most), static_cast<unsigned int>(world.sleeps.size()),
+         static_cast<unsigned int>(longestSearch));
+  check(least >= 58000 && most <= 63500 && moved, "asleep: the ground gap give or take 2 s, not the same each time, plus the wake");
+  check(!world.searches.empty() && longestSearch <= 1500, "a fix to be had: the GPS on a second or so a wake");
+  check(countOf("asleep nexts=") == sent.size(), "one console line a wake");
 
-  const std::vector<uint32_t> records = packetsIn(memory, asleepMs + 1000, asleepMs + 600000);
-  bool tenS = records.size() >= 58;
+  const std::vector<uint32_t> records = packetsIn(memory, asleepMs + 1, fakeNow);
+  bool ordered = records.size() == sent.size();
   for (size_t i = 1; i < records.size(); ++i) {
-    tenS = tenS && records[i] > records[i - 1] && records[i] - records[i - 1] >= 10000 && records[i] - records[i - 1] <= 10100;
+    ordered = ordered && records[i] > records[i - 1];
   }
-  check(tenS, "asleep: a record per 10 s, in time order on the chip");
+  check(ordered, "asleep: one record a packet, in time order on the chip");
 
   uint32_t longest = 0;
   for (uint32_t ms : world.sleeps) {
     longest = std::max(longest, ms);
   }
-  check(world.sleeps.size() > 500 && longest <= 1000 && world.sleepsWithRing == 0 && world.sleepsFlashOn == 0,
-        "Stop2 between the IMU's polls, never with the ring holding records or the chip awake");
-
-  // picked up and flown again
-  const uint32_t movedMs = fakeNow + 500;
-  world.moveAtMs = movedMs;
-  world.climbAtMs = movedMs + 11000;
-  world.landAtMs = 0xFFFFFFFF;
-  const size_t txMoved = world.txStart.size();
-  runUntil(*board, movedMs + 30000);
-  uint32_t fastMs = 0;
-  for (const auto &i : world.intervals) {
-    fastMs = fastMs == 0 && i.first > movedMs && i.second == ChipSatConfig::kImuReportIntervalMs ? i.first : fastMs;
-  }
-  size_t fastTx = 0;
-  for (size_t i = txMoved + 1; i < world.txStart.size(); ++i) {
-    fastTx += world.txStart[i] - world.txEnd[i - 1] < 2000 ? 1 : 0;
-  }
-  check(world.wakes == 1 && fastMs > movedMs && fastMs < movedMs + 4000, "moved: woken at the 20 Hz step, a few seconds in");
-  check(!board->flash.paused() && fastTx > 5, "and then the air: the chip awake, packets at the air's gap");
+  printf("     longest Stop2 %u ms, longest without a feed %u ms\n", static_cast<unsigned int>(longest),
+         static_cast<unsigned int>(world.longestUnfedMs));
+  check(world.sleeps.size() > 100 && longest <= ChipSatConfig::kSleepMaxMs &&
+        world.longestUnfedMs < ChipSatConfig::kWatchdogTimeoutMs, "Stop2 4 s at a time at most, the watchdog fed between");
+  check(world.sleepsWithRing == 0 && world.sleepsFlashOn == 0 && world.sleepsAwakeParts == 0,
+        "Stop2 never with the ring holding records, the chip, the IMU or the GPS awake");
   check(world.txFromAwake == 0 && world.radioSleeps == static_cast<int>(world.txStart.size()),
         "the radio asleep after every packet, in every state, woken for the next");
+}
+
+// No fix to be had once asleep: each wake looks 10 s, every tenth 60 s, and sends the held fix with
+// its valid bit, the barometer and gauge read again for it. A fix again replaces it, and the time the
+// receiver has is anchored on the chip
+static void testAsleepGps()
+{
+  std::unique_ptr<Board> board = asleep();
+  const uint32_t noFixMs = fakeNow;
+  world.noFixFromMs = noFixMs;
+  const size_t searchesBefore = world.searches.size();
+  runUntil(*board, fakeNow + 12 * 72000);
+  std::vector<uint32_t> searches(world.searches.begin() + searchesBefore, world.searches.end());
+  bool paced = searches.size() >= 11;
+  for (size_t i = 0; i < searches.size(); ++i) {
+    const uint32_t want = (searchesBefore + i + 1) % ChipSatConfig::kAsleepFixLongEvery == 0 ? ChipSatConfig::kAsleepFixLongMs
+                                                                                             : ChipSatConfig::kAsleepFixMs;
+    paced = paced && searches[i] >= want && searches[i] <= want + 10;
+  }
+  printf("     no fix: %u wakes, the GPS on", static_cast<unsigned int>(searches.size()));
+  for (uint32_t ms : searches) {
+    printf(" %u", static_cast<unsigned int>(ms));
+  }
+  printf(" ms\n");
+  check(paced, "no fix to be had: the GPS on 10 s a wake, 60 s every tenth");
+
+  const std::vector<ChipSatTelemetry::TelemetryPacket> sent = sentAfter(noFixMs);
+  const uint8_t bits = ChipSatTelemetry::kGPSValidBit | ChipSatTelemetry::kEnvironmentalValidBit |
+                       ChipSatTelemetry::kStateOfChargeValidBit | ChipSatTelemetry::kQuaternionValidBit;
+  bool held = sent.size() >= 11;
+  for (const ChipSatTelemetry::TelemetryPacket &p : sent) {
+    held = held && (p.sensorValidity & bits) == bits && p.latitudeE7 == sent[0].latitudeE7 &&
+           p.latitudeE7 <= 370000000 + static_cast<int32_t>(noFixMs / 1000);
+  }
+  check(held, "and every packet carries the held fix, GPS valid, barometer, gauge and IMU fresh");
+
+  world.noFixFromMs = 0xFFFFFFFF;
+  world.utcFromMs = fakeNow;
+  const uint32_t backMs = fakeNow;
+  runUntil(*board, fakeNow + 72000);
+  const std::vector<ChipSatTelemetry::TelemetryPacket> after = sentAfter(backMs);
+  bool anchored = false;
+  LogRecord record;
+  for (uint32_t index = 0; index < ChipSatApp::kLogRecordCount; ++index) {
+    anchored = anchored || (ChipSatApp::decodeRecord(&memory[index * ChipSatApp::kLogRecordSize], record) &&
+                            record.type == ChipSatApp::kLogTypeTime && record.uptimeMs >= backMs);
+  }
+  check(!after.empty() && after[0].latitudeE7 > 370000000 + static_cast<int32_t>(backMs / 1000) &&
+        (after[0].sensorValidity & ChipSatTelemetry::kGPSValidBit) && anchored,
+        "a fix again: it replaces the held one, and the receiver's time goes on the chip");
+}
+
+// Asleep, turned about the vertical it sleeps on: that is the heading, which the magnetometer moves on
+// a still board. Tipped 30 deg it is awake at the next wake, the IMU at 20 Hz, and the fix search
+// starts again, asleep once more on five
+static void testAsleepTilt()
+{
+  std::unique_ptr<Board> board = asleep();
+  const size_t capturedAt = captured.size();
+  world.orientation = {0.0f, 0.0f, sinf(0.7854f), cosf(0.7854f)};
+  const size_t searchesBefore = world.searches.size();
+  runUntil(*board, fakeNow + 3 * 63500);
+  check(world.searches.size() >= searchesBefore + 3 && captured.find("awake phase=", capturedAt) == std::string::npos,
+        "turned 90 deg about the vertical: three wakes, still asleep");
+
+  world.orientation = {sinf(0.2618f), 0.0f, 0.0f, cosf(0.2618f)};
+  const uint32_t tippedMs = fakeNow;
+  runUntil(*board, tippedMs + 63500 + 6000);
+  uint32_t degrees = 0;
+  for (const SystemRecord &r : systemOnChip()) {
+    if (r.source == ChipSatLog::kSourcePhase && r.what == ChipSatLog::kPhaseAwake && r.reason == ChipSatLog::kWhyTilted) {
+      degrees = r.detail;
+    }
+  }
+  printf("     tipped 30 deg: awake, detail %u deg\n", static_cast<unsigned int>(degrees));
+  check(degrees == 30 && onChip(ChipSatLog::kSourcePhase, ChipSatLog::kPhaseImuFast, ChipSatLog::kPartImu, ChipSatLog::kWhyTilted),
+        "tipped 30 deg: awake at the next wake, its reason tilted and the angle, the IMU to 20 Hz");
+  runUntil(*board, tippedMs + 63500 + 75000);
+  uint32_t slowMs = 0;
+  for (const auto &i : world.intervals) {
+    slowMs = i.first > tippedMs && i.second == ChipSatConfig::kImuGroundIntervalMs ? i.first : slowMs;
+  }
+  check(slowMs != 0 && occurrences(captured.substr(capturedAt), " asleep haccmm=") == 1,
+        "lying still again: 1 Hz after its 30 s and asleep on five fixes from 30 s after that");
+}
+
+// Asleep with the IMU still, carried 30 m up: the barometer read at the next wake is the climb, the
+// air without the IMU stepping up first, so the wake says climb, and then the air's packets
+static void testAsleepClimb()
+{
+  std::unique_ptr<Board> board = asleep();
+  world.moveAtMs = 0xFFFFFFFF;
+  world.climbAtMs = fakeNow + 500;
+  world.landAtMs = 0xFFFFFFFF;
+  const uint32_t climbMs = fakeNow;
+  runUntil(*board, fakeNow + 63500 + 15000);
+  size_t fastTx = 0;
+  for (size_t i = txAfter(climbMs) + 1; i < world.txStart.size(); ++i) {
+    fastTx += world.txStart[i] - world.txEnd[i - 1] < 2000 ? 1 : 0;
+  }
+  check(onChip(ChipSatLog::kSourcePhase, ChipSatLog::kPhaseAwake, ChipSatLog::kPartEnv, ChipSatLog::kWhyClimb) &&
+        onChip(ChipSatLog::kSourcePhase, ChipSatLog::kPhaseToAir, ChipSatLog::kPartEnv, ChipSatLog::kWhyClimb),
+        "asleep, carried 30 m up with the IMU still: woken by the climb, into the air");
+  check(!board->flash.paused() && fastTx > 5, "and then the air: the chip awake, packets at the air's gap");
+}
+
+// Asleep, the IMU stops answering: each wake gives it one pin reset, goes on without it and still
+// sends its packet. A dead IMU never wakes the board
+static void testAsleepImuDead()
+{
+  std::unique_ptr<Board> board = asleep();
+  const size_t capturedAt = captured.size();
+  const uint32_t deadMs = fakeNow;
+  world.imuStopsAtMs = deadMs;
+  const size_t searchesBefore = world.searches.size();
+  runUntil(*board, fakeNow + 5 * 70000);
+  const size_t wakes = world.searches.size() - searchesBefore;
+  printf("     IMU dead: %u wakes, %u pin resets, %u packets\n", static_cast<unsigned int>(wakes),
+         static_cast<unsigned int>(occurrences(world.boot, "pin1 ")), static_cast<unsigned int>(sentAfter(deadMs).size()));
+  check(wakes >= 4 && occurrences(world.boot, "pin1 ") == wakes && sentAfter(deadMs).size() == wakes,
+        "IMU dead asleep: one pin reset a wake, and every wake still sends its packet");
+  check(onChip(ChipSatLog::kSourceSensor, ChipSatLog::kSensorAside, ChipSatLog::kPartImu, ChipSatLog::kWhyAsleep) &&
+        captured.find("recover", capturedAt) == std::string::npos && captured.find("awake phase=", capturedAt) == std::string::npos,
+        "set aside on the chip, Health touching nothing, and still asleep");
+}
+
+// A ground rate of 0 in both slots: back to back and every reading on the ground, and asleep the
+// wakes back to back, a packet and a record each, never more than the 2 s jitter apart
+static void testAsleepGroundZero()
+{
+  ChipSatSettings::Rate &tx = transmitRate(ChipSatApp::Phase::Ground);
+  ChipSatSettings::Rate &log = logRate(ChipSatApp::Phase::Ground);
+  const ChipSatSettings::Rate txWas = tx, logWas = log;
+  std::unique_ptr<Board> board = flyAndLand(100000, 5000);
+  tx.fixedMs = log.fixedMs = 0;
+  tx.fromSoc = log.fromSoc = false;
+  runUntil(*board, 230000);
+  const uint32_t asleepMs = world.standbyMs;
+  runUntil(*board, std::max(fakeNow, asleepMs) + 30000);
+  const size_t first = txAfter(asleepMs);
+  uint32_t most = 0;
+  for (size_t i = first + 1; i < world.txStart.size(); ++i) {
+    most = std::max(most, world.txStart[i] - world.txEnd[i - 1]);
+  }
+  const size_t packets = world.txStart.size() - first;
+  printf("     ground rate 0: asleep at %u ms, %u wakes in 30 s, gaps up to %u ms\n", static_cast<unsigned int>(asleepMs),
+         static_cast<unsigned int>(packets), static_cast<unsigned int>(most));
+  check(asleepMs != 0 && packets >= 8 && most <= ChipSatConfig::kLandedJitterMs + 1500 &&
+        packetsIn(memory, asleepMs + 1, fakeNow).size() == packets,
+        "ground rate 0: asleep all the same, the wakes back to back, a packet and a record each");
+  tx = txWas;
+  log = logWas;
+}
+
+// Board 18 on 2026-11-08 at 22 dBm SF12: its barometer read 11 m high on every conversion that
+// overlapped one of its 3.2 s transmissions. Here every 5 s in the air, up at 60 s and down at 120 s.
+// Those readings never reach the phase, so the landing is the 30 s one after coming to rest, not
+// the IMU's own minute. The log keeps every reading
+static void testBarometerOffAir()
+{
+  std::unique_ptr<Board> board = flyAndLand(0xFFFFFFFF, 5000);
+  world.toaMs = 3187;
+  world.txOffsetM = 11.0f;
+  auto &settings = const_cast<ChipSatSettings::Settings &>(ChipSatSettings::active());
+  const uint32_t airWas = settings.transmit[static_cast<size_t>(ChipSatApp::Phase::Air)].fixedMs;
+  settings.transmit[static_cast<size_t>(ChipSatApp::Phase::Air)].fixedMs = 5000;
+  runUntil(*board, 200000);
+  const uint32_t landed = landedMs();
+  printf("     transmissions 61-160 s %u, landed %u ms\n", static_cast<unsigned int>(txAfter(160000) - txAfter(61000)),
+         static_cast<unsigned int>(landed));
+  check(txAfter(160000) - txAfter(61000) >= 10, "transmitting every 8 s in the air");
+  // 3.2 s on air outlasts kAltitudeStaleMs, so the barometer isn't live through each one and the
+  // landing can come at the first transmission after the 30 s: within one 8.2 s cycle
+  check(landed > 145000 && landed < 159000 &&
+        onChip(ChipSatLog::kSourcePhase, ChipSatLog::kPhaseToGround, ChipSatLog::kPartImu, ChipSatLog::kWhyQuiet),
+        "barometer off while transmitting: landed flat 30 s after rest, not on the IMU's minute");
+  uint32_t offset = 0, clean = 0;
+  LogRecord record;
+  for (uint32_t index = 0; index < ChipSatApp::kLogRecordCount; ++index) {
+    if (ChipSatApp::decodeRecord(&memory[index * ChipSatApp::kLogRecordSize], record) && record.type == ChipSatApp::kLogTypePacket &&
+        record.uptimeMs > 125000 && (record.packet.sensorValidity & ChipSatTelemetry::kEnvironmentalValidBit) != 0) {
+      offset += record.packet.environmentalAltitudeCm == 11100 ? 1 : 0;
+      clean += record.packet.environmentalAltitudeCm == 10000 ? 1 : 0;
+    }
+  }
+  printf("     records after landing with the barometer 11 m off %u, clean %u\n", static_cast<unsigned int>(offset),
+         static_cast<unsigned int>(clean));
+  check(offset > 100 && clean > 100, "the log keeps the offset readings as well as the clean ones");
+  settings.transmit[static_cast<size_t>(ChipSatApp::Phase::Air)].fixedMs = airWas;
+}
+
+// A desk board knocked every 3 s, transmitting at SF12 every 5 s, its barometer 40 m high on every
+// conversion that overlaps a packet: whole seconds of it, which a climb with a moving reading near
+// would take for the air. They never reach the phase, so it stays on the ground
+static void testDeskKnockedOffAir()
+{
+  std::unique_ptr<Board> board = boot(0xFFFFFFFF);
+  world.toaMs = 3187;
+  world.txOffsetM = 40.0f;
+  world.knockEveryMs = 3000;
+  auto &settings = const_cast<ChipSatSettings::Settings &>(ChipSatSettings::active());
+  const uint32_t groundWas = settings.transmit[static_cast<size_t>(ChipSatApp::Phase::Ground)].fixedMs;
+  settings.transmit[static_cast<size_t>(ChipSatApp::Phase::Ground)].fixedMs = 5000;
+  runUntil(*board, 300000);
+  check(txAfter(61000) + 25 <= world.txStart.size(), "transmitting every 8 s from the first gap on");
+  check(!onChip(ChipSatLog::kSourcePhase, ChipSatLog::kPhaseToAir, ChipSatLog::kPartImu, ChipSatLog::kWhyClimb) &&
+        captured.find(": now phase=1") == std::string::npos,
+        "knocked on a desk, the barometer 40 m up through every packet: never the air");
+  settings.transmit[static_cast<size_t>(ChipSatApp::Phase::Ground)].fixedMs = groundWas;
+}
+
+// Up at 60 s and down at 120 s with the receiver never finding a fix: the IMU's landing alone puts it
+// on the ground's transmit gap, while it is still landed and looking for a fix, not asleep
+static void testLandedNoFixGroundGap()
+{
+  ChipSatSettings::Rate &air = transmitRate(ChipSatApp::Phase::Air);
+  ChipSatSettings::Rate &ground = transmitRate(ChipSatApp::Phase::Ground);
+  const ChipSatSettings::Rate airWas = air, groundWas = ground;
+  std::unique_ptr<Board> board = flyAndLand(0, 5000);
+  world.noFixFromMs = 0;
+  air.fromSoc = ground.fromSoc = false;
+  air.fixedMs = 1000;
+  ground.fixedMs = 20000;
+  runUntil(*board, 300000);
+  const uint32_t landed = landedMs();
+
+  uint32_t airMost = 0;
+  for (size_t i = txAfter(62000) + 1; i < txAfter(118000); ++i) {
+    airMost = std::max(airMost, world.txStart[i] - world.txEnd[i - 1]);
+  }
+  uint32_t least = 0xFFFFFFFF, most = 0;
+  const size_t first = txAfter(landed + 1000);
+  for (size_t i = first + 1; i < world.txStart.size(); ++i) {
+    least = std::min(least, world.txStart[i] - world.txEnd[i - 1]);
+    most = std::max(most, world.txStart[i] - world.txEnd[i - 1]);
+  }
+  printf("     no fix: landed %u ms, air gaps up to %u ms, %u packets after with gaps %u to %u ms\n",
+         static_cast<unsigned int>(landed), static_cast<unsigned int>(airMost),
+         static_cast<unsigned int>(world.txStart.size() - first), static_cast<unsigned int>(least),
+         static_cast<unsigned int>(most));
+  check(landed > 145000 && landed < 155000 &&
+        onChip(ChipSatLog::kSourcePhase, ChipSatLog::kPhaseToGround, ChipSatLog::kPartImu, ChipSatLog::kWhyQuiet),
+        "no fix all along: landed on the IMU 30 s after coming to rest");
+  check(airMost <= 1100 && world.txStart.size() - first >= 6 && least >= 20000 && most <= 20100,
+        "no fix: 1 s gaps in the air, the ground's 20 s from the landing on");
+  check(world.standbys == 0 && world.gpsOn && countOf(" asleep haccmm=") == 0,
+        "and all the while still looking for a fix: the GPS on, never asleep");
+  air = airWas;
+  ground = groundWas;
 }
 
 int main()
@@ -865,16 +1308,26 @@ int main()
   testLogGaugeUnread();
   testRingKeepsFixedGapOnGround();
   testBootAirLogBands();
+  testBootAirTransmitGap();
   testStuckErase();
   testBackToBackSf12();
   testGroundZeroReachesTheChipAtOnce();
   testImuPinAtBoot();
+  testStartLine();
   testSystemSensor();
   testSystemPhase();
   testSystemRadio();
   testGroundGapRules();
   testGoodFix();
   testAsleep();
+  testAsleepGps();
+  testAsleepTilt();
+  testAsleepClimb();
+  testAsleepImuDead();
+  testAsleepGroundZero();
+  testBarometerOffAir();
+  testDeskKnockedOffAir();
+  testLandedNoFixGroundGap();
   printf("%s: %d checks, %d failed\n", failures == 0 ? "PASSED" : "FAILED", checks, failures);
   return failures == 0 ? 0 : 1;
 }

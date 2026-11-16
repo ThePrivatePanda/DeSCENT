@@ -367,27 +367,20 @@ static void testImu()
   }
 }
 
-// Landed and asleep: the IMU at 1 Hz, the barometer and gauge read once a packet, the GPS in
-// standby. None of it is a fault. Woken, the GPS is judged again after its own grace
+// Landed and asleep the IMU sleeps and the GPS is in standby. The controller runs no pass then, but
+// one that ran would judge neither, so neither is reset. Woken, each is judged again after its grace,
+// and an IMU still asleep then is the fault it always was
 static void testExpected()
 {
   Health &h = *fresh();
-  world.imuIntervalMs = 1000;
+  run(h, 3000, false);
+  world.imuAsleep = true;
   world.gpsTalking = false;
-  h.expect(32000, false);
-  const uint32_t until = fakeNow + 600000;
-  while (fakeNow < until) {
-    imu.service();
-    gps.service();
-    if (fakeNow % 30000 == 0) {
-      env.read();
-      gauge.read();
-    }
-    h.service(false);
-    fakeNow += 10;
-  }
-  check(world.actions.empty() && captured.empty(), "asleep ten minutes: IMU at 1 Hz, readings a packet apart, GPS in standby, nothing done");
-  h.expect(0, true);
+  h.expect(false);
+  run(h, 600000, false);
+  check(world.actions.empty() && captured.empty(), "asleep ten minutes, the IMU asleep and the GPS in standby: nothing done");
+  world.imuAsleep = false;
+  h.expect(true);
   run(h, 9000, false);
   check(world.actions.empty(), "awake, the GPS still quiet 9 s: its grace");
   run(h, 2000, false);
@@ -398,6 +391,15 @@ static void testExpected()
   check(countOf("imu") == 0, "1 Hz, silent 15 s: not yet, 20 reports is the line");
   run(h, 8000, false);
   check(countOf("imu.softreset") == 1, "silent past 20 s at 1 Hz: soft reset");
+
+  Health &again = *fresh();
+  world.imuAsleep = true;
+  again.expect(false);
+  run(again, 60000, false);
+  again.expect(true);
+  run(again, 3500, false);
+  check(countOf("imu.pinreset") == 0 && countOf("imu.softreset") == 1 && logged("reason=asleep"),
+        "awake with the IMU still asleep: no pin reset while it was meant to sleep, a soft reset once it wasn't");
 }
 
 // Each step of the ladder goes to the sink with its codes, in the order the console says them

@@ -80,6 +80,11 @@ set(CORE_SHA 8d1ff26959c4cef55996f25b8403b029234264dc962793cff832e9ddc27e7544)
 set(CMSIS_VERSION 6.2.0)
 set(CMSIS_URL https://github.com/stm32duino/ArduinoModule-CMSIS/releases/download/${CMSIS_VERSION}/CMSIS-${CMSIS_VERSION}.tar.bz2)
 set(CMSIS_SHA e9dcf458a333cda8d4332bb3a4058e8c3de1626c4a567250c60151b590a1d8ce)
+# RadioLib, for the bench sketches that use it. The version the library drivers and the IDE use; the
+# tag's archive, hashed on download. Its src/ is the same as what the IDE's library manager installs
+set(RADIOLIB_VERSION 7.1.2)
+set(RADIOLIB_URL https://github.com/jgromes/RadioLib/archive/refs/tags/${RADIOLIB_VERSION}.tar.gz)
+set(RADIOLIB_SHA c8137dc814a639ee5b920a04173f41104b90dc858bd61a0e203b75512ec1ec13)
 
 set(GCC_VERSION 14.2.1-1.1)
 set(OPENOCD_VERSION 0.12.0-7)
@@ -134,13 +139,15 @@ endif()
 
 # Downloads url into deps/<name>, unless deps/<name>/.ok already says this version is there.
 # The archive's own top folder is dropped when it has one. Anything after the sha is a list of
-# patterns, then only matching paths are unpacked
+# patterns, then only matching paths are unpacked. They go in .ok with the sha, so adding a pattern
+# unpacks again instead of leaving the new folder missing
 function(fetch name url sha)
   set(patterns ${ARGN})
   set(dest "${DEPS}/${name}")
+  string(JOIN " " stamp ${sha} ${patterns})
   if(EXISTS "${dest}/.ok")
     file(READ "${dest}/.ok" have)
-    if(have STREQUAL "${sha}")
+    if(have STREQUAL "${stamp}")
       return()
     endif()
   endif()
@@ -168,7 +175,7 @@ function(fetch name url sha)
   endif()
   file(REMOVE_RECURSE "${DEPS}/_unpack")
   file(REMOVE "${archive}")
-  file(WRITE "${dest}/.ok" "${sha}")
+  file(WRITE "${dest}/.ok" "${stamp}")
 endfunction()
 
 
@@ -297,6 +304,7 @@ endif()
 # long for Windows)
 fetch(STM32-${CORE_VERSION} "${CORE_URL}" ${CORE_SHA}
   "*/cores/arduino/*" "*/libraries/SrcWrapper/*" "*/libraries/Wire/*" "*/libraries/IWatchdog/*" "*/libraries/SPI/*"
+  "*/libraries/SubGhz/*"
   "*/variants/STM32WLxx/WL54JCI_WL55JCI_WLE4J(8-B-C)I_WLE5J(8-B-C)I/*"
   "*/system/Drivers/STM32WLxx_HAL_Driver/*" "*/system/Drivers/CMSIS/Device/ST/STM32WLxx/*"
   "*/system/STM32WLxx/*" "*/system/ldscript.ld" "*/License.md")
@@ -341,6 +349,17 @@ if(SKETCH_NAME)
   endif()
 endif()
 
+# RadioLib is fetched and compiled only for a sketch that names it, directly or by including the
+# library radio driver, so the flight software and the other sketches build exactly as before
+set(RADIOLIB "")
+if(SKETCH_INO)
+  file(READ "${SKETCH_INO}" text)
+  if(text MATCHES "RadioLib\\.h|RadioRadiolib\\.cpp")
+    fetch(RadioLib-${RADIOLIB_VERSION} "${RADIOLIB_URL}" ${RADIOLIB_SHA} "*/src/*" "*/license.txt")
+    set(RADIOLIB "${DEPS}/RadioLib-${RADIOLIB_VERSION}")
+  endif()
+endif()
+
 # one build/ for everything: the core objects don't depend on which sketch is on top, so swapping
 # between the flight software and a bench sketch only rebuilds the sketch. The stamp says what's in there
 set(stamp "")
@@ -354,6 +373,7 @@ if(NOT EXISTS "${BUILD}/build.ninja" OR NOT stamp STREQUAL "${want}")
                           "-DCMAKE_TOOLCHAIN_FILE=${ROOT}/cmake/arm-none-eabi.cmake"
                           "-DCHIPSAT_SKETCH=${SKETCH_INO}"
                           "-DCHIPSAT_DEFINES=${DEFINES}"
+                          "-DCHIPSAT_RADIOLIB=${RADIOLIB}"
                   RESULT_VARIABLE rc)
   if(NOT rc EQUAL 0)
     message(FATAL_ERROR "configure failed")

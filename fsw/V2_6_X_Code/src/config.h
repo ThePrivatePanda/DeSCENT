@@ -60,6 +60,11 @@ constexpr uint8_t kChipSatId = CHIPSAT_ID;   // per board, -DCHIPSAT_ID=12
 static_assert(kChipSatId != 0, "0 reads as a board that exists; 255 is the unset value");
 
 constexpr uint32_t kConsoleBaud = 115200;
+// The core's TX buffer, SERIAL_TX_BUFFER_SIZE, set in CMakeLists.txt and build_opt.h. A packet's
+// cycle prints about 900 bytes at log level 4 before the radio starts, and with the core's 64 bytes
+// the loop waited about 70 ms for them to go out, losing one or two IMU readings each transmission
+// (2026-11-08 pulls, gaps of 100-160 ms in the 20 Hz records). Holding a whole cycle, nothing waits
+constexpr size_t   kConsoleTxBufferBytes = 2048;
 
 // LED pin levels. Nobody has checked which one actually lights it
 constexpr uint8_t kLedLevelAtBoot = LOW;
@@ -90,8 +95,9 @@ constexpr uint32_t kUtcAnchorIntervalMs = 10000;
 // the fixed gap, so a fresh image never moves with the battery. ms, ground then air. A gap of 0 is
 // every IMU reading (20 Hz) in either phase, all of it kept. On the ground that fills the 2 MB chip
 // in about 27 minutes and then overwrites the oldest sectors, older flights included (decided
-// 2026-11-06; from 2026-10-22 a ground 0 wrote nothing, before that it was every reading too)
-constexpr uint32_t kLogFixedMsDefault[2] = {10000, 50};
+// 2026-11-06; from 2026-10-22 a ground 0 wrote nothing, before that it was every reading too).
+// The ground's is the ground transmit gap: the page writes one ground rate to both (2026-11-16)
+constexpr uint32_t kLogFixedMsDefault[2] = {60000, 50};
 
 // 30 s at 50 ms, 38.4 KB of static RAM. A full chip overwrites its oldest sector, so a board nobody
 // cleared still logs (decided 2026-10-19, was stop-when-full)
@@ -118,45 +124,75 @@ constexpr uint8_t  kLogSystemRuns = 8;   // runs open at once, 20 bytes each. Fu
 // What decides the phase
 constexpr float    kQuietAccelMps2 = 2.0f;      // a reading under this and kQuietGyro is quiet: lying in grass in some wind is not 0.5
 constexpr float    kQuietGyroRadPerSec = 0.35f; // about 20 degrees a second
-constexpr uint32_t kMotionWindowMs = 10000;     // the air when kMotionFraction of the readings in this window moved
+// The air at the slightest hint, the ground only after a long quiet (decided 2026-11-09): the old
+// 10 s window, 80 % moving and 75 % filled, was lost to every brown-out, IMU gap and run of bad
+// readings. Half the readings of 2 s at 20 Hz moving is a hint; a few bad readings are not, and a
+// gap of up to a second still leaves room for it. Replayed on the 2026-11-07/08 pulls, 1-4 s windows
+// and 10-40 readings put the same flights up within 1.5 s of each other and kept the boards in the
+// air on handling alone just as long (fsw/tools/phase_replay.py)
+constexpr uint32_t kMotionWindowMs = 2000;
 constexpr uint32_t kMotionSlotMs = 50;          // one slot per IMU report
-constexpr float    kMotionFraction = 0.8f;      // so the air comes 8 s into a running drone, 5 s of handling never
-constexpr float    kMotionFilled = 0.75f;       // and this much of the window got a reading: 6 s of motion at least, after a gap too
-constexpr uint32_t kLandedMs = 30000;           // no moving reading this long, at any height, is the ground
+constexpr uint16_t kHintMoving = 20;            // moving readings in the window that are the air
+constexpr uint32_t kLandedMs = 30000;           // no moving reading this long, flat with an altitude live, is the ground at any height
+// No moving reading this long is the ground whatever the altitude says. Boards lying still on
+// 2026-11-08 read under 0.14 m/s2 and 2 deg/s while their barometer jumped too much to read flat, and
+// board 17 transmitted back to back until its battery browned out 8.5 min after touchdown. A running
+// drone reads moving within seconds, a fall the barometer sees resets the count (kDescentStepM), and
+// a tumble takes a board back to the air at once (kTumbleRadPerSec), so a minute costs little air
+// time and strands a board for a minute at most
+constexpr uint32_t kLandedImuMs = 60000;
 constexpr uint32_t kGroundQuietMs = 180000;     // instead of kLandedMs when no altitude was live all flight
 constexpr uint32_t kDescentBinMs = 1000;        // the barometer is falling when kDescentBins of these in a row
 constexpr uint8_t  kDescentBins = 4;            // each have their lowest and highest reading kDescentStepM
 constexpr float    kDescentStepM = 5.0f;        // under the bin before: 5 m/s for 3 s
-constexpr uint32_t kImuDeadMs = 60000;          // the IMU missing this long hands the phase to altitude
 constexpr uint32_t kBootAirMaxMs = 300000;      // ms of uptime, boot-air logging ends here at the latest
-constexpr uint32_t kMotionHeldMs = 60000;       // the motion window this long is the air with no climb, for a pressurised cabin
 constexpr float    kFlatAltitudeM = 3.0f;       // flat: each second's lowest and highest barometer reading both stay within this
 constexpr float    kFlatAltitudeGpsM = 15.0f;   // the same on GPS altitude
-constexpr uint32_t kLandedHighMs = 300000;      // quiet and flat this long is the ground at any height: a tree, a roof
-constexpr uint8_t  kWakeMoving = 3;             // this many of the last kWakeReadings at 1 Hz moving puts the IMU at 20 Hz
-constexpr uint8_t  kWakeReadings = 5;
 constexpr uint32_t kWakeQuietMs = 30000;        // 20 Hz on the ground this long without a moving reading is 1 Hz again
+// A fall at 20 Hz is the air at once, from the ground or boot-air, no climb needed. Every drop pulled
+// so far (boards 9, 17, 18, 2026-10-18 and 11-08) tumbled at a median 448-663 deg/s for 7 s and
+// more, handling never had a median over 188 deg/s and only in bursts. Some releases also read near
+// 0 g for 250-370 ms before the tumble: the felt acceleration, gravity put back from the quaternion
+constexpr float    kTumbleRadPerSec = 5.236f;   // 300 deg/s
+constexpr uint32_t kTumbleMs = 1000;            // held this long
+constexpr float    kFreeFallMps2 = 3.0f;        // felt acceleration under this
+constexpr uint32_t kFreeFallMs = 150;           // held this long
+constexpr uint32_t kSpellGapMs = 200;           // either goes on across a gap in the readings this short, a tumble across readings under its line too
+// The orientation turned this much against kTurnSpanMs before counts as movement for the quiet
+// timers, never for the air: a fall nearly always turns, if slowly. On 2026-11-08 boards lying still
+// turned 0.03-0.6 deg in 5 s at the median and at most 7.3 deg at the 99th percentile, falls 74-131
+// deg at the median and 8-31 deg in their slowest 5 s. One 70.6 deg jump on a still board (board 17
+// boot 4, the magnetometer's heading coming in) is why it can't take a board to the air
+constexpr float    kTurnedRad = 0.2618f;        // 15 deg, twice the still boards' 99th percentile
+constexpr uint32_t kTurnSpanMs = 5000;
 
-// Landed after a flight, the GPS looks for a fix to hold, then everything but the IMU sleeps
-// (FlightController.h). The receiver's own hAcc on a trusted 3D fix, kFixRun in a row
+// Landed after a flight, the GPS looks for a fix to hold, then everything sleeps and wakes once a
+// ground transmit gap for one packet (FlightController.h). The receiver's own hAcc on a trusted 3D
+// fix, kFixRun in a row
 constexpr uint32_t kFixGoodMm = 10000;
 constexpr uint32_t kFixFairMm = 20000;          // what will do once kFixRelaxMs have passed since landing
 constexpr uint32_t kFixRelaxMs = 300000;
 constexpr uint8_t  kFixRun = 5;
 constexpr uint32_t kFixAfterLandingMs = 30000;  // the first of the run no sooner than this after landing
 constexpr uint32_t kLandedJitterMs = 2000;      // each transmit gap asleep moves up to this either way, so boards that landed together don't keep colliding
+// Asleep, each wake looks this long for a fresh fix, longer every kAsleepFixLongEvery-th, and sends
+// the held one when none is good enough (the user, 2026-11-16)
+constexpr uint32_t kAsleepFixMs = 10000;
+constexpr uint32_t kAsleepFixLongMs = 60000;
+constexpr uint32_t kAsleepFixLongEvery = 10;
+// Gravity this far from where it lay when it fell asleep is a board that was moved: awake again. The
+// same 15 deg as kTurnedRad, picked, not measured. Gravity only, so the heading the magnetometer
+// corrects on a still board (70.6 deg once on board 17) can't wake it
+constexpr float    kAsleepTiltRad = 0.2618f;
 
-// Altitude: the vertical rate and height in the Phase log line, the climb and the flat the IMU needs,
-// and the phase itself once the IMU is dead
+// Altitude: the vertical rate and height in the Phase log line, the climb, and the flat the IMU's
+// landing needs
 constexpr uint32_t kPhaseRateWindowMs = 800;    // the vertical rate is over at least this long
 constexpr float    kPhaseBaselineRateMps = 0.3f; // the ground baseline only follows a sat this still
 constexpr float    kPhaseBaselineGain = 0.02f;   // per altitude reading, so about 10 s to settle on the barometer
-constexpr float    kRiseGainM = 15.0f;          // climbed this far above the baseline on the barometer, with the IMU moving or dead, is the air
+constexpr float    kRiseGainM = 15.0f;          // climbed this far above the baseline on the barometer, whatever the IMU says, is the air
 constexpr float    kRiseGainGpsM = 30.0f;       // on GPS altitude: it drifted 13 m on the ground on 2026-10-13
 constexpr uint32_t kAltitudeStaleMs = 3000;     // an altitude source older than this is not live
-constexpr float    kQuietAltitudeM = 4.0f;      // IMU dead: still within this, about half a hectopascal
-constexpr float    kQuietAltitudeGpsM = 8.0f;   // GPS altitude wanders this much lying still
-constexpr uint32_t kLandedNoImuMs = 120000;     // IMU dead: this long still below half the climb is the ground
 
 // How often a packet goes out: the gap after each, per flight phase (app/Phase.h), as a fresh image
 // carries them in its settings block; the dashboard writes a board's own. Each phase has a fixed gap
@@ -248,7 +284,12 @@ constexpr float kSeaLevelPressureHpa = 1013.25f;
 constexpr uint32_t kGaugeRetryMs = 10000;   // how often read() tries again to start a MAX17048 that failed
 
 // Radio
-constexpr float    kRadioFrequencyMhz = 915.0f;
+// From the build like the spreading factor below, so the ground app can put one board on another
+// channel: -DCHIPSAT_RADIO_FREQUENCY_MHZ=903.5. The T-Beams have to be told the same, or hear nothing
+#ifndef CHIPSAT_RADIO_FREQUENCY_MHZ
+#define CHIPSAT_RADIO_FREQUENCY_MHZ 915.0
+#endif
+constexpr float    kRadioFrequencyMhz = CHIPSAT_RADIO_FREQUENCY_MHZ;
 constexpr float    kRadioBandwidthKhz = 125.0f;
 // Both of these are free of the module. Spreading factor changes time on air and how far a packet
 // carries, not how much power goes out: 55 bytes at 125 kHz CR 4/7 is 143 ms at SF7, 456 ms at SF9
@@ -270,9 +311,10 @@ constexpr uint8_t  kRadioSyncWord = 0x12;
 constexpr uint16_t kRadioPreambleLength = 8;
 constexpr float    kRadioCurrentLimitMa = 140.0f;   // 0 to 140. applyPaConfig overwrites it, see Radio.h
 
-// Imu::wake() and setReportInterval(), ms, plus up to 325 ms for a try already started. Flight no longer sleeps the IMU
-// for a transmission (the new boards run every sensor through 22 dBm SF12). Unbounded it could take
-// 9.7 s with a hub that takes writes and never answers. A guess, not measured
+// Imu::wake(), ms, plus up to 325 ms for a try already started. Only asleep after landing, once a
+// wake; flight no longer sleeps the IMU for a transmission (the new boards run every sensor through
+// 22 dBm SF12). Unbounded it could take 9.7 s with a hub that takes writes and never answers. A
+// guess, not measured
 constexpr uint32_t kImuWakeBudgetMs = 1500;
 
 // Sleep mode (WFI) between loop passes and in every wait of 1 ms or more. Only the core stops:
@@ -281,7 +323,7 @@ constexpr uint32_t kImuWakeBudgetMs = 1500;
 // measured; false builds the old spinning loop for the comparison
 constexpr bool kSleepWhenIdle = true;
 
-// Landed with a fix held, Stop2 instead of WFI between polls, packets and records; false keeps WFI, for an A/B
+// Landed with a fix held, Stop2 instead of WFI between wakes; false keeps WFI, for an A/B
 constexpr bool kDeepSleepWhenLanded = true;
 constexpr uint32_t kSleepMaxMs = 4000;   // one Stop2 at most: the IWDG (kWatchdogTimeoutMs) keeps counting through it
 

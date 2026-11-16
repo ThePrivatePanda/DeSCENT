@@ -457,6 +457,12 @@ static uint8_t restartIndex = 0;
 static uint8_t restartFailures = 0;   // in a row. Any at all and the next try is the pin
 static uint8_t restartWhy = 0;        // the last failure's kWhy code
 
+// setReportInterval()'s Set Features, one a service() call like the restart's. Waiting for each
+// reply and spacing them as configureReports does held the loop 372 ms at the 1 Hz to 20 Hz switch
+// (board 17, 2026-11-08), readings lost at the start of whatever moved it
+static uint8_t intervalIndex = 4;   // the next report to send, 4 once all have gone
+static uint8_t intervalTries = 0;
+
 // A hub that doesn't ACK or never says reset complete may be stuck past where the I2C reset reaches
 // (boards 15 and 18, 2026-11: only a power-on brought theirs back). A held bus or a quarantined IMU
 // is the bus watchdog's and isn't counted
@@ -574,6 +580,18 @@ void Imu::service()
     restartStep();
   } else if (!sleeping_) {
     update();
+    if (ready_ && intervalIndex < 4) {
+      if (sendSetFeature(bus_, intervalIndex, static_cast<uint32_t>(reportIntervalMs_) * 1000UL) == Status::Ok) {
+        ++intervalIndex;
+        intervalTries = 0;
+      } else if (++intervalTries >= kImuEnableAttempts) {
+        LOG_W(Imu, "reports") {
+          line.field("ms", reportIntervalMs_);
+          line.field("failed", static_cast<unsigned int>(intervalIndex));
+        }
+        intervalIndex = 4;
+      }
+    }
   }
 }
 
@@ -927,7 +945,9 @@ Status Imu::setReportInterval(uint16_t ms)
   if (!ready_ || sleeping_) {
     return Status::NotReady;
   }
-  return configureReports(0, kImuWakeBudgetMs) ? Status::Ok : Status::Failed;
+  intervalIndex = 0;
+  intervalTries = 0;
+  return Status::Ok;
 }
 
 Status Imu::fullRestart()
