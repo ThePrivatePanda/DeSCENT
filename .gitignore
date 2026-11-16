@@ -26,12 +26,6 @@ ground/.playwright-mcp/
 *.obj
 *.elf.map
 
-# Private working notes, never published
-docs/internals/BATON.md
-docs/internals/notes/
-docs/internals/HANDOFF.md
-docs/internals/PROGRESS.md
-
-# private, never public
-docs/internals/
+# private, never public: every docs folder, at any depth
+docs/
 .claude/council-cache/
