@@ -561,3 +561,65 @@ test('a refusal over which board an image came from is told from any other', () 
   assert.equal(B.isOtherBoardRefusal('no debug probe found'), false);
   assert.equal(B.isOtherBoardRefusal(''), false);
 });
+
+// An SDR program as /api/programs gives it (command.rs)
+const PROG = (more) => Object.assign({
+  key: 'cmd:sdr', command: 'python3 sdr_rx.py', sdrLine: true, on: true, gain: null, gainAt: null, state: 'running',
+  startedAt: 1000, nextAt: null, starts: 1, lastExit: null, lastExitAt: null, fatal: null, lastWords: null,
+  header: { t: 1200, fields: { id: 'EEF522', kind: 'sdr', sfs: '10+11+12', gain: 'auto', fw: '0.2.0' } }, said: [], stats: null,
+}, more);
+
+test('an SDR program is said as running, off, starting or stopped with its own words and when it starts again', () => {
+  assert.deepEqual(B.programState(PROG(), 0), { cls: 'good', word: 'listening', why: '' });
+  assert.deepEqual(B.programState(PROG({ state: 'off', on: false }), 0), { cls: 'off', word: 'off', why: '' });
+  assert.equal(B.programState(PROG({ state: 'starting' }), 0).word, 'starting');
+  const fatal = B.programState(PROG({ state: 'stopped', fatal: '2', lastWords: 'No RTL-SDR plugged in', lastExit: 'stopped, exit status: 1', nextAt: 9200 }), 1000);
+  assert.deepEqual(fatal, { cls: 'bad', word: 'No RTL-SDR plugged in', again: 'Starts again in 9 s.', why: 'No RTL-SDR plugged in. Starts again in 9 s.', code: 'FATAL 2, exit status: 1' });
+  // a program that said nothing gets the spec's words for its code, and one with no FATAL is just stopped
+  assert.equal(B.programState(PROG({ state: 'stopped', fatal: '3', nextAt: 500 }), 1000).why, 'The RTL-SDR is held by another program. Starting again.');
+  const plain = B.programState(PROG({ state: 'stopped', lastExit: 'stopped, signal: 9 (SIGKILL)', nextAt: 3000 }), 1000);
+  assert.deepEqual([plain.word, plain.why, plain.code], ['stopped', 'It stopped. Starts again in 2 s.', 'signal: 9 (SIGKILL)']);
+});
+
+test('a gain is confirmed only by a header printed since it was picked and the run started', () => {
+  assert.equal(B.gainSaid(PROG(), 2000), null, 'nothing picked: the select shows what the program says');
+  assert.equal(B.gainSaid(PROG({ sdrLine: false, gain: '20.7' }), 2000), null, 'a receiver = line has no gain the page picks');
+  // just after the restart the last header is still the old run's
+  const asked = PROG({ gain: '20.7', gainAt: 5000, startedAt: 1000, state: 'starting' });
+  assert.deepEqual([B.gainSaid(asked, 6000).cls, B.gainSaid(asked, 6000).word], ['warn', 'asked for 20.7 dB']);
+  const heard = PROG({ gain: '20.7', gainAt: 5000, startedAt: 5100, header: { t: 5300, fields: { gain: '20.7' } } });
+  assert.deepEqual([B.gainSaid(heard, 6000).cls, B.gainSaid(heard, 6000).word], ['good', '20.7 dB confirmed']);
+  const other = PROG({ gain: '20.7', gainAt: 5000, startedAt: 5100, header: { t: 5300, fields: { gain: 'auto' } } });
+  assert.deepEqual([B.gainSaid(other, 6000).word, B.gainSaid(other, 6000).hint], ['20.7 dB not confirmed', 'Its header says automatic gain.']);
+  const silent = PROG({ gain: '20.7', gainAt: 5000, startedAt: 5100, state: 'starting' });
+  assert.equal(B.gainSaid(silent, 21000).word, '20.7 dB not confirmed');
+  const died = PROG({ gain: 'auto', gainAt: 5000, startedAt: 5100, state: 'stopped' });
+  assert.deepEqual([B.gainSaid(died, 6000).word, B.gainSaid(died, 6000).hint], ['automatic gain not confirmed', 'It stopped before its header said so.']);
+  assert.equal(B.gainSaid(PROG({ gain: '0.9', state: 'off', on: false }), 6000).word, 'asked for 0.9 dB');
+  // 28 and 28.0 are the same gain
+  assert.equal(B.gainSaid(PROG({ gain: '28.0', gainAt: 1, startedAt: 2, header: { t: 3, fields: { gain: '28' } } }), 6).cls, 'good');
+});
+
+test("an SDR's factors and its counts by factor are said in words", () => {
+  assert.deepEqual(B.headerSfs(PROG()), [10, 11, 12]);
+  assert.equal(B.sfList([10, 11, 12]), 'SF10, SF11 and SF12');
+  assert.equal(B.sfList([12]), 'SF12');
+  assert.equal(B.sfSpan([10, 11, 12]), 'SF10–12');
+  assert.equal(B.sfSpan([7, 9, 12]), 'SF7 · SF9 · SF12');
+  assert.equal(B.sfSpan([11, 12]), 'SF11 · SF12');
+  assert.deepEqual(B.sfLines({ bySf: [{ sf: 11, packets: 0, badCrc: 0, headerDamaged: 1, other: 2 }, { sf: 12, packets: 1, badCrc: 3, headerDamaged: 0, other: 1 }] }),
+    ['SF11: 0 packets, 1 header damaged (-24), 2 other errors (-1)', 'SF12: 1 packet, 3 bad CRC (-7), 1 other error (-1)']);
+  assert.ok(B.isSdr({ key: 'cmd:sdr' }), 'the sdr = line is an SDR before its header');
+  assert.ok(B.isSdr({ key: 'cmd:1' }, { rxKind: 'sdr' }));
+  assert.ok(!B.isSdr({ key: 'cmd:2', header: null }, { rxKind: null }));
+});
+
+test('a program turned off is off in the bar, not a port that failed', () => {
+  const ports = [{ key: 'cmd:sdr', status: 'off', rxId: 'EEF522', rxKind: 'sdr' }, { key: 'cmd:1', status: 'stopped', rxId: null }];
+  const words = B.receiverWords(ports, [], new Map(), 0);
+  assert.deepEqual(words.map((w) => [w.name, w.word, w.cls]), [['SDR EEF522', 'off', 'off'], ['cmd:1', 'stopped', 'bad']]);
+  // a running SDR is listening there as on its sheet; a T-Beam reading
+  const heard = new Map([['cmd:sdr', { info: {}, lastT: 1000 }], ['rx1', { info: { sf: '9' }, lastT: 1000 }]]);
+  const live = B.receiverWords([{ key: 'cmd:sdr', status: 'open', rxId: 'EEF522', rxKind: 'sdr' }, { key: 'rx1', status: 'open', rxId: 'A4C1F3' }], [], heard, 2000);
+  assert.deepEqual(live.map((w) => [w.name, w.word]), [['SDR EEF522', 'listening'], ['T-Beam A4C1F3', 'reading']]);
+});

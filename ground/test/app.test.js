@@ -251,3 +251,40 @@ test('a ChipSat console is never in the receivers strip', async () => {
   await p.fire('btn-connect', 'click');
   assert.strictEqual(p.$('toast').textContent, '1 receiver found');
 });
+
+test("an SDR's row on Live lists its factors instead of an SF select, its counts by factor, and follows the program's state", async () => {
+  const ports = {
+    ports: [{ key: 'cmd:sdr', port: 'python3 sdr_rx.py', usb: '', status: 'open', rxId: 'EEF522', rxKind: 'sdr', role: 'receiver', csid: null }],
+    boards: [],
+    log: null,
+  };
+  const prog = {
+    key: 'cmd:sdr', command: 'python3 sdr_rx.py', sdrLine: true, on: true, gain: null, state: 'running', startedAt: Date.now() - 9000, nextAt: null,
+    starts: 1, lastExit: null, fatal: null, lastWords: null, said: [],
+    header: { t: Date.now() - 8000, fields: { id: 'EEF522', kind: 'sdr', sfs: '10+11+12', gain: 'auto', fw: '0.2.0' } },
+    stats: { beat: null, bySf: [{ sf: 12, packets: 3, badCrc: 1, headerDamaged: 2, other: 0, lastT: Date.now(), lastSnr: 8.4, boards: [9] }] },
+  };
+  const programs = { sdrLine: true, programs: [prog] };
+  const json = (j) => ({ ok: true, status: 200, json: async () => j });
+  const p = dashboard({ answer: (url) => (url === '/api/ports' ? json(ports) : url === '/api/programs' ? json(programs) : null) });
+  await p.settle();
+  const ws = p.net.last().open();
+  ws.send(numbered([{ kind: 'receiver', id: 'cmd:sdr', boardId: 'EEF522', name: null, sf: null, info: { id: 'EEF522', kind: 'sdr', sfs: '10+11+12' },
+    packets: 3, unique: 3, dups: 0, badCrc: 0, errors: 3, lastLine: Date.now(), lastT: Date.now() }, { kind: 'snapshot-end' }]));
+  await p.every(2000);
+  await p.fire('receivers', 'click', { closest: (sel) => (sel === '.rx[data-rx]' ? { dataset: { rx: 'cmd:sdr' } } : null) });
+  let row = p.$('receivers').innerHTML;
+  assert.match(text(row), /SDR EEF522 SF10–12 · 3 pkts live/);
+  assert.match(text(row), /SDR, listens on SF10, SF11 and SF12 · SF12: 3 packets, 1 bad CRC \(-7\), 2 header damaged \(-24\)/);
+  assert.doesNotMatch(row, /started by/);
+  assert.doesNotMatch(row, /<select|data-close/);
+
+  programs.programs = [Object.assign({}, prog, { state: 'stopped', fatal: '2', lastWords: 'No RTL-SDR plugged in', nextAt: Date.now() + 30500 })];
+  await p.every(2000);
+  row = text(p.$('receivers').innerHTML);
+  assert.match(row, /SF10–12 · 3 pkts stopped/);
+  assert.match(row, /No RTL-SDR plugged in\. Starts again in 3\d s\./);
+  programs.programs = [Object.assign({}, prog, { state: 'off', on: false })];
+  await p.every(2000);
+  assert.match(p.$('receivers').innerHTML, /<span class="mark off">off<\/span>/);
+});

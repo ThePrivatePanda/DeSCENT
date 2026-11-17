@@ -1,0 +1,78 @@
+LDRO for SF11/SF12 payloads. Against rxx_lora f32079f (github.com/xdab/rxx_lora), GPL-3.0 like rxx_lora.
+Apply in an rxx_lora checkout with: git apply rxx_lora-ldro.patch
+
+diff --git a/include/header.h b/include/header.h
+index 9c93b57..7a95408 100644
+--- a/include/header.h
++++ b/include/header.h
+@@ -32,9 +32,9 @@ int decode_header(const uint8_t *nibs, struct lora_header *h);
+ 
+ /**
+  * @brief Total payload-area symbol budget: 8 header symbols plus one
+- *        (cr+4)-symbol block per sf payload nibbles (LDRO off, explicit
+- *        header). Reference: [gr-lora_sdr] frame_sync_impl.cc:419.
++ *        (cr+4)-symbol block per sf payload nibbles, sf-2 with LDRO
++ *        (explicit header). Reference: [gr-lora_sdr] frame_sync_impl.cc:419.
+  */
+-uint32_t decode_symbol_budget(uint8_t pay_len, uint8_t cr, int has_crc, uint8_t sf);
++uint32_t decode_symbol_budget(uint8_t pay_len, uint8_t cr, int has_crc, uint8_t sf, int ldro);
+ 
+ #endif // HEADER_H
+diff --git a/src/header.c b/src/header.c
+index e9a9e46..ca9149f 100644
+--- a/src/header.c
++++ b/src/header.c
+@@ -41,12 +41,13 @@ int decode_header(const uint8_t *nibs, struct lora_header *h)
+ 
+ // Reference: [gr-lora_sdr] frame_sync_impl.cc:419
+ // NOLINTNEXTLINE(bugprone-easily-swappable-parameters) // mirrors the reference's symb_numb formula
+-uint32_t decode_symbol_budget(uint8_t pay_len, uint8_t cr, int has_crc, uint8_t sf)
++uint32_t decode_symbol_budget(uint8_t pay_len, uint8_t cr, int has_crc, uint8_t sf, int ldro)
+ {
+-    /* symb_numb = 8 + ceil((2*pay_len - sf + 2 + 5 + 4*crc) / sf) * (4+cr);
++    /* symb_numb = 8 + ceil((2*pay_len - sf + 2 + 5 + 4*crc) / (sf - 2*ldro)) * (4+cr);
+      * the -(sf-2) inside the ceil: the first payload nibbles ride in the
+      * header block's sf-2 nibble slots */
+     uint32_t nibs = 2u * pay_len + 5u + (has_crc ? 4u : 0u) - (uint32_t)(sf - 2);
+-    uint32_t blocks = (nibs + (uint32_t)sf - 1u) / (uint32_t)sf;
++    uint32_t per_block = (uint32_t)(sf - (ldro ? 2 : 0));
++    uint32_t blocks = (nibs + per_block - 1u) / per_block;
+     return 8u + blocks * (4u + cr);
+ }
+diff --git a/src/receiver.c b/src/receiver.c
+index 817ffa3..c59b2bd 100644
+--- a/src/receiver.c
++++ b/src/receiver.c
+@@ -119,7 +119,7 @@ struct cw_suspect
+ /*
+  * Deinterleave one block and soft-decode its codewords: the single
+  * block-LLRs -> nibbles seam. Header: 8 symbols, sf-2 codewords, cr 4.
+- * Payload: cr+4 symbols, sf codewords, the frame's cr.
++ * Payload: cr+4 symbols, sf codewords (sf-2 with LDRO), the frame's cr.
+  *
+  * @param suspects optionally receives each codeword's runner-up record;
+  *        NULL skips
+@@ -352,8 +352,13 @@ static enum frame_decode decode_frame(
+     for (i = 5; i < (uint32_t)(sf - 2); i++)
+         nibs[nnib++] = hnib[i];
+ 
++    // low data rate optimisation: the LoRa spec turns it on when a symbol
++    // lasts 16 ms or more (SF11 and SF12 at 125 kHz); each payload symbol
++    // then carries sf-2 bits, like the header's
++    const int ldro = (uint64_t)st->number_of_bins * 1000u >= 16u * (uint64_t)st->bandwidth;
++
+     // caller-side handshake: unlock the payload budget
+-    frame_sync_set_symbol_budget(fs, decode_symbol_budget(h.pay_len, h.cr, h.has_crc, sf));
++    frame_sync_set_symbol_budget(fs, decode_symbol_budget(h.pay_len, h.cr, h.has_crc, sf, ldro));
+ 
+     // payload blocks of cr+4 symbols -> sf nibbles each, soft-decoded.
+     // Without --chase nothing consumes the suspects: the soft scan runs
+@@ -372,7 +377,7 @@ static enum frame_decode decode_frame(
+         if (++nb < cw_len)
+             continue;
+ 
+-        n = decode_block(sllr, cw_len, sf, h.cr, pnib, chase_on ? psus : NULL);
++        n = decode_block(sllr, cw_len, sf - (ldro ? 2 : 0), h.cr, pnib, chase_on ? psus : NULL);
+         for (i = 0; i < (uint32_t)n && nnib < needed; i++)
+         {
+             nibs[nnib] = pnib[i];

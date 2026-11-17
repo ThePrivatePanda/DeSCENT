@@ -21,6 +21,9 @@
   let settings = S.loadSettings();
   const model = new S.ModelSettings({ fetch: (u, i) => fetch(u, i), onChange: () => applyModel() });
   const rxMeta = new Map();   // rxKey -> {index}
+  // The programs the app starts (command.rs): whether each runs, what it said on stderr, and an
+  // SDR's counts by spreading factor. The T-Beams screen draws its SDR sheets from the same copy.
+  const programs = { list: [], sdrLine: false, missing: false };
   let rxCount = 0;
 
   const view = {
@@ -867,6 +870,32 @@
     head.querySelector('.kicker').textContent = replaying ? 'Receivers in this log' : 'Receivers · T-Beams';
   }
 
+  // A build without /api/programs answers 404 and is not asked again.
+  async function pollPrograms() {
+    if (programs.missing) return;
+    try {
+      const r = await fetch('/api/programs');
+      if (r.status === 404) { programs.missing = true; return; }
+      const j = await r.json();
+      programs.list = j.programs || [];
+      programs.sdrLine = !!j.sdrLine;
+    } catch (e) {
+      return;   // the ports call says the app is gone, once
+    }
+    renderReceivers();
+    if (api.onPrograms) api.onPrograms();
+  }
+  setInterval(pollPrograms, 2000);
+  pollPrograms();
+  // on, off, restart or gain; body names the program by key
+  async function programDo(action, body) {
+    const r = await fetch('/api/program/' + action, { method: 'POST', body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({ ok: false, error: r.status === 404 ? 'this build of the app cannot do that yet' : 'HTTP ' + r.status }));
+    await pollPrograms();
+    if (!j.ok) throw new Error(j.error || 'HTTP ' + r.status);
+    return j;
+  }
+
   function renderReceivers() {
     // The strip redraws every 250 ms, which would shut an open select under the operator.
     const focus = document.activeElement;
@@ -886,6 +915,18 @@
       const source = f.rxSource.get(k);
       // A program the app starts (an SDR, command.rs) is never written to, so it has no disconnect
       const program = !!port && k.startsWith('cmd:');
+      const prog = program ? programs.list.find((x) => x.key === k) : null;
+      // An SDR hears every factor it lists at once, so it has no SF select, and its state is
+      // the program's: off and stopped are said as such, not as a port that failed
+      if (prog && B.isSdr(prog, port)) {
+        const said = B.programState(prog, Date.now());
+        // the program's reason is too long for a mark in the 352 px rail; it is in the detail
+        const shown = prog.state === 'running' ? V.receiverState(r, { status: 'open' }, t) : said.cls === 'bad' ? { cls: 'bad', word: 'stopped' } : said;
+        const sfs = B.headerSfs(prog);
+        const detail = ['SDR' + (sfs.length ? ', listens on ' + B.sfList(sfs) : ''), ...B.sfLines(prog.stats), said.why].filter(Boolean).join('\n');
+        return V.receiverRowHtml({ key: k, name: rxName(k), id: r && r.id, index: m.index, detail, sel: view.rxSel === k,
+          meta: [sfs.length ? B.sfSpan(sfs) : '', V.num(r ? r.unique : 0, 0) + ' pkts'].filter(Boolean).join(' · '), word: shown.word, cls: shown.cls });
+      }
       const kind = program ? 'SDR' : source === 'csv' ? 'CSV firmware' : source === 'raw' ? 'raw firmware' : '';
       const detail = [kind, r ? V.num(r.unique) + ' new, ' + V.num(r.packets - r.unique - r.badCrc) + ' duplicate' : '',
         r && r.badCrc ? V.num(r.badCrc) + ' bad CRC' : '', r && r.radioErrors ? V.num(r.radioErrors) + ' radio errors' : '',
@@ -1074,7 +1115,7 @@
 
   window.DGApp = Object.assign(api, {
     live, view, hub, model, openReplay, closeReplay, settings: () => settings, taps, packetTaps,
-    showView, openServerLog, rxName, askSf, sfAsks,
+    showView, openServerLog, rxName, askSf, sfAsks, programs, programDo,
     // The plots were sized for a hidden box while another screen was up.
     redraw: () => { render(true); charts.resize(); },
     ui: { $, esc, toast, download, logUrl, flatName, served, age, sfSelect },

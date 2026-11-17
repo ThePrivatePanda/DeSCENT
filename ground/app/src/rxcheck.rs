@@ -109,12 +109,14 @@ fn value<'a>(kv: &[(&str, &'a str)], key: &str) -> Option<&'a str> {
     kv.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
 }
 
-fn radio(rssi: &str, snr: &str, said: &mut Vec<String>) {
+// A damaged header or a payload cut short can leave no SNR to give, so an ERR -24 or -1 may
+// leave it empty
+fn radio(rssi: &str, snr: &str, snr_or_empty: bool, said: &mut Vec<String>) {
     if !rssi.is_empty() && !decimal(rssi) {
         said.push(format!("RSSI \"{}\" must be a decimal number in dBm, or empty when it is not calibrated", rssi));
     }
-    if !decimal(snr) {
-        said.push(format!("SNR \"{}\" must be a decimal number in dB", snr));
+    if !decimal(snr) && !(snr_or_empty && snr.is_empty()) {
+        said.push(format!("SNR \"{}\" must be a decimal number in dB{}", snr, if snr_or_empty { ", or empty" } else { "" }));
     }
 }
 
@@ -153,8 +155,11 @@ impl Checker {
         } else if text.starts_with("HB,") {
             self.heartbeat(text, &mut said);
         } else if let Some(code) = text.strip_prefix("#DG,FATAL,") {
-            if !decimal(code) || code.contains('.') {
-                said.push(format!("#DG,FATAL takes one whole number, not \"{}\"", code));
+            if !["1", "2", "3", "4"].contains(&code) {
+                said.push(format!(
+                    "#DG,FATAL takes 2 (no SDR plugged in), 3 (the SDR is held by another program), 4 (the SDR went away) or 1 (anything else), not \"{}\"",
+                    code
+                ));
             }
             self.fatal_at.get_or_insert(n);
         } else if text.is_empty() {
@@ -207,6 +212,9 @@ impl Checker {
                     "sf= in a header tells the app the receiver hears one spreading factor; an SDR says sfs= and puts sf= on each PKT and ERR",
                 )),
                 "sfchip" => Some(String::from("sfchip= is a T-Beam key the app acts on; leave it out")),
+                "gain" if !(*v == "auto" || (decimal(v) && !v.starts_with('-'))) => {
+                    Some(format!("gain=\"{}\" must be the tuner gain in dB, 0 or more, or auto", v))
+                }
                 _ => None,
             };
             said.extend(wrong);
@@ -262,7 +270,7 @@ impl Checker {
                 said.push(format!("length says {} bytes, but the hex holds {}", len, p[2].len() / 2));
             }
         }
-        radio(p[3], p[4], said);
+        radio(p[3], p[4], false, said);
         if !decimal(p[5]) {
             said.push(format!("frequency error \"{}\" must be a decimal number in Hz", p[5]));
         }
@@ -295,7 +303,7 @@ impl Checker {
         if !["-7", "-24", "-1"].contains(&p[1]) {
             said.push(format!("code \"{}\" must be -7 (payload CRC), -24 (header damaged) or -1 (anything else)", p[1]));
         }
-        radio(p[2], p[3], said);
+        radio(p[2], p[3], ["-24", "-1"].contains(&p[1]), said);
         let kv = pairs(&p[4..], said);
         self.sf(&kv, said);
         if let Some(v) = value(&kv, "hex").filter(|v| !upper_hex(v)) {
@@ -327,6 +335,20 @@ impl Checker {
         let kv = pairs(&p[4..], said);
         let ovf = value(&kv, "ovf").and_then(|v| whole("ovf=", v, said));
         let drop = value(&kv, "drop").and_then(|v| whole("drop=", v, said));
+        let clip = value(&kv, "clip");
+        if let Some(v) = clip.filter(|v| !(decimal(v) && v.parse::<f64>().is_ok_and(|c| (0.0..=100.0).contains(&c)))) {
+            said.push(format!("clip=\"{}\" must be the percent of samples at the ADC rail, 0 to 100", v));
+        }
+        match value(&kv, "sat") {
+            Some(v) if v != "0" && v != "1" => said.push(format!("sat=\"{}\" must be 1 or 0", v)),
+            Some("0") if clip.and_then(|c| c.parse::<f64>().ok()).is_some_and(|c| c > 0.0) => {
+                said.push(String::from("sat=0 with clip= above 0: a clipped sample is a saturated one"))
+            }
+            _ => {}
+        }
+        if let Some(v) = value(&kv, "floor").filter(|v| !decimal(v)) {
+            said.push(format!("floor=\"{}\" must be a decimal number in dBFS", v));
+        }
         if said.is_empty() && !matches!(lines::parse_line(text).kind, Kind::Heartbeat { .. }) {
             said.push(String::from("the app does not take this as a heartbeat"));
         }
@@ -539,6 +561,46 @@ mod tests {
         }
         assert_eq!(problems, want.len(), "{}", out);
         assert!(out.ends_with(&format!("{} problems\n", want.len())), "{}", out);
+    }
+
+    #[test]
+    fn the_v0_2_keys_are_checked_and_a_damaged_header_may_have_no_snr() {
+        let good = [
+            "#DG,RX,v1,id=EEF522,f=915.0,bw=125.0,cr=7,sync=0x12,pre=8,kind=sdr,sfs=10+11+12,gain=auto,fw=0.2.0",
+            "HB,23,0,0,ovf=0,drop=0,clip=0.00,sat=0",
+            "ERR,-24,,,sf=11",
+            "ERR,-1,,,sf=12",
+            "HB,5024,0,2,ovf=0,drop=0,clip=12.30,sat=1,floor=-40.2",
+            "#DG,RX,v1,id=EEF522,f=915.0,bw=125.0,cr=7,sync=0x12,pre=8,kind=sdr,sfs=10+11+12,gain=20.7,fw=0.2.0",
+            "HB,6000,0,2,ovf=0,drop=0,clip=0.00,sat=1,floor=-55.3",
+            "#DG,FATAL,2",
+            "",
+        ];
+        let (problems, out) = check(&good.join("\n"));
+        assert_eq!(problems, 0, "{}", out);
+
+        let bad = [
+            "#DG,RX,v1,id=EEF522,f=915.0,bw=125.0,cr=7,sync=0x12,pre=8,kind=sdr,sfs=10+11+12,gain=-3,fw=0.2.0",
+            "ERR,-7,,,sf=11",
+            "HB,5000,0,1,clip=120,sat=yes,floor=low",
+            "HB,10000,0,1,clip=0.50,sat=0",
+            "#DG,FATAL,7",
+            "",
+        ];
+        let (problems, out) = check(&bad.join("\n"));
+        let want = [
+            "line 1: gain=\"-3\" must be the tuner gain in dB, 0 or more, or auto",
+            "line 2: SNR \"\" must be a decimal number in dB",
+            "line 3: clip=\"120\" must be the percent of samples at the ADC rail, 0 to 100",
+            "line 3: sat=\"yes\" must be 1 or 0",
+            "line 3: floor=\"low\" must be a decimal number in dBFS",
+            "line 4: sat=0 with clip= above 0: a clipped sample is a saturated one",
+            "line 5: #DG,FATAL takes 2 (no SDR plugged in), 3 (the SDR is held by another program), 4 (the SDR went away) or 1 (anything else), not \"7\"",
+        ];
+        for w in want {
+            assert!(out.contains(&format!("{}\n", w)), "missing {:?} in\n{}", w, out);
+        }
+        assert_eq!(problems, want.len(), "{}", out);
     }
 
     #[test]

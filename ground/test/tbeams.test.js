@@ -32,12 +32,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-// fakepage keeps the live fleet to itself; this one line hands it to the hub so a test can
-// put receivers in it.
+// fakepage keeps the live fleet and the app object to itself; this one line hands them to the
+// hub so a test can put receivers and programs in them.
 function withLive(scripts) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tbeams-'));
   const file = path.join(dir, 'live.js');
-  fs.writeFileSync(file, 'DGApp.hub.live = DGApp.live;');
+  fs.writeFileSync(file, 'DGApp.hub.live = DGApp.live; DGApp.hub.app = DGApp;');
   return ['boardmodel.js', ...scripts, path.relative(path.join(__dirname, '..', 'web', 'js'), file)];
 }
 
@@ -123,20 +123,147 @@ test('a ChipSat console is not a T-Beam, and a T-Beam that could not be opened s
   assert.match(p.text('tb-sheet'), /\/dev\/ttyUSB1: held by another program, perhaps the other copy of this app/);
 });
 
-test('an SDR the app starts is listed under Programs by its id, with no sheet to pick', async () => {
-  const { o, p } = rig();
-  o.ports = o.ports.concat([
+// An SDR program as /api/programs gives it (command.rs), with the fleet's counts for it
+const SDR = (more) => Object.assign({
+  key: 'cmd:sdr', command: 'python3 /opt/sdr_rx.py --decoder /opt/file_lora', sdrLine: true, on: true, gain: null, gainAt: null,
+  state: 'running', startedAt: NOW - 60000, nextAt: null, starts: 3, lastExit: 'stopped, exit status: 1', lastExitAt: NOW - 61000,
+  fatal: null, lastWords: null,
+  header: { t: NOW - 50000, fields: { id: 'EEF522', f: '915.0', bw: '125.0', cr: '7', sync: '0x12', pre: '8', kind: 'sdr', sfs: '10+11+12', gain: '0.9', fw: '0.2.0' } },
+  said: [{ t: NOW - 59000, text: 'rtl_sdr: Found 1 device(s):' }, { t: NOW - 58000, text: 'rtl_sdr: Tuned to 916200000 Hz.' }],
+  stats: {
+    beat: { t: NOW - 2000, upMs: 58000, ovf: 0, drop: 2, clip: 12.3, sat: 1, floor: -40.2 },
+    bySf: [{ sf: 12, packets: 3, badCrc: 1, headerDamaged: 1, other: 0, lastT: NOW - 4000, lastSnr: 8.4, boards: [9, 13] },
+      { sf: 11, packets: 0, badCrc: 0, headerDamaged: 2, other: 1, lastT: null, lastSnr: null, boards: [] }],
+  },
+}, more);
+const SDR_PORT = { key: 'cmd:sdr', port: 'python3 /opt/sdr_rx.py --decoder /opt/file_lora', usb: '', status: 'open', rxId: 'EEF522', rxKind: 'sdr', rxFw: '0.2.0', role: 'receiver' };
+
+// The rig, with app.js's copy of /api/programs and its programDo on the app object
+function sdrRig(list, ports) {
+  const done = [];
+  const r = rig({ ports: ports || [SDR_PORT] });
+  const app = r.hub.app;
+  app.programs = { list, sdrLine: list.some((x) => x.sdrLine), missing: false };
+  app.programDo = async (action, body) => { done.push([action, body]); return { ok: true, gone: true }; };
+  return Object.assign(r, { app, done });
+}
+
+test('an SDR gets a card of its own and a sheet; any other program stays a line under Programs', async () => {
+  const line = SDR({ key: 'cmd:1', sdrLine: false, command: 'ssh roof sdr_rx', header: { t: NOW, fields: { id: '5D4E01', kind: 'sdr', sfs: '7+8', gain: '40.2', fw: '0.1.0' } } });
+  const other = { key: 'cmd:2', command: 'sdr_rx --dev 1', sdrLine: false, on: true, state: 'stopped', header: null, said: [], stats: null };
+  const { p } = sdrRig([line, other, SDR()], [
     { key: 'cmd:1', port: 'ssh roof sdr_rx', usb: '', status: 'open', rxId: '5D4E01', rxKind: 'sdr', rxFw: '0.1.0' },
     { key: 'cmd:2', port: 'sdr_rx --dev 1', usb: '', status: 'stopped', error: 'stopped, exit status: 1', rxId: null },
+    SDR_PORT,
   ]);
   p.parts.tbeams.show();
   await p.settle();
   const list = p.text('tb-list');
-  assert.match(list, /Plugged in . 3 boards/);
-  assert.match(list, /Programs . 2/);
-  assert.match(list, /SDR 5D4E01 reading it kind sdr . fw 0\.1\.0 . cmd:1 . ssh roof sdr_rx/);
-  assert.match(list, /cmd:2 stopped no header yet . cmd:2 . sdr_rx --dev 1 stopped, exit status: 1/);
-  assert.doesNotMatch(p.html('tb-list'), /data-pick="(ssh|sdr_rx)/);
+  assert.match(list, /SDR · 2 started by the app SDR 5D4E01 listening SF7 · SF8 no packets yet SDR EEF522 listening SF10 · SF11 · SF12 no packets yet/);
+  assert.match(list, /Programs · 1 receiver = in descent-ground.conf cmd:2 stopped no header yet . cmd:2 . sdr_rx --dev 1/);
+  assert.doesNotMatch(list, /Programs · [^1]/);
+  assert.match(p.html('tb-list'), /data-pick="cmd:sdr"/);
+  assert.doesNotMatch(p.html('tb-list'), /data-pick="cmd:2"/);
+
+  // a receiver = SDR shows the gain it reports and says where it is set; it has no select
+  await pick(p, 'cmd:1');
+  assert.match(p.text('tb-sheet'), /Gain 40\.2 dB Set on its receiver = line in descent-ground\.conf\./);
+  assert.doesNotMatch(p.html('tb-sheet'), /data-sdrgain/);
+  assert.match(p.text('tb-sheet'), /Turned off, it stays off until the app is started again/);
+});
+
+test("an SDR's sheet: who it is, its radio from the header, the signal, its counts by factor and what it said", async () => {
+  const { p } = sdrRig([SDR()]);
+  p.parts.tbeams.show();
+  await p.settle();
+  await pick(p, 'cmd:sdr');
+  const sheet = p.text('tb-sheet');
+  const html = p.html('tb-sheet');
+  assert.match(html, /<input type="text" class="nameit"[^>]*data-name="cmd:sdr" data-rxid="EEF522"[^>]*placeholder="SDR EEF522"/);
+  assert.match(sheet, /listening SDR EEF522 · fw 0\.2\.0 Turn off Restart/);
+  // the command is said once, at the foot of This session, not in the head
+  assert.equal(sheet.split('python3 /opt/sdr_rx.py').length, 2);
+  assert.match(sheet, /in the log as cmd:sdr \. Started by python3 \/opt\/sdr_rx\.py --decoder \/opt\/file_lora What it said/);
+  assert.match(sheet, /Frequency 915\.0 MHz Bandwidth · CR 125 kHz · 4\/7 Sync · preamble 0x12 · 8 Spreading factors Listens on SF10, SF11 and SF12/);
+  // the select shows what the header says, and with no gain picked here there is no mark
+  assert.match(html, /<option value="0\.9" selected>0\.9 dB<\/option>/);
+  assert.match(html, /<option value="auto">Automatic \(AGC\)<\/option>/);
+  assert.match(sheet, /The program's own report\. Picking another restarts it with --gain/);
+  // saturated is the program's own sat=1, beside the value it gave
+  assert.match(sheet, /Clipping 12\.30 % of samples in the last 5 s saturated Noise floor -40\.2 dBFS Samples lost 0 since it started \(ovf\) Lines dropped 2 since it started \(drop\)/);
+  assert.match(sheet, /SF Packets Bad CRC -7 Header damaged -24 Other -1 Last packet Last SNR Boards heard SF10 0 0 0 0 — — — SF11 0 0 2 1 — — — SF12 3 1 1 0 ago 8\.40 dB 9, 13/);
+  assert.match(sheet, /Started again 2 times since the app started\. Last stopped at \d\d:\d\d:\d\d\. exit status: 1 Packets/);
+  assert.match(sheet, /What it said its last 2 lines on stderr \d\d:\d\d:\d\d rtl_sdr: Found 1 device\(s\): \d\d:\d\d:\d\d rtl_sdr: Tuned to 916200000 Hz\./);
+});
+
+test('saturated is not said when the program says sat=0, whatever the clip', async () => {
+  const { p } = sdrRig([SDR({ stats: { beat: { t: NOW, upMs: 1, ovf: 0, drop: 0, clip: 0.4, sat: 0, floor: null }, bySf: [] } })]);
+  p.parts.tbeams.show();
+  await p.settle();
+  await pick(p, 'cmd:sdr');
+  assert.match(p.text('tb-sheet'), /Clipping 0\.40 % of samples in the last 5 s Noise floor not reported/);
+  assert.doesNotMatch(p.html('tb-sheet'), /saturated/);
+});
+
+test('turning an SDR off, on and starting it again answers with a toast, and a gain is asked then confirmed by its header', async () => {
+  const { p, app, done } = sdrRig([SDR()]);
+  p.parts.tbeams.show();
+  await p.settle();
+  await pick(p, 'cmd:sdr');
+  await p.fire('screen-tbeams', 'click', { 'data-sdroff': 'cmd:sdr' });
+  assert.deepEqual(done.shift(), ['off', { key: 'cmd:sdr' }]);
+  assert.equal(p.toasts.pop(), 'Turned SDR EEF522 off');
+  await p.fire('screen-tbeams', 'click', { 'data-sdrrestart': 'cmd:sdr' });
+  assert.deepEqual(done.shift(), ['restart', { key: 'cmd:sdr' }]);
+  assert.equal(p.toasts.pop(), 'Restarted SDR EEF522');
+
+  await p.fire('screen-tbeams', 'change', { 'data-sdrgain': 'cmd:sdr' }, { value: '20.7' });
+  assert.deepEqual(done.shift(), ['gain', { key: 'cmd:sdr', gain: '20.7' }]);
+  assert.equal(p.toasts.pop(), 'Asked SDR EEF522 for 20.7 dB, restarting it');
+  // the app restarted it; its first header since says the new gain
+  const asked = SDR({ gain: '20.7', gainAt: Date.now(), startedAt: Date.now() + 1, state: 'starting' });
+  app.programs.list = [asked];
+  app.onPrograms();
+  assert.match(p.text('tb-sheet'), /asked for 20\.7 dB Started with --gain 20\.7 at \d\d:\d\d:\d\d\. Waiting for its header\./);
+  assert.equal(p.toasts.length, 0);
+  app.programs.list = [Object.assign({}, asked, { state: 'running', header: { t: Date.now() + 2, fields: Object.assign({}, asked.header.fields, { gain: '20.7' }) } })];
+  app.onPrograms();
+  assert.equal(p.toasts.pop(), 'SDR EEF522 is on 20.7 dB');
+  assert.match(p.text('tb-sheet'), /20\.7 dB confirmed The program's header said so at/);
+  assert.match(p.html('tb-sheet'), /<option value="20\.7" selected>/);
+});
+
+test('an SDR that stopped says why in its own words, and one that is off offers Turn on', async () => {
+  const fatal = SDR({ state: 'stopped', fatal: '2', lastWords: 'No RTL-SDR plugged in', nextAt: Date.now() + 7600, lastExit: 'stopped, exit status: 1',
+    said: [{ t: NOW, text: 'rtl_sdr: No supported devices found.' }, { t: NOW, text: 'No RTL-SDR plugged in' }] });
+  const { p, app } = sdrRig([fatal], [Object.assign({}, SDR_PORT, { status: 'stopped' })]);
+  p.parts.tbeams.show();
+  await p.settle();
+  await pick(p, 'cmd:sdr');
+  assert.match(p.text('tb-list'), /SDR EEF522 No RTL-SDR plugged in SF10 · SF11 · SF12 no packets yet · Starts again in 8 s\./);
+  assert.match(p.text('tb-sheet'), /No RTL-SDR plugged in\. Starts again in 8 s\. FATAL 2, exit status: 1/);
+  assert.match(p.html('tb-sheet'), /<p class="outcome bad tb-why">/);
+
+  app.programs.list = [SDR({ state: 'off', on: false })];
+  app.onPrograms();
+  assert.match(p.html('tb-sheet'), /<span class="mark off">off<\/span>/);
+  assert.match(p.html('tb-sheet'), /<button class="primary" data-sdron="cmd:sdr">Turn on<\/button><button data-sdrrestart="cmd:sdr" disabled>Restart<\/button>/);
+});
+
+test('a stop the app made is said in plain words, with no exit status', async () => {
+  const { p } = sdrRig([SDR({ lastExit: 'Restarted with gain 20.7 dB', lastExitByApp: true })]);
+  p.parts.tbeams.show();
+  await p.settle();
+  await pick(p, 'cmd:sdr');
+  assert.match(p.text('tb-sheet'), /Started again 2 times since the app started\. Restarted with gain 20\.7 dB at \d\d:\d\d:\d\d\. Packets/);
+  assert.doesNotMatch(p.text('tb-sheet'), /SIGTERM|exit status/);
+});
+
+test('with no SDR at all the list says how to add one', async () => {
+  const { p } = sdrRig([], []);
+  p.parts.tbeams.show();
+  await p.settle();
+  assert.match(p.text('tb-list'), /No SDR\. To have one, add sdr = <command> to descent-ground\.conf beside the program\./);
 });
 
 test('a board that is not a receiver says what Listen heard, once it has', async () => {

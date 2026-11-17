@@ -37,6 +37,8 @@
     busy: null, pct: 0, note: '',
     forget: null,       // port of the board being asked about before it is forgotten
     timer: null,
+    sdrBusy: new Map(),   // program key -> what a press on its sheet is doing, until the app answers
+    gainAsks: new Set(),  // program keys whose gain was picked here and not yet confirmed or refused
   };
   const optsFor = (port) => {
     if (!state.opts.has(port)) state.opts.set(port, { sf: 9, backup: false });
@@ -216,10 +218,40 @@
     }).join('');
   }
 
-  // Receivers the app starts as programs, from receiver = lines in descent-ground.conf (an SDR,
-  // docs/sdr-receiver.md). No USB, nothing to flash and nothing is sent to them, so no sheet.
+  // Programs the app starts (command.rs, docs/sdr-receiver.md). An SDR gets a card and a sheet of
+  // its own; app.js keeps what the app says of each (A.programs).
+  const progs = () => (A.programs ? A.programs.list : []);
+  const portOf = (key) => hub.ports.find((p) => p.key === key);
+  const sdrs = () => progs().filter((p) => B.isSdr(p, portOf(p.key)));
+  function sdrName(p) {
+    const name = B.receiverName(p.key, portOf(p.key), A.live.receivers.get(p.key));
+    return name === p.key ? 'SDR' : name;
+  }
+  const sdrState = (p) => (state.sdrBusy.has(p.key) ? { cls: 'warn', word: state.sdrBusy.get(p.key), why: '' } : B.programState(p, Date.now()));
+
+  function sdrListHtml() {
+    const all = sdrs();
+    if (!all.length) {
+      return A.programs && !A.programs.missing
+        ? '<p class="note tb-nosdr">No SDR. To have one, add <b>sdr = &lt;command&gt;</b> to descent-ground.conf beside the program.</p>' : '';
+    }
+    return '<div class="tb-listhead"><span class="kicker">SDR · ' + all.length + '</span><span class="note">started by the app</span></div>' +
+      all.map((p) => {
+        const st = sdrState(p);
+        const sfs = B.headerSfs(p);
+        const r = A.live.receivers.get(p.key);
+        const sub = [r ? count(r.unique) + (r.unique === 1 ? ' packet' : ' packets') : 'no packets yet', st.again || ''].filter(Boolean).join(' · ');
+        return '<button class="card' + (p.key === state.sel ? ' sel ring' : '') + ' tb-card" data-pick="' + esc(p.key) + '">' +
+          '<span class="tb-top"><b class="tb-name">' + esc(sdrName(p)) + '</b>' + mark(st.cls, st.word) +
+          (sfs.length ? '<span class="tb-sf">' + sfs.map((n) => 'SF' + n).join(' · ') + '</span>' : '') + '</span>' +
+          '<span class="tb-sub">' + esc(sub) + '</span></button>';
+      }).join('');
+  }
+
+  // Any other program: a line under Programs, with no sheet
   function programsHtml() {
-    const progs = hub.ports.filter((p) => p.key.startsWith('cmd:'));
+    const sdrKeys = new Set(sdrs().map((p) => p.key));
+    const progs = hub.ports.filter((p) => p.key.startsWith('cmd:') && !sdrKeys.has(p.key) && p.rxKind !== 'sdr');
     if (!progs.length) return '';
     return '<div class="tb-listhead"><span class="kicker">Programs · ' + progs.length + '</span><span class="note">receiver = in descent-ground.conf</span></div>' +
       progs.map((p) => {
@@ -474,12 +506,159 @@
       '<div class="tb-body">' + body + '</div>' + last + '</div>';
   }
 
+  const GAINS = ['0.0', '0.9', '1.4', '2.7', '3.7', '7.7', '8.7', '12.5', '14.4', '15.7', '16.6', '19.7', '20.7', '22.9', '25.4',
+    '28.0', '29.7', '32.8', '33.8', '36.4', '37.2', '38.6', '40.2', '42.1', '43.4', '43.9', '44.5', '48.0', '49.6'];   // the R820T's steps
+
+  // The select shows what the program last reported in its header, never what was picked
+  function gainSelect(p, reported) {
+    const values = GAINS.slice();
+    if (reported && reported !== 'auto' && !values.some((v) => Number(v) === Number(reported))) {
+      values.push(reported);
+      values.sort((a, b) => a - b);
+    }
+    const on = (v) => (reported === v || (v !== 'auto' && reported !== 'auto' && reported !== undefined && Number(v) === Number(reported)) ? ' selected' : '');
+    return '<select data-sdrgain="' + esc(p.key) + '" aria-label="Gain of ' + esc(sdrName(p)) + '"' + (state.sdrBusy.has(p.key) ? ' disabled' : '') + '>' +
+      (reported === undefined ? '<option value="" selected disabled>not reported</option>' : '') +
+      '<option value="auto"' + on('auto') + '>Automatic (AGC)</option>' +
+      values.map((v) => '<option value="' + v + '"' + on(v) + '>' + v + ' dB</option>').join('') + '</select>';
+  }
+
+  function sdrHeadHtml(p) {
+    const st = sdrState(p);
+    const port = portOf(p.key);
+    const id = port && port.rxId;
+    const f = p.header ? p.header.fields : {};
+    const busy = state.sdrBusy.has(p.key);
+    const line = [id ? 'SDR ' + id : 'no header yet', f.fw ? 'fw ' + f.fw : ''].filter(Boolean).join(' · ');
+    // two characters over: Caprasimo's capitals and digits run wider than the ch nameWidth counts in
+    const name = id
+      ? '<input type="text" class="nameit" data-keep="name:' + esc(p.key) + '" data-name="' + esc(p.key) + '" data-rxid="' + esc(id) + '"' +
+        ' value="' + esc((port && port.name) || '') + '" placeholder="SDR ' + esc(id) + '" style="' + nameWidth(((port && port.name) || 'SDR ' + id) + '  ') +
+        '" maxlength="24" aria-label="Name of this SDR" title="Type a name and press Enter">'
+      : '<h2 class="tb-sdrname">' + esc(sdrName(p)) + '</h2>';
+    const acts = (p.on ? '<button data-sdroff="' + esc(p.key) + '"' : '<button class="primary" data-sdron="' + esc(p.key) + '"') +
+        (busy ? ' disabled' : '') + '>' + (p.on ? 'Turn off' : 'Turn on') + '</button>' +
+      '<button data-sdrrestart="' + esc(p.key) + '"' + (p.on && !busy ? '' : ' disabled') + '>Restart</button>';
+    return '<div class="pane tb-head"><div class="tb-headrow">' + name + mark(st.cls, st.word) +
+        '<span class="tb-line">' + esc(line) + '</span><span class="tb-acts">' + acts + '</span></div>' +
+      (st.why ? '<p class="outcome bad tb-why">' + esc(st.why) + (st.code ? ' <small>' + esc(st.code) + '</small>' : '') + '</p>' : '') +
+      '<p class="tb-notes note">' + (id ? 'The name is kept on this computer. ' : '') + (p.sdrLine
+        ? 'Started from the sdr = line in descent-ground.conf; whether it is on and its gain are kept in descent-ground-sdr.txt beside the program.'
+        : 'Started from a receiver = line in descent-ground.conf. Turned off, it stays off until the app is started again.') + '</p></div>';
+  }
+
+  function sdrRadioCard(p) {
+    const f = p.header ? p.header.fields : null;
+    if (!f) return '<div class="pane tb-card2"><h3>Radio</h3><p class="note">Not reported yet: no header from the program.</p></div>';
+    const sfs = B.headerSfs(p);
+    const said = B.gainSaid(p, Date.now());
+    const own = "The program's own report. Picking another restarts it with --gain, and counts only when its header says so.";
+    const gain = p.sdrLine
+      ? gainSelect(p, f.gain) + (said ? mark(said.cls, said.word) + '<span class="hint">' + esc(said.hint) + '</span>' : '<span class="hint">' + own + '</span>')
+      : val(f.gain ? esc(B.gainWords(f.gain)) : '—') + '<span class="hint">Set on its receiver = line in descent-ground.conf.</span>';
+    return '<div class="pane tb-card2"><h3>Radio</h3>' +
+      row('Frequency', f.f ? val(esc(f.f) + ' MHz') : unsaid) +
+      row('Bandwidth · CR', f.bw || f.cr ? val(esc([f.bw ? Number(f.bw) + ' kHz' : '', f.cr ? '4/' + f.cr : ''].filter(Boolean).join(' · '))) : unsaid) +
+      row('Sync · preamble', f.sync || f.pre ? val(esc([f.sync, f.pre].filter(Boolean).join(' · '))) : unsaid) +
+      row('Spreading factors', sfs.length ? val('Listens on ' + esc(B.sfList(sfs))) : unsaid) +
+      row('Gain', gain, 'tb-sfrow') + '</div>';
+  }
+
+  function sdrSignalCard(p) {
+    const b = p.stats && p.stats.beat;
+    if (!b) return '<div class="pane tb-card2"><h3>Signal</h3><p class="note">No heartbeat from the program yet.</p></div>';
+    const n = (x, f) => (x === null || x === undefined ? null : f(x));
+    const clip = n(b.clip, (x) => val(x.toFixed(2) + ' % of samples in the last 5 s'));
+    return '<div class="pane tb-card2"><h3>Signal</h3>' +
+      row('Clipping', (clip || unsaid) + (b.sat === 1 ? mark('warn', 'saturated') : '')) +
+      row('Noise floor', n(b.floor, (x) => val(x.toFixed(1) + ' dBFS')) || unsaid) +
+      row('Samples lost', n(b.ovf, (x) => val(count(x)) + '<span class="note">since it started (ovf)</span>') || unsaid) +
+      row('Lines dropped', n(b.drop, (x) => val(count(x)) + '<span class="note">since it started (drop)</span>') || unsaid) +
+      '<p class="note tb-beat">From its heartbeat ' + age(Date.now() - b.t) + ' ago.</p></div>';
+  }
+
+  function sdrSessionCard(p) {
+    const now = Date.now();
+    const bySf = (p.stats && p.stats.bySf) || [];
+    const sfs = [...new Set([...B.headerSfs(p), ...bySf.map((c) => c.sf)])].sort((a, b) => a - b);
+    const none = '<span class="note">—</span>';
+    const rows = sfs.map((sf) => {
+      const c = bySf.find((x) => x.sf === sf) || { packets: 0, badCrc: 0, headerDamaged: 0, other: 0, lastT: null, lastSnr: null, boards: [] };
+      return '<tr><td>SF' + sf + '</td><td class="r">' + count(c.packets) + '</td><td class="r">' + count(c.badCrc) + '</td><td class="r">' +
+        count(c.headerDamaged) + '</td><td class="r">' + count(c.other) + '</td><td>' + (c.lastT ? age(now - c.lastT) + ' ago' : none) +
+        '</td><td class="r">' + (c.lastSnr === null ? none : c.lastSnr.toFixed(2) + ' dB') + '</td><td>' + (c.boards.length ? c.boards.join(', ') : none) + '</td></tr>';
+    }).join('');
+    const b = p.stats && p.stats.beat;
+    const up = p.state === 'running' && b ? 'Up ' + upFor(b.upMs + (now - b.t)) + ' by its heartbeat.' : '';
+    const again = p.starts > 1 ? 'Started again ' + (p.starts - 1) + (p.starts === 2 ? ' time' : ' times') + ' since the app started.' : '';
+    // a stop the app made is said in its words; any other keeps the program's exit status, small
+    const last = !p.lastExit ? '' : p.lastExitByApp ? esc(p.lastExit) + ' at ' + clockS(p.lastExitAt) + '.'
+      : 'Last stopped at ' + clockS(p.lastExitAt) + '. <small>' + esc(p.lastExit.replace(/^stopped, /, '')) + '</small>';
+    return '<div class="pane tb-card2 tb-wide"><h3>This session</h3>' +
+      (sfs.length
+        ? '<div class="tb-sfwrap"><table class="grid plain tb-sftable"><thead><tr><th>SF</th><th class="r">Packets</th>' +
+          '<th class="r">Bad CRC <small>-7</small></th><th class="r">Header damaged <small>-24</small></th><th class="r">Other <small>-1</small></th>' +
+          '<th>Last packet</th><th class="r">Last SNR</th><th>Boards heard</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+        : '<p class="note">Nothing heard yet.</p>') +
+      '<p class="note tb-beat">' + ([esc(up), esc(again), last].filter(Boolean).join(' ') || 'Not stopped since the app started.') +
+        ' Packets are the ones whose CRC passed; in the log as <b>' + esc(p.key) + '</b>.</p>' +
+      '<p class="note tb-cmd">Started by ' + esc(p.command) + '</p></div>';
+  }
+
+  function sdrSaidCard(p) {
+    const said = p.said || [];
+    return '<div class="pane tb-card2 tb-wide"><h3>What it said' + (said.length ? ' <span class="note">its last ' + said.length + (said.length === 1 ? ' line' : ' lines') + ' on stderr</span>' : '') + '</h3>' +
+      (said.length ? '<pre class="raw tb-said" data-said="' + esc(p.key) + '">' + esc(said.map((l) => clockS(l.t) + '  ' + l.text).join('\n')) + '</pre>'
+        : '<p class="note">Nothing on stderr yet.</p>') + '</div>';
+  }
+
+  function sdrSheetHtml(p) {
+    return sdrHeadHtml(p) + '<div class="tb-cards tb-sdrcards">' + sdrRadioCard(p) + sdrSignalCard(p) + sdrSessionCard(p) + sdrSaidCard(p) + '</div>';
+  }
+
+  // The verbs the toasts use, by action
+  const DOING = { on: 'turning on', off: 'turning off', restart: 'restarting', gain: 'restarting' };
+  const VERB = { on: 'turn on', off: 'turn off', restart: 'restart', gain: 'set the gain of' };
+
+  async function programAct(key, action, gain) {
+    const p = progs().find((x) => x.key === key);
+    if (!p || state.sdrBusy.has(key) || !A.programDo) return;
+    const name = sdrName(p);
+    state.sdrBusy.set(key, action === 'gain' && !p.on ? 'keeping the gain' : DOING[action]);
+    render();
+    try {
+      const j = await A.programDo(action, action === 'gain' ? { key, gain } : { key });
+      const left = j.gone ? '' : '; something it started was still running after a kill';
+      if (action === 'gain') state.gainAsks.add(key);
+      toast((action === 'off' ? 'Turned ' + name + ' off' : action === 'on' ? 'Turned ' + name + ' on' : action === 'restart' ? 'Restarted ' + name
+        : p.on ? 'Asked ' + name + ' for ' + B.gainWords(gain) + ', restarting it' : 'Kept ' + B.gainWords(gain) + ' for ' + name + '; it is passed when it is turned on') + left);
+    } catch (err) {
+      toast('Could not ' + VERB[action] + ' ' + name + ': ' + (err.message || err));
+    }
+    state.sdrBusy.delete(key);
+    render();
+  }
+
+  // A gain picked here is toasted once its header says so, or once it cannot
+  A.onPrograms = () => {
+    for (const key of state.gainAsks) {
+      const p = progs().find((x) => x.key === key);
+      const said = p && B.gainSaid(p, Date.now());
+      if (!said || said.cls === 'warn') continue;
+      state.gainAsks.delete(key);
+      toast(said.cls === 'good' ? sdrName(p) + ' is on ' + B.gainWords(p.gain) : sdrName(p) + ': ' + said.word + '. ' + said.hint);
+    }
+    if (A.shell.current() === 'tbeams') render();
+  };
+
   function sheetHtml() {
+    const sdr = sdrs().find((p) => p.key === state.sel);
+    if (sdr) return sdrSheetHtml(sdr);
     const b = boards().find((x) => x.port === state.sel);
     if (!b) {
       return '<div class="pane"><p class="empty">' + (boards().length
         ? 'Pick a board on the left.'
-        : 'Plug a T-Beam in.') +
+        : sdrs().length ? 'Pick the SDR on the left, or plug a T-Beam in.' : 'Plug a T-Beam in.') +
         '</p></div>';
     }
     return headHtml(b) + '<div class="tb-cards">' + radioCard(b) + sessionCard(b) + firmwareCard(b) + '</div>';
@@ -487,13 +666,25 @@
 
   function render() {
     const all = boards();
-    if (!all.some((b) => b.port === state.sel)) state.sel = all.length ? all[0].port : null;
+    const programs = sdrs();
+    if (!all.some((b) => b.port === state.sel) && !programs.some((p) => p.key === state.sel)) {
+      state.sel = all.length ? all[0].port : programs.length ? programs[0].key : null;
+    }
     $('tb-ident').disabled = ident.watching;
     $('tb-ident').textContent = ident.watching ? 'Waiting for a replug' : 'Start watching';
     $('tb-ident-stop').hidden = !ident.watching;
     paint($('tb-which'), whichHtml());
-    paint($('tb-list'), listHtml() + programsHtml());
+    paint($('tb-list'), listHtml() + sdrListHtml() + programsHtml());
+    // The sheet redraws each second, which would shut a select the operator has open
+    const focus = typeof document === 'undefined' ? null : document.activeElement;
+    if (focus && focus.tagName === 'SELECT' && $('tb-sheet').contains(focus)) return;
+    // What it said follows its newest line, unless the operator has scrolled up in it; the
+    // sheet is redrawn every second while a countdown runs, which makes the box anew each time
+    const was = $('tb-sheet').querySelector('.tb-said');
+    const keep = was && { key: was.dataset.said, top: was.scrollTop, end: was.scrollTop + was.clientHeight >= was.scrollHeight - 4 };
     paint($('tb-sheet'), sheetHtml());
+    const box = $('tb-sheet').querySelector('.tb-said');
+    if (box && box !== was) box.scrollTop = keep && keep.key === box.dataset.said && !keep.end ? keep.top : box.scrollHeight;
   }
 
   // Which boards may be flashed changes when one is claimed or let go, so it is asked
@@ -578,6 +769,8 @@
     }
     const backup = t.getAttribute('data-backup');
     if (backup) { optsFor(backup).backup = t.checked; render(); return; }
+    const gainOf = t.getAttribute('data-sdrgain');
+    if (gainOf) { t.blur(); programAct(gainOf, 'gain', t.value); return; }
     const flashSf = t.getAttribute('data-flashsf');
     if (flashSf) { optsFor(flashSf).sf = Number(t.value); t.blur(); render(); return; }
     const freq = t.getAttribute('data-freq');
@@ -626,6 +819,9 @@
       await candidates(true);
       return;
     }
+
+    const act = ['on', 'off', 'restart'].find((a) => at('data-sdr' + a));
+    if (act) { programAct(at('data-sdr' + act), act); return; }
 
     if (at('data-forget')) { state.forget = at('data-forget'); render(); return; }
     if (at('data-forgetcancel')) { state.forget = null; render(); return; }

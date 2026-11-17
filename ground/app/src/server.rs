@@ -85,6 +85,25 @@ pub fn ports_json(ports: &[PortInfo], boards: &[Board], log: Option<&str>) -> St
     )
 }
 
+// Every program the app starts (command.rs), each with what the live fleet counted for it.
+// sdrLine is whether descent-ground.conf has an sdr = line, so the page can say how to add one.
+fn programs_json(ctx: &Ctx) -> String {
+    let items: Vec<String> = ctx
+        .programs
+        .iter()
+        .map(|p| {
+            let stats = ctx.live.with(|m| m.fleet.receivers(0.0).iter().find(|r| r.key == p.key()).map(|r| r.sdr_json()));
+            let own = p.json();
+            format!("{},\"stats\":{}}}", &own[..own.len() - 1], stats.as_deref().unwrap_or("null"))
+        })
+        .collect();
+    format!(
+        "{{\"sdrLine\":{},\"programs\":[{}]}}",
+        ctx.programs.iter().any(|p| p.key() == crate::command::SDR_KEY),
+        items.join(",")
+    )
+}
+
 // What a launcher polls to know we are up. Built from numbers rather than read off a
 // running server, so it can be checked without one.
 // Whether the program file has been written since this copy of it started. Every build
@@ -495,6 +514,7 @@ pub struct Ctx {
     pub local: crate::localfw::Shared,    // fsw tree on this laptop, if any
     pub live: Arc<crate::stream::Stream>,  // the receivers' fleet, what /api/stream sends
     pub replays: crate::replay::Shared,    // logs open for replay, each with its own fleet
+    pub programs: Vec<crate::command::Source>,   // receivers the app starts, from descent-ground.conf
 }
 
 // The one way out, whoever asked. The log is flushed before the url file goes, because
@@ -505,6 +525,10 @@ pub fn shutdown(ctx: &Ctx, why: &str) -> ! {
         if let Some(l) = l.as_mut() {
             l.flush();
         }
+    }
+    // An SDR program left running would hold the dongle against the next start
+    for p in &ctx.programs {
+        p.end();
     }
     if let Some(w) = urlfile::remove(&ctx.dir) {
         println!("{}", w);
@@ -1132,6 +1156,37 @@ fn handle(mut request: Request, ctx: Arc<Ctx>) {
             Response::from_string(body).with_header(header("Content-Type", "application/json")),
         );
         return;
+    }
+
+    if path == "/api/programs" {
+        return answer(request, programs_json(&ctx));
+    }
+
+    // Turn a program the app starts off or on, start it again, or set the sdr = program's gain.
+    // gone says whether everything the program had started has stopped.
+    if let Some(action) = path.strip_prefix("/api/program/") {
+        let Some(mut request) = post_only(request) else { return };
+        let mut body = String::new();
+        let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
+        let key = crate::json::str_field(&body, "key").unwrap_or_default();
+        let done = match ctx.programs.iter().find(|p| p.key() == key) {
+            None => Err(format!("no program {:?} is started by this app", key)),
+            Some(p) => match action {
+                "on" => p.turn(true),
+                "off" => p.turn(false),
+                "restart" => p.restart(),
+                "gain" => match crate::json::str_field(&body, "gain") {
+                    Some(g) => p.set_gain(&g),
+                    None => Err(String::from("no gain in the request")),
+                },
+                other => Err(format!("no such action: {}", other)),
+            },
+        };
+        let text = match done {
+            Ok(gone) => format!("{{\"ok\":true,\"gone\":{}}}", gone),
+            Err(e) => failed(&e),
+        };
+        return answer(request, text);
     }
 
     // What this computer calls a receiver, against the id it prints and not the port it
@@ -2398,6 +2453,7 @@ mod tests {
                 broadcast,
             )),
             replays: crate::replay::Replays::idle_only(),
+            programs: Vec::new(),
         })
     }
 
@@ -2728,6 +2784,39 @@ mod tests {
         assert_eq!(s, 400);
         assert!(said.contains("\"ok\":false"), "{}", said);
         assert_eq!(call_text(port, "POST", "/api/replay/open?path=../x.log", "").0, 400);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_programs_are_served_with_their_counts_and_turned_off_on_and_given_a_gain() {
+        let data = scratch("programs");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let header = "#DG,RX,v1,id=EEF522,f=915.0,bw=125.0,cr=7,sync=0x12,pre=8,kind=sdr,sfs=10+11+12,gain=auto,fw=0.2.0";
+        let programs = crate::command::start(&[], Some(&format!("echo '{}'; exec sleep 3174", header)), &data, &tx);
+        let Ok(mut ctx) = Arc::try_unwrap(quiet_ctx(&data)) else { panic!("the context is shared already") };
+        ctx.programs = programs;
+        let ctx = Arc::new(ctx);
+        ctx.live.line("cmd:sdr", 1000.0, header, true);
+        ctx.live.line("cmd:sdr", 2000.0, "HB,5024,0,0,ovf=0,drop=0,clip=0.00,sat=0,floor=-55.3", true);
+        let port = serving(ctx.clone());
+
+        let (s, body) = call_text(port, "GET", "/api/programs", "");
+        assert_eq!(s, 200);
+        assert!(body.starts_with("{\"sdrLine\":true,\"programs\":[{\"key\":\"cmd:sdr\",\"command\":\"echo"), "{}", body);
+        assert!(body.contains("\"stats\":{\"beat\":{\"t\":2000,\"upMs\":5024,\"ovf\":0,\"drop\":0,\"clip\":0,\"sat\":0,\"floor\":-55.3},\"bySf\":[]}}]}"), "{}", body);
+
+        assert_eq!(call_text(port, "GET", "/api/program/off", "{\"key\":\"cmd:sdr\"}").0, 405);
+        let (_, said) = call_text(port, "POST", "/api/program/off", "{\"key\":\"cmd:1\"}");
+        assert!(said.contains("no program \\\"cmd:1\\\""), "{}", said);
+        let (_, said) = call_text(port, "POST", "/api/program/gain", "{\"key\":\"cmd:sdr\",\"gain\":\"9;x\"}");
+        assert!(said.starts_with("{\"ok\":false,\"error\":\"a gain is auto"), "{}", said);
+        assert_eq!(call_text(port, "POST", "/api/program/off", "{\"key\":\"cmd:sdr\"}").1, "{\"ok\":true,\"gone\":true}");
+        assert!(call_text(port, "GET", "/api/programs", "").1.contains("\"on\":false"));
+        assert_eq!(call_text(port, "POST", "/api/program/gain", "{\"key\":\"cmd:sdr\",\"gain\":\"20.7\"}").1, "{\"ok\":true,\"gone\":true}");
+        let kept = std::fs::read_to_string(data.join(crate::command::FILE)).unwrap();
+        assert!(kept.ends_with("on no\ngain 20.7\n"), "{}", kept);
+        ctx.programs[0].end();
         let _ = std::fs::remove_dir_all(&data);
     }
 }

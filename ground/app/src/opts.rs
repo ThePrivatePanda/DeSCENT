@@ -40,6 +40,11 @@ An SDR receiver is a program the app starts and reads, through the shell, one li
 receiver. It is started again if it stops:
 
   receiver = ssh station sdr_rx
+
+One SDR can be the app's own, on an sdr = line. The page turns it on and off and sets the
+gain it is started with (--gain), and keeps both in descent-ground-sdr.txt:
+
+  sdr = python3 /opt/sdr_rx/sdr_rx.py
 ";
 
 // Running a build that is older than the dashboard next to it is the trap that cost an
@@ -98,6 +103,7 @@ pub struct Opts {
     pub host: Option<String>,
     pub stop: bool,
     pub receivers: Vec<String>,   // command lines, from the file only
+    pub sdr: Option<String>,      // the sdr = command line, from the file only
 }
 
 // The flag wins over the file, so a one-off run can always go the other way. A port
@@ -113,8 +119,13 @@ pub fn parse(args: &[String], conf: Option<&str>) -> Result<Opts, String> {
         None => None,
     };
     let receivers = match conf {
-        Some(text) => receivers_in_conf(text)?,
+        Some(text) => commands_in_conf(text, "receiver")?,
         None => Vec::new(),
+    };
+    let sdr = match conf.map(|text| commands_in_conf(text, "sdr")).transpose()?.as_deref() {
+        None | Some([]) => None,
+        Some([one]) => Some(one.clone()),
+        Some(_) => return Err(String::from("descent-ground.conf: there can be one sdr = line; put any other SDR on a receiver = line")),
     };
     let mut help = false;
     let mut stop = false;
@@ -145,7 +156,7 @@ pub fn parse(args: &[String], conf: Option<&str>) -> Result<Opts, String> {
             }
         }
     }
-    Ok(Opts { open_browser, help, port, stop, host, receivers })
+    Ok(Opts { open_browser, help, port, stop, host, receivers, sdr })
 }
 
 // An address rather than a name, because a name that resolves to somewhere unexpected is
@@ -218,9 +229,9 @@ fn port_in_conf(text: &str) -> Result<Option<u16>, String> {
     Ok(None)
 }
 
-// Every receiver = line, the rest of the line as it was written: a command line can hold a #,
-// so only a whole line is a comment here.
-fn receivers_in_conf(text: &str) -> Result<Vec<String>, String> {
+// Every receiver = (or sdr =) line, the rest of the line as it was written: a command line can
+// hold a #, so only a whole line is a comment here.
+fn commands_in_conf(text: &str, key: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -228,11 +239,11 @@ fn receivers_in_conf(text: &str) -> Result<Vec<String>, String> {
             continue;
         }
         let Some((k, v)) = line.split_once('=') else { continue };
-        if k.trim() != "receiver" {
+        if k.trim() != key {
             continue;
         }
         if v.trim().is_empty() {
-            return Err(String::from("descent-ground.conf: receiver = wants the command line that starts the receiver program"));
+            return Err(format!("descent-ground.conf: {} = wants the command line that starts the receiver program", key));
         }
         out.push(v.trim().to_string());
     }
@@ -331,6 +342,17 @@ mod tests {
 receiver=ssh station 'sdr_rx --gain 40 # high'\n";
         assert_eq!(ok(&[], Some(conf)).receivers, ["python3 replay_receiver.py examples.txt", "ssh station 'sdr_rx --gain 40 # high'"]);
         assert!(refused(&[], Some("receiver =  \n")).contains("wants the command line"));
+    }
+
+    #[test]
+    fn the_sdr_line_is_one_command_kept_apart_from_the_receiver_lines() {
+        assert_eq!(ok(&[], None).sdr, None);
+        let conf = "receiver = replay_receiver.py a.txt\nsdr = python3 sdr_rx.py --decoder /opt/file_lora # not a comment\n# sdr = old one\n";
+        let o = ok(&[], Some(conf));
+        assert_eq!(o.sdr.as_deref(), Some("python3 sdr_rx.py --decoder /opt/file_lora # not a comment"));
+        assert_eq!(o.receivers, ["replay_receiver.py a.txt"]);
+        assert!(refused(&[], Some("sdr = a\nsdr = b\n")).contains("one sdr = line"));
+        assert!(refused(&[], Some("sdr =\n")).contains("sdr = wants the command line"));
     }
 
     #[test]

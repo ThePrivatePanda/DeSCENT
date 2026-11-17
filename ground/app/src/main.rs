@@ -113,10 +113,10 @@ fn main() {
     let log = Arc::new(Mutex::new(log));
 
     let (tx, rx) = mpsc::channel();
-    let commands = command::start(&opts.receivers, &tx);
+    let programs = command::start(&opts.receivers, opts.sdr.as_deref(), &dir, &tx);
     let hub = Arc::new(Mutex::new(serial::Hub::new(tx)));
     hub.lock().unwrap().remember_in(&dir);
-    hub.lock().unwrap().add_commands(commands);
+    hub.lock().unwrap().add_commands(programs.clone());
     let broadcast = ws::Broadcast::new();
     let live = Arc::new(stream::Stream::with_out(
         stream::Model::new(stream::ModelSettings::load(&dir), stream::LIVE_MAX_POINTS),
@@ -147,6 +147,7 @@ fn main() {
         local: local.clone(),
         live: live.clone(),
         replays: replay::Replays::start(),
+        programs,
     });
 
     // Stale and lost come from silence, so the rows are looked at again each second, as

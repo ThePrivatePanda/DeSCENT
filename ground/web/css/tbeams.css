@@ -75,3 +75,25 @@
 /* The confirm sentence gets the whole row of a narrow card; its buttons go under it */
 #screen-tbeams .tb-card2 .confirm .grow { flex: 1 1 100%; }
 #screen-tbeams .tb-head input.nameit { margin-left: -12px; }
+
+/* ---------- an SDR's sheet ---------- */
+#screen-tbeams .tb-nosdr { margin: 8px 10px 0; }
+#screen-tbeams .tb-sdrname { font: var(--font-heading-weight) 28px/1.2 var(--font-heading); }
+#screen-tbeams .tb-why { margin: 10px 0 0; }
+#screen-tbeams .tb-why small { font-size: 12.5px; color: var(--color-text-70); }
+#screen-tbeams .tb-sftable th small { font-size: 11px; font-weight: 400; letter-spacing: 0; }
+#screen-tbeams .tb-beat { margin: 10px 0 0; }
+#screen-tbeams .tb-beat small { font-size: 12.5px; }
+#screen-tbeams .tb-cmd { margin: 6px 0 0; overflow-wrap: anywhere; }
+/* Radio and Signal side by side; the table and what it said take the sheet's width */
+@container (min-width: 900px) {
+  #screen-tbeams .tb-cards.tb-sdrcards { grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; }
+  #screen-tbeams .tb-sdrcards .tb-wide { grid-column: 1 / -1; }
+}
+#screen-tbeams .tb-sfwrap { overflow-x: auto; }
+/* As wide as its numbers, not the sheet: on a wide screen the columns would drift apart */
+#screen-tbeams .tb-sftable { width: auto; min-width: min(100%, 720px); }
+#screen-tbeams .tb-sftable th { position: static; background: transparent; padding: 8px 14px 6px; }
+#screen-tbeams .tb-sftable td { padding-inline: 14px; font-size: 13.5px; }
+#screen-tbeams .tb-sftable th:first-child, #screen-tbeams .tb-sftable td:first-child { padding-left: 0; font-weight: 700; }
+#screen-tbeams pre.raw.tb-said { max-height: 260px; }

@@ -557,10 +557,13 @@
       const r = heard.get(p.key);
       const name = receiverName(p.key, p, r, b);
       const sf = r && r.info && r.info.sf ? 'SF' + r.info.sf : '';
+      // a program the page turned off (command.rs) is off, not a port that failed
+      if (p.status === 'off') return { key: p.key, name, sf, word: 'off', cls: 'off' };
       if (p.status !== 'open') return { key: p.key, name, sf, word: p.status, cls: 'bad' };
       if (!r) return { key: p.key, name, sf, word: 'nothing heard', cls: 'warn' };
       const quiet = now - r.lastT;
-      if (quiet < 7000) return { key: p.key, name, sf, word: 'reading', cls: 'good' };
+      // an SDR's word is the one its sheet uses (the SDR program, command.rs)
+      if (quiet < 7000) return { key: p.key, name, sf, word: p.rxKind === 'sdr' || p.key === 'cmd:sdr' ? 'listening' : 'reading', cls: 'good' };
       const min = Math.floor(quiet / 60000);
       return { key: p.key, name, sf, word: 'quiet for ' + (min ? min + ' min' : Math.floor(quiet / 1000) + ' s'), cls: 'off' };
     });
@@ -578,6 +581,88 @@
     return { sf: Number.isFinite(chip) ? chip : field('sf'), chip: Number.isFinite(chip), listening: field('rx') !== 0 };
   }
 
+  // A program the app starts (command.rs) is an SDR when it is the sdr = line's or its header
+  // says kind=sdr; port is its entry in /api/ports.
+  function isSdr(p, port) {
+    return p.key === 'cmd:sdr' || (!!port && port.rxKind === 'sdr') || (!!p.header && p.header.fields.kind === 'sdr');
+  }
+
+  // The FATAL codes docs/sdr-receiver.md fixes. The program's own last words on stderr come
+  // first; these are for one that said nothing.
+  const FATAL = { 1: 'It stopped on an error', 2: 'No RTL-SDR plugged in', 3: 'The RTL-SDR is held by another program', 4: 'The RTL-SDR went away' };
+  const ERR_WORDS = { '-7': 'bad CRC', '-24': 'header damaged', '-1': 'other error' };
+
+  const clockS = (t) => new Date(t).toTimeString().slice(0, 8);
+
+  // p is one of /api/programs. The mark, and when it is stopped the sentence that says why with
+  // the program's own words, and when it will be started again.
+  function programState(p, now) {
+    if (p.state === 'off') return { cls: 'off', word: 'off', why: '' };
+    if (p.state === 'starting') return { cls: 'warn', word: 'starting', why: '' };
+    if (p.state === 'stopping') return { cls: 'warn', word: 'stopping', why: '' };
+    if (p.state === 'running') return { cls: 'good', word: 'listening', why: '' };
+    const said = p.fatal ? p.lastWords || FATAL[p.fatal] || 'It stopped on an error' : '';
+    const left = p.nextAt ? Math.max(0, Math.ceil((p.nextAt - now) / 1000)) : null;
+    const again = left === null ? '' : left ? ' Starts again in ' + left + ' s.' : ' Starting again.';
+    return {
+      cls: 'bad', word: said || 'stopped', again: again.trim(),
+      why: (said ? said + '.' : 'It stopped.') + again,
+      code: [p.fatal ? 'FATAL ' + p.fatal : '', p.lastExit && !p.lastExitByApp ? p.lastExit.replace(/^stopped, /, '') : ''].filter(Boolean).join(', '),
+    };
+  }
+
+  // 10+11+12 from a header's sfs=, as numbers
+  function headerSfs(p) {
+    const sfs = p && p.header && p.header.fields.sfs;
+    return sfs ? String(sfs).split('+').map(Number).filter(Number.isFinite) : [];
+  }
+
+  // SF10–12 for a run of factors, which fits a receiver row in the rail; any other set as a list
+  function sfSpan(sfs) {
+    const run = sfs.length > 2 && sfs.every((n, i) => !i || n === sfs[i - 1] + 1);
+    return run ? 'SF' + sfs[0] + '–' + sfs[sfs.length - 1] : sfs.map((n) => 'SF' + n).join(' · ');
+  }
+
+  function sfList(sfs) {
+    const s = sfs.map((n) => 'SF' + n);
+    return s.length > 1 ? s.slice(0, -1).join(', ') + ' and ' + s[s.length - 1] : s.join('');
+  }
+
+  const gainWords = (g) => (g === 'auto' ? 'automatic gain' : g + ' dB');
+  const sameGain = (a, b) => a === b || (a !== 'auto' && b !== 'auto' && Math.abs(Number(a) - Number(b)) < 0.05);
+  const GAIN_WAIT_MS = 15000;
+
+  // What the program has said about the gain the page picked, as the receivers rule has it for
+  // a T-Beam's SF: only a header printed since that run started, and since the gain was picked,
+  // is proof (the old run's header can still be the last one just after the restart). null when
+  // the page has picked none, and then the select alone shows what the program reports.
+  function gainSaid(p, now) {
+    if (!p.sdrLine || p.gain === null || p.gain === undefined) return null;
+    const words = gainWords(p.gain);
+    if (p.state === 'off') return { cls: 'warn', word: 'asked for ' + words, hint: 'Passed as --gain ' + p.gain + ' when it is turned on.' };
+    const h = p.header;
+    const since = Math.max(p.startedAt || 0, p.gainAt || 0);
+    if (h && p.startedAt && h.t >= since) {
+      if (sameGain(h.fields.gain, p.gain)) return { cls: 'good', word: words + ' confirmed', hint: "The program's header said so at " + clockS(h.t) + '.' };
+      return { cls: 'bad', word: words + ' not confirmed', hint: 'Its header says ' + (h.fields.gain ? gainWords(h.fields.gain) : 'no gain') + '.' };
+    }
+    const ranSince = p.startedAt && p.startedAt >= (p.gainAt || 0);
+    if (p.state === 'stopped' && ranSince) return { cls: 'bad', word: words + ' not confirmed', hint: 'It stopped before its header said so.' };
+    if (!since || now - since <= GAIN_WAIT_MS) {
+      return { cls: 'warn', word: 'asked for ' + words, hint: 'Started with --gain ' + p.gain + (ranSince ? ' at ' + clockS(p.startedAt) : '') + ". Waiting for its header." };
+    }
+    return { cls: 'bad', word: words + ' not confirmed', hint: 'No header in ' + GAIN_WAIT_MS / 1000 + ' s since it was started with --gain ' + p.gain + '.' };
+  }
+
+  // One line a spreading factor for an SDR's row on Live: its packets, then its errors in words
+  function sfLines(stats) {
+    return ((stats && stats.bySf) || []).map((c) => {
+      const errs = [['-7', c.badCrc], ['-24', c.headerDamaged], ['-1', c.other]].filter(([, n]) => n)
+        .map(([code, n]) => n + ' ' + ERR_WORDS[code] + (code === '-1' && n !== 1 ? 's' : '') + ' (' + code + ')');
+      return 'SF' + c.sf + ': ' + c.packets + (c.packets === 1 ? ' packet' : ' packets') + (errs.length ? ', ' + errs.join(', ') : '');
+    });
+  }
+
   // The app refuses to write an image that was read off another board unless told to.
   // Any other refusal has no override, so the two have to be told apart.
   function isOtherBoardRefusal(message) {
@@ -587,5 +672,6 @@
   return {
     MODULE, uidWords, sameBoard, chipName, firmwareWords, stillOnProbe, probesChanged, probeToRead, probeToAutoRead, swapSeen, readButton, readToast, dropChoice, chipList, stepList, powerOptions, sfOptions, dbmWords,
     flashWay, settingsTable, buildDiffers, phaseChanges, phaseRows, draftRate, draftStop, sameRate, INERT_PERCENT, bandLabel, rateWords, logWords, logZero, LAYOUT, PHASES, GROUND, BANDS, FIXED, listeningOn, receiverName, namedBy, isNewer, receiverFirmware, receiverWords, isOtherBoardRefusal, headerSf,
+    isSdr, programState, headerSfs, sfSpan, sfList, gainWords, gainSaid, sfLines, ERR_WORDS, FATAL,
   };
 });

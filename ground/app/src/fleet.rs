@@ -218,12 +218,62 @@ pub struct Receiver {
     pub reported_ok: f64,
     pub reported_errors: f64,
     pub source: Option<Info>,   // not a radio: where its lines came from
+    pub beat: Option<Beat>,
+    pub by_sf: Vec<SfCount>,    // smallest factor first
+}
+
+// What an SDR's HB says after its counts (docs/sdr-receiver.md), from the last one. None where
+// that HB did not say.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Beat {
+    pub t: f64,
+    pub up_ms: f64,
+    pub ovf: Option<f64>,
+    pub drop: Option<f64>,
+    pub clip: Option<f64>,
+    pub sat: Option<f64>,
+    pub floor: Option<f64>,
+}
+
+// A receiver's share of one spreading factor. Packets are the ones whose DeSCENT CRC passed,
+// duplicates of another receiver's included; the rest are its ERR lines by code.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SfCount {
+    pub sf: u8,
+    pub packets: u64,
+    pub bad_crc: u64,          // -7
+    pub header_damaged: u64,   // -24
+    pub other: u64,            // -1, or a code the spec does not have
+    pub last_t: Option<f64>,
+    pub last_snr: Option<f64>,
+    pub boards: Vec<u8>,       // csids, smallest first
 }
 
 impl Receiver {
     pub fn sf(&self) -> Option<f64> {
         sf_in(&self.info)
     }
+
+    fn sf_count(&mut self, sf: Option<f64>) -> Option<&mut SfCount> {
+        let sf = sf.filter(|s| (6.0..=12.0).contains(s))? as u8;
+        let at = match self.by_sf.binary_search_by_key(&sf, |c| c.sf) {
+            Ok(at) => at,
+            Err(at) => {
+                self.by_sf.insert(at, SfCount { sf, ..SfCount::default() });
+                at
+            }
+        };
+        Some(&mut self.by_sf[at])
+    }
+}
+
+// A key=value field a PKT, ERR or HB line carries after its fixed ones
+fn line_value(text: &str, key: &str) -> Option<f64> {
+    text.split(',')
+        .skip(4)
+        .find_map(|f| f.strip_prefix(key)?.strip_prefix('='))
+        .map(js_number)
+        .filter(|x| x.is_finite())
 }
 
 fn sf_in(info: &Info) -> Option<f64> {
@@ -237,13 +287,7 @@ pub fn line_sf(ev: &Event) -> Option<f64> {
     match &ev.kind {
         Kind::Packet { more: Some(more), .. } => sf_in(more),
         // lines.rs keeps nothing past an ERR's SNR, so the fields are read off the text
-        Kind::RxError { .. } => ev
-            .text
-            .split(',')
-            .skip(4)
-            .find_map(|f| f.strip_prefix("sf="))
-            .map(js_number)
-            .filter(|x| x.is_finite()),
+        Kind::RxError { .. } => line_value(&ev.text, "sf"),
         _ => None,
     }
 }
@@ -380,6 +424,8 @@ impl Fleet {
             reported_ok: f64::NAN,
             reported_errors: f64::NAN,
             source: None,
+            beat: None,
+            by_sf: Vec::new(),
         });
         self.receivers.len() - 1
     }
@@ -442,16 +488,25 @@ impl Fleet {
                 return ("boot", None, None);
             }
             Kind::Device { kind, .. } => return (*kind, None, None),
-            Kind::Heartbeat { ok, errors, .. } => {
+            Kind::Heartbeat { uptime_ms, ok, errors } => {
                 r.last_hb_t = Some(t);
                 r.last_t = Some(t);
                 r.reported_ok = *ok;
                 r.reported_errors = *errors;
+                let v = |key| line_value(&ev.text, key);
+                r.beat = Some(Beat { t, up_ms: *uptime_ms, ovf: v("ovf"), drop: v("drop"), clip: v("clip"), sat: v("sat"), floor: v("floor") });
                 return ("heartbeat", None, None);
             }
-            Kind::RxError { .. } => {
+            Kind::RxError { code, .. } => {
                 r.radio_errors += 1;
                 r.last_t = Some(t);
+                if let Some(c) = r.sf_count(line_sf(ev)) {
+                    match *code as i64 {
+                        -7 => c.bad_crc += 1,
+                        -24 => c.header_damaged += 1,
+                        _ => c.other += 1,
+                    }
+                }
                 return ("rxerror", None, None);
             }
             Kind::Packet { decoded: Err(_), .. } => {
@@ -472,6 +527,14 @@ impl Fleet {
             r.bad_crc += 1;
             self.bad_crc += 1;
             return ("badcrc", None, None);
+        }
+        if let Some(c) = r.sf_count(sf) {
+            c.packets += 1;
+            c.last_t = Some(t);
+            c.last_snr = Some(snr).filter(|x| x.is_finite());
+            if let Err(at) = c.boards.binary_search(&decoded.csid()) {
+                c.boards.insert(at, decoded.csid());
+            }
         }
 
         let dedupe = self.cfg.dedupe_ms;
@@ -725,6 +788,7 @@ impl Fleet {
         r.bad_crc = 0;
         r.radio_errors = 0;
         r.first_t = None;
+        r.by_sf.clear();
         true
     }
 
@@ -735,6 +799,7 @@ impl Fleet {
             r.bad_crc = 0;
             r.radio_errors = 0;
             r.first_t = None;
+            r.by_sf.clear();
         }
     }
 
@@ -1103,6 +1168,41 @@ impl Receiver {
     pub fn to_json(&self) -> String {
         format!("{{{}}}", receiver_fields(self))
     }
+
+    // What the SDR sheet shows beyond the receiver row: the last HB's extras and the counts by
+    // spreading factor. Not in receiver_fields, which fleet.js mirrors.
+    pub fn sdr_json(&self) -> String {
+        let beat = self.beat.as_ref().map_or(String::from("null"), |b| {
+            format!(
+                "{{\"t\":{},\"upMs\":{},\"ovf\":{},\"drop\":{},\"clip\":{},\"sat\":{},\"floor\":{}}}",
+                js_num(b.t),
+                js_num(b.up_ms),
+                opt_num(b.ovf),
+                opt_num(b.drop),
+                opt_num(b.clip),
+                opt_num(b.sat),
+                opt_num(b.floor)
+            )
+        });
+        let by_sf: Vec<String> = self
+            .by_sf
+            .iter()
+            .map(|c| {
+                format!(
+                    "{{\"sf\":{},\"packets\":{},\"badCrc\":{},\"headerDamaged\":{},\"other\":{},\"lastT\":{},\"lastSnr\":{},\"boards\":[{}]}}",
+                    c.sf,
+                    c.packets,
+                    c.bad_crc,
+                    c.header_damaged,
+                    c.other,
+                    opt_num(c.last_t),
+                    opt_num(c.last_snr),
+                    c.boards.iter().map(u8::to_string).collect::<Vec<String>>().join(",")
+                )
+            })
+            .collect();
+        format!("{{\"beat\":{},\"bySf\":[{}]}}", beat, by_sf.join(","))
+    }
 }
 
 impl Summary {
@@ -1276,6 +1376,48 @@ mod tests {
         assert_eq!(line_sf(&parse_line("ERR,-7,-94.0,2.75")), None);
         assert_eq!(line_sf(&parse_line("PKT,2,00FF,-50.0,13.75,-12")), None);
         assert_eq!(line_sf(&parse_line("HB,1,2,3,sf=7")), None);
+    }
+
+    #[test]
+    fn an_sdr_is_counted_by_spreading_factor_and_its_last_hb_kept_whole() {
+        let mut f = Fleet::new(Config::default());
+        feed(&mut f, "cmd:sdr", "#DG,RX,v1,id=EEF522,f=915.0,bw=125.0,cr=7,sync=0x12,pre=8,kind=sdr,sfs=10+11+12,gain=0.9,fw=0.2.0", 0.0);
+        feed(&mut f, "cmd:sdr", "HB,23,0,0,ovf=0,drop=0,clip=0.00,sat=0", 100.0);
+        assert_eq!(
+            f.receivers(0.0)[0].beat,
+            Some(Beat { t: 100.0, up_ms: 23.0, ovf: Some(0.0), drop: Some(0.0), clip: Some(0.0), sat: Some(0.0), floor: None }),
+            "the first HB has no floor yet"
+        );
+        feed(&mut f, "cmd:sdr", &format!("{},sf=12", pkt(9, 1, "", "8.40", 127, 0.0)), 1000.0);
+        feed(&mut f, "cmd:sdr", &format!("{},sf=12", pkt(13, 1, "", "-4.25", 127, 0.0)), 2000.0);
+        feed(&mut f, "cmd:sdr", &format!("{},sf=12", pkt(9, 2, "", "", 127, 0.0)), 2500.0);
+        feed(&mut f, "cmd:sdr", &format!("{},sf=10", pkt(5, 1, "", "1.00", 127, 0.0)), 3000.0);
+        for err in ["ERR,-7,,8.75,sf=12,hex=00FF", "ERR,-24,,,sf=11", "ERR,-24,,-14.25,sf=12", "ERR,-1,,,sf=11", "ERR,-3,,,sf=11", "ERR,-7,,1.0"] {
+            feed(&mut f, "cmd:sdr", err, 3500.0);
+        }
+        feed(&mut f, "cmd:sdr", "HB,25035,4,6,ovf=12,drop=3,clip=12.30,sat=1,floor=-40.2", 4000.0);
+        let r = &f.receivers(0.0)[0];
+        assert_eq!(r.radio_errors, 6);
+        let b = r.beat.as_ref().unwrap();
+        assert_eq!((b.up_ms, b.ovf, b.drop, b.clip, b.sat, b.floor), (25035.0, Some(12.0), Some(3.0), Some(12.3), Some(1.0), Some(-40.2)));
+        let rows: Vec<(u8, u64, u64, u64, u64, Option<f64>, Option<f64>, Vec<u8>)> =
+            r.by_sf.iter().map(|c| (c.sf, c.packets, c.bad_crc, c.header_damaged, c.other, c.last_t, c.last_snr, c.boards.clone())).collect();
+        assert_eq!(
+            rows,
+            [
+                (10, 1, 0, 0, 0, Some(3000.0), Some(1.0), vec![5]),
+                (11, 0, 0, 1, 2, None, None, vec![]),
+                (12, 3, 1, 1, 0, Some(2500.0), None, vec![9, 13]),
+            ],
+            "an ERR with no sf= is a radio error and in no row; an empty SNR is no SNR"
+        );
+        let j = r.sdr_json();
+        assert!(j.starts_with("{\"beat\":{\"t\":4000,\"upMs\":25035,\"ovf\":12,\"drop\":3,\"clip\":12.3,\"sat\":1,\"floor\":-40.2},\"bySf\":[{\"sf\":10,"), "{}", j);
+        assert!(j.contains("{\"sf\":12,\"packets\":3,\"badCrc\":1,\"headerDamaged\":1,\"other\":0,\"lastT\":2500,\"lastSnr\":null,\"boards\":[9,13]}"), "{}", j);
+
+        assert!(f.clear_receiver("cmd:sdr"));
+        assert!(f.receivers(0.0)[0].by_sf.is_empty());
+        assert!(f.receivers(0.0)[0].beat.is_some(), "the last HB is a state, not a tally");
     }
 
     #[test]
