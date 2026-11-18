@@ -317,10 +317,23 @@ impl Source {
                 last = Some(text);
             }
         });
-        self.shared.seen.lock().unwrap().last_words = last;
+        // a run the app ended itself gets no FATAL: nothing went wrong
+        let asked = self.shared.seen.lock().unwrap().stopping.is_some();
         match ran {
-            Ok(why) => format!("stopped: {}", why),
-            Err(e) => format!("could not be started: {}", e),
+            Ok(Some((code, why))) if !asked => {
+                heard(&self.key, now_ms(), format!("#DG,FATAL,{}", code), &self.shared.seen, &self.tx);
+                self.say(why);
+                self.shared.seen.lock().unwrap().last_words = Some(why.to_string());
+                format!("stopped: {}", why)
+            }
+            Ok(_) => {
+                self.shared.seen.lock().unwrap().last_words = last;
+                String::from("stopped")
+            }
+            Err(e) => {
+                self.shared.seen.lock().unwrap().last_words = last;
+                format!("could not be started: {}", e)
+            }
         }
     }
 

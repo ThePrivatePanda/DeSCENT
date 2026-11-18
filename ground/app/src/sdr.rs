@@ -389,9 +389,10 @@ fn spawn_dongle(tools: &Path, gain: Option<&str>, heard: &mpsc::Sender<Heard>) -
 }
 
 // Until the samples end: rtl_sdr stops or is stopped, or the file has been played. started is
-// told rtl_sdr's process id once it runs, so it can be ended from outside. The answer is why it
-// ended, in the words the page shows; Err when it could not start.
-pub fn run(tools: &Path, input: Input, id: &str, started: impl FnOnce(u32), out: &mut dyn FnMut(Out)) -> Result<String, String> {
+// told rtl_sdr's process id once it runs, so it can be ended from outside. The answer is, for the
+// dongle, the FATAL code and the words for why it ended, which sdr_rx.py would print next; the
+// caller prints them unless it ended the run itself. Err when it could not start.
+pub fn run(tools: &Path, input: Input, id: &str, started: impl FnOnce(u32), out: &mut dyn FnMut(Out)) -> Result<Option<(u8, &'static str)>, String> {
     let gain = match &input {
         Input::Dongle { gain } => gain.unwrap_or("auto"),
         Input::File(_) => "auto",
@@ -542,7 +543,7 @@ pub fn run(tools: &Path, input: Input, id: &str, started: impl FnOnce(u32), out:
         let _ = c.wait();
     }
     let Some(mut rtl) = rtl.take() else {
-        return Ok(String::from("played to the end"));
+        return Ok(None);
     };
     let _ = rtl.wait();
     // what rtl_sdr said on its way out can still be in the channel
@@ -552,14 +553,11 @@ pub fn run(tools: &Path, input: Input, id: &str, started: impl FnOnce(u32), out:
         }
         out(Out::Said(format!("rtl_sdr: {}", text)));
     }
-    let (code, why) = match fatal {
+    Ok(Some(match fatal {
         Some((3, _)) if without_winusb() => (3, ZADIG),
         Some(f) => f,
         None => (1, "rtl_sdr stopped without saying why"),
-    };
-    out(Out::Line(format!("#DG,FATAL,{}", code)));
-    out(Out::Said(why.to_string()));
-    Ok(why.to_string())
+    }))
 }
 
 const HELP: &str = "\
@@ -632,8 +630,12 @@ pub fn cli(args: &[String]) -> i32 {
         Out::Said(t) => eprintln!("{}", t),
     };
     match run(&tools, input, &id, |_| {}, &mut print) {
-        Ok(_) if cu8.is_some() => 0,
-        Ok(_) => 1,
+        Ok(None) => 0,
+        Ok(Some((code, why))) => {
+            print(Out::Line(format!("#DG,FATAL,{}", code)));
+            print(Out::Said(why.to_string()));
+            1
+        }
         Err(e) => {
             eprintln!("{}", e);
             1
