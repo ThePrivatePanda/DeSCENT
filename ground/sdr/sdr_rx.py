@@ -56,7 +56,9 @@ DONGLE_FAILURES = [
     ('usb_open error -12', 3, 'Windows has no WinUSB driver on the RTL-SDR. Install it once with Zadig (zadig.akeo.ie): '
      'Options, List All Devices, pick "Bulk-In, Interface (Interface 0)", WinUSB, Replace Driver; '
      'then unplug the RTL-SDR and plug it back in'),
-    ('Please fix the device permissions', 3, 'This user may not open the RTL-SDR. Once, run: echo \'SUBSYSTEM=="usb", '
+    # libusb's access error, which on Windows means a program such as SDR# has the dongle open
+    ('Please fix the device permissions', 3, 'The RTL-SDR is held by another program, such as SDR#: close it'
+     if sys.platform == 'win32' else 'This user may not open the RTL-SDR. Once, run: echo \'SUBSYSTEM=="usb", '
      'ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0666"\' | sudo tee /etc/udev/rules.d/20-rtlsdr.rules; '
      'then unplug the RTL-SDR and plug it back in'),
     ('Detaching kernel driver failed', 3, "The kernel's TV driver holds the RTL-SDR. Once, run: echo blacklist "

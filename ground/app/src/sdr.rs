@@ -49,12 +49,14 @@ ATTRS{idProduct}==\"2838\", MODE=\"0666\"' | sudo tee /etc/udev/rules.d/20-rtlsd
 const BLACKLIST: &str = "The kernel's TV driver holds the RTL-SDR. Once, run: echo blacklist dvb_usb_rtl28xxu | \
 sudo tee /etc/modprobe.d/blacklist-rtlsdr.conf; then sudo modprobe -r dvb_usb_rtl28xxu";
 const HELD: &str = "The RTL-SDR is held by another program";
+// libusb's access error, which on Windows means a program such as SDR# has the dongle open
+const NO_ACCESS: &str = if cfg!(windows) { "The RTL-SDR is held by another program, such as SDR#: close it" } else { UDEV };
 const GONE: &str = "The RTL-SDR went away (unplugged, or the USB hub dropped)";
 
 // rtl_sdr's last words, as the FATAL code and what to tell the operator. The first that matches wins.
 const DONGLE_FAILURES: [(&str, u8, &str); 8] = [
     ("usb_open error -12", 3, ZADIG),
-    ("Please fix the device permissions", 3, UDEV),
+    ("Please fix the device permissions", 3, NO_ACCESS),
     ("Detaching kernel driver failed", 3, BLACKLIST),
     ("usb_claim_interface error", 3, HELD),
     ("No supported devices found", 2, NO_DONGLE),
