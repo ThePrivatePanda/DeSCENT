@@ -1,0 +1,2 @@
+# Patches and the build script are read by git apply and sh on every OS, so never CRLF
+ground/sdr/* text eol=lf

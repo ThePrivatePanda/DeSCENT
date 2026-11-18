@@ -35,7 +35,8 @@ case $(uname -m) in
     *) arch= ;;
 esac
 
-git clone -q https://github.com/xdab/rxx_lora
+# as committed, so the patches apply on Windows too
+git -c core.autocrlf=false clone -q https://github.com/xdab/rxx_lora
 git -C rxx_lora checkout -q $RXX_LORA
 git -C rxx_lora apply "$here/rxx_lora-ldro.patch" "$here/rxx_lora-stdin.patch"
 curl -fsSL -o rtl-sdr-$RTL_SDR.tar.gz https://github.com/osmocom/rtl-sdr/archive/refs/tags/v$RTL_SDR.tar.gz

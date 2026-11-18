@@ -183,20 +183,20 @@ fn lowpass(cutoff: f64) -> [f32; TAPS] {
     taps
 }
 
-pub struct FrontEnd {
+struct FrontEnd {
     n: u64,
     history: Vec<[f32; 2]>,   // the last TAPS-1 samples, then the chunk being filtered
     taps: [f32; TAPS],
 }
 
 impl FrontEnd {
-    pub fn new() -> FrontEnd {
+    fn new() -> FrontEnd {
         FrontEnd { n: 0, history: vec![[0.0; 2]; TAPS - 1], taps: lowpass(75e3) }
     }
 
     // u8 IQ in, the channel at 250 kS/s out as the little-endian float pairs file_lora reads, with
     // how many bytes sat on the ADC's rail and the median power of the output.
-    pub fn push(&mut self, raw: &[u8]) -> (Vec<u8>, usize, f32) {
+    fn push(&mut self, raw: &[u8]) -> (Vec<u8>, usize, f32) {
         let clipped = raw.iter().filter(|&&b| b == 0 || b == 255).count();
         let count = raw.len() / 2;
         // The channel sits at -RATE/4, so moving it to 0 Hz is a multiply by j**n.
@@ -402,6 +402,17 @@ pub fn run(tools: &Path, input: Input, id: &str, started: impl FnOnce(u32), out:
     );
     let began = Instant::now();
     let (tx, heard) = mpsc::channel();
+    let live = matches!(input, Input::Dongle { .. });
+    let (mut reader, mut rtl): (Box<dyn Read + Send>, Option<Child>) = match input {
+        Input::Dongle { gain } => {
+            let mut child = spawn_dongle(tools, gain, &tx)?;
+            (Box::new(child.stdout.take().unwrap()), Some(child))
+        }
+        Input::File(path) => {
+            let f = std::fs::File::open(path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+            (Box::new(f), None)
+        }
+    };
     let mut children = Vec::new();
     let mut queues = Vec::new();
     for sf in SFS {
@@ -411,33 +422,17 @@ pub fn run(tools: &Path, input: Input, id: &str, started: impl FnOnce(u32), out:
                 queues.push(queue);
             }
             Err(e) => {
-                for c in &mut children {
+                for c in rtl.iter_mut().chain(&mut children) {
                     let _ = c.kill();
+                    let _ = c.wait();
                 }
                 return Err(e);
             }
         }
     }
-    let live = matches!(input, Input::Dongle { .. });
-    let (mut reader, rtl): (Box<dyn Read + Send>, Option<Child>) = match input {
-        Input::Dongle { gain } => match spawn_dongle(tools, gain, &tx) {
-            Ok(mut child) => {
-                started(child.id());
-                (Box::new(child.stdout.take().unwrap()), Some(child))
-            }
-            Err(e) => {
-                drop(queues);
-                return Err(e);
-            }
-        },
-        Input::File(path) => match std::fs::File::open(path) {
-            Ok(f) => (Box::new(f), None),
-            Err(e) => {
-                drop(queues);
-                return Err(format!("cannot read {}: {}", path.display(), e));
-            }
-        },
-    };
+    if let Some(c) = &rtl {
+        started(c.id());
+    }
     drop(tx);
 
     let counts = Arc::new(Mutex::new(Counts::default()));
@@ -544,7 +539,7 @@ pub fn run(tools: &Path, input: Input, id: &str, started: impl FnOnce(u32), out:
     for mut c in children {
         let _ = c.wait();
     }
-    let Some(mut rtl) = rtl else {
+    let Some(mut rtl) = rtl.take() else {
         return Ok(String::from("played to the end"));
     };
     let _ = rtl.wait();
@@ -565,7 +560,7 @@ pub fn run(tools: &Path, input: Input, id: &str, started: impl FnOnce(u32), out:
     Ok(why.to_string())
 }
 
-pub const HELP: &str = "\
+const HELP: &str = "\
 Usage: descent-ground sdr [--gain DB|auto] [--cu8 FILE] [--tools DIR]
 
 Runs the built-in SDR on its own and prints its receiver lines (docs/sdr-receiver.md) on stdout,

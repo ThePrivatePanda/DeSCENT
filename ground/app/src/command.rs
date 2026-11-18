@@ -304,10 +304,7 @@ impl Source {
         });
         let (tools, id) = match ready {
             Ok(t) => t,
-            Err(e) => {
-                self.say(&e);
-                return format!("could not be started: {}", e);
-            }
+            Err(e) => return format!("could not be started: {}", e),
         };
         let mut last = None;
         let ran = sdr::run(&tools, sdr::Input::Dongle { gain }, &id, |pid| {
@@ -323,10 +320,7 @@ impl Source {
         self.shared.seen.lock().unwrap().last_words = last;
         match ran {
             Ok(why) => format!("stopped: {}", why),
-            Err(e) => {
-                self.say(&e);
-                format!("could not be started: {}", e)
-            }
+            Err(e) => format!("could not be started: {}", e),
         }
     }
 
