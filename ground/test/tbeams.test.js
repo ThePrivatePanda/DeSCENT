@@ -266,6 +266,29 @@ test('with no SDR at all the list says how to add one', async () => {
   assert.match(p.text('tb-list'), /No SDR\. To have one, add sdr = <command> to descent-ground\.conf beside the program\./);
 });
 
+test('the built-in SDR is there to turn on, says where it comes from, and says why it is not running in its own words', async () => {
+  const builtin = { builtin: true, command: 'built-in SDR: rtl_sdr and file_lora in /opt/dg/sdr/0123abcd', on: false, state: 'off', header: null, said: [], stats: null, starts: 0, lastExit: null };
+  const port = Object.assign({}, SDR_PORT, { port: builtin.command, status: 'off', rxId: null, rxKind: null });
+  const { p, done } = sdrRig([SDR(builtin)], [port]);
+  p.parts.tbeams.show();
+  await p.settle();
+  assert.doesNotMatch(p.text('tb-list'), /No SDR/);
+  await pick(p, 'cmd:sdr');
+  assert.match(p.text('tb-sheet'), /Turn on Restart/);
+  assert.match(p.text('tb-sheet'), /The SDR that comes with the app: rtl_sdr and file_lora, unpacked into the sdr folder beside the program/);
+  await p.fire('screen-tbeams', 'click', { 'data-sdron': 'cmd:sdr' });
+  assert.deepEqual(done[0], ['on', { key: 'cmd:sdr' }]);
+
+  const zadig = 'Windows has no WinUSB driver on the RTL-SDR. Install it once with Zadig (zadig.akeo.ie): Options, List All Devices, pick "Bulk-In, Interface (Interface 0)", WinUSB, Replace Driver; then unplug the RTL-SDR and plug it back in';
+  for (const [fatal, words] of [['2', 'No RTL-SDR plugged in'], ['3', zadig]]) {
+    const { p: q } = sdrRig([SDR(Object.assign({}, builtin, { on: true, state: 'stopped', nextAt: NOW + 1000, fatal, lastWords: words }))], [port]);
+    q.parts.tbeams.show();
+    await q.settle();
+    await pick(q, 'cmd:sdr');
+    assert.ok(q.text('tb-sheet').includes(words + '. Starts again in'), q.text('tb-sheet'));
+  }
+});
+
 test('a board that is not a receiver says what Listen heard, once it has', async () => {
   const { p } = rig();
   p.parts.tbeams.show();

@@ -24,6 +24,7 @@ mod logfile;
 mod opts;
 mod replay;
 mod rxcheck;
+mod sdr;
 mod pull;
 mod radio;
 mod receiver_image;
@@ -51,6 +52,9 @@ fn main() {
     }
     if argv.first().is_some_and(|a| a == "check-receiver") {
         std::process::exit(rxcheck::run(&argv[1..]));
+    }
+    if argv.first().is_some_and(|a| a == "sdr") {
+        std::process::exit(sdr::cli(&argv[1..]));
     }
 
     let dir = std::env::current_exe()
@@ -113,7 +117,7 @@ fn main() {
     let log = Arc::new(Mutex::new(log));
 
     let (tx, rx) = mpsc::channel();
-    let programs = command::start(&opts.receivers, opts.sdr.as_deref(), &dir, &tx);
+    let programs = command::start(&opts.receivers, opts.sdr.as_deref(), &dir, &data, &tx);
     let hub = Arc::new(Mutex::new(serial::Hub::new(tx)));
     hub.lock().unwrap().remember_in(&dir);
     hub.lock().unwrap().add_commands(programs.clone());

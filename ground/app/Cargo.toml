@@ -22,6 +22,10 @@ probe-rs = "0.32.0"
 # Already in the tree under espflash, so this adds nothing to download.
 sha2 = { version = "0.11", default-features = false }
 
+# Tells whether an RTL-SDR is plugged in before the built-in SDR starts rtl_sdr. Already in the
+# tree under probe-rs.
+nusb = "0.2.7"
+
 # The build hashes the ChipSat images it embeds with the same crate.
 [build-dependencies]
 sha2 = { version = "0.11", default-features = false }

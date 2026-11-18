@@ -107,6 +107,52 @@ fn main() {
         None => String::from("pub static IMAGE: Option<&[u8]> = None;\npub static IMAGE_NAME: &str = \"\";\n"),
     };
     std::fs::write(out, format!("{}{}", body, chip_decl)).unwrap();
+
+    // The programs of the built-in SDR (sdr.rs), from the folder ground/sdr/build-tools.sh made
+    // for this OS. CI names it; a build without it carries none, and the app then has an SDR only
+    // from an sdr = line. The id is the start of the bundle's sha256, the folder it unpacks to.
+    println!("cargo:rerun-if-env-changed=DG_SDR_BUNDLE");
+    let mut files = Vec::new();
+    if let Some(root) = std::env::var_os("DG_SDR_BUNDLE").map(PathBuf::from) {
+        println!("cargo:rerun-if-changed={}", root.display());
+        bundle_files(&root, &root, &mut files);
+        if files.is_empty() {
+            panic!("DG_SDR_BUNDLE is {}, which holds no files", root.display());
+        }
+    }
+    files.sort();
+    let mut sha = Sha256::new();
+    let mut list = String::new();
+    for (name, path, exec) in &files {
+        sha.update(name.as_bytes());
+        sha.update(std::fs::read(path).unwrap());
+        list.push_str(&format!("    ({:?}, {}, include_bytes!({:?})),\n", name, exec, path));
+    }
+    let id: String = sha.finalize().iter().take(8).map(|b| format!("{:02x}", b)).collect();
+    std::fs::write(
+        PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("sdr_bundle.rs"),
+        format!("pub static FILES: &[(&str, bool, &[u8])] = &[\n{}];\npub static BUNDLE_ID: &str = {:?};\n", list, id),
+    )
+    .unwrap();
+}
+
+// Every file under dir, as its path from root with / between folders, where it is, and whether it
+// is a program (which only a Unix file mode says; on Windows the .exe does).
+fn bundle_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf, bool)>) {
+    for e in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
+        let path = e.path();
+        if path.is_dir() {
+            bundle_files(root, &path, out);
+            continue;
+        }
+        println!("cargo:rerun-if-changed={}", path.display());
+        let name = path.strip_prefix(root).unwrap().components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+        #[cfg(unix)]
+        let exec = std::os::unix::fs::PermissionsExt::mode(&e.metadata().unwrap().permissions()) & 0o111 != 0;
+        #[cfg(not(unix))]
+        let exec = false;
+        out.push((name, path, exec));
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

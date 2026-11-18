@@ -542,7 +542,9 @@
     return '<div class="pane tb-head"><div class="tb-headrow">' + name + mark(st.cls, st.word) +
         '<span class="tb-line">' + esc(line) + '</span><span class="tb-acts">' + acts + '</span></div>' +
       (st.why ? '<p class="outcome bad tb-why">' + esc(st.why) + (st.code ? ' <small>' + esc(st.code) + '</small>' : '') + '</p>' : '') +
-      '<p class="tb-notes note">' + (id ? 'The name is kept on this computer. ' : '') + (p.sdrLine
+      '<p class="tb-notes note">' + (id ? 'The name is kept on this computer. ' : '') + (p.builtin
+        ? 'The SDR that comes with the app: rtl_sdr and file_lora, unpacked into the sdr folder beside the program the first time it is turned on. Whether it is on and its gain are kept in descent-ground-sdr.txt beside the program; an sdr = line in descent-ground.conf runs another SDR program instead.'
+        : p.sdrLine
         ? 'Started from the sdr = line in descent-ground.conf; whether it is on and its gain are kept in descent-ground-sdr.txt beside the program.'
         : 'Started from a receiver = line in descent-ground.conf. Turned off, it stays off until the app is started again.') + '</p></div>';
   }

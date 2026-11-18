@@ -1,0 +1,15 @@
+rtl_sdr writes its samples to stdout in binary mode on Windows; upstream sets stdin instead, and
+every 0x0A byte of IQ then gains a 0x0D. Against osmocom rtl-sdr v2.0.3, GPL-2.0-or-later like rtl-sdr.
+Apply in an rtl-sdr source tree with: patch -p1 < rtl-sdr-stdout.patch
+
+--- a/src/rtl_sdr.c
++++ b/src/rtl_sdr.c
+@@ -228,7 +228,7 @@
+ 	if(strcmp(filename, "-") == 0) { /* Write samples to stdout */
+ 		file = stdout;
+ #ifdef _WIN32
+-		_setmode(_fileno(stdin), _O_BINARY);
++		_setmode(_fileno(stdout), _O_BINARY);
+ #endif
+ 	} else {
+ 		file = fopen(filename, "wb");

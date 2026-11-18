@@ -489,6 +489,7 @@ dependencies = [
  "espflash",
  "humantime",
  "include_dir",
+ "nusb",
  "probe-rs",
  "serialport",
  "sha2",

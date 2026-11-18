@@ -1,0 +1,37 @@
+file_lora reads stdin for a path of "-", in binary mode on Windows, so a program can feed it through a pipe.
+Against rxx_lora f32079f (github.com/xdab/rxx_lora) after rxx_lora-ldro.patch, GPL-3.0 like rxx_lora.
+Apply in an rxx_lora checkout with: git apply rxx_lora-stdin.patch
+
+diff --git a/src/device_file.c b/src/device_file.c
+index 7ecf2a3..3f800bb 100644
+--- a/src/device_file.c
++++ b/src/device_file.c
+@@ -3,6 +3,11 @@
+ #include <complex.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
++#if defined(_WIN32)
++#include <fcntl.h>
++#include <io.h>
++#endif
+ 
+ struct file_device
+ {
+@@ -37,9 +42,15 @@ static const struct device_ops file_ops = {file_read, file_rate, file_stop, file
+ 
+ struct device *device_open_file(const char *path, double rate_hz)
+ {
+-    FILE *f = fopen(path, "rb");
++    // "-" is stdin, for a program that feeds the samples through a pipe
++    FILE *f = strcmp(path, "-") == 0 ? stdin : fopen(path, "rb");
+     if (!f)
+         return NULL;
++#if defined(_WIN32)
++    // stdin is opened in text mode there, which eats 0x1A and turns CR LF into LF
++    if (f == stdin)
++        (void)_setmode(_fileno(stdin), _O_BINARY);
++#endif
+ 
+     struct file_device *s = calloc(1, sizeof(*s));
+     if (!s)

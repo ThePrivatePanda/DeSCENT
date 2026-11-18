@@ -14,11 +14,16 @@
 // start from opening it. The sdr = program is the app's own: the page picks the gain it is started
 // with (--gain), and that and whether it is on are kept in descent-ground-sdr.txt. Turning a
 // receiver = line off lasts until the app is started again.
+//
+// With no sdr = line, cmd:sdr is the built-in SDR (sdr.rs) when the build carries one: off until
+// the page first turns it on, kept like an sdr = program, and while no RTL-SDR is plugged in it
+// says so and looks again every second rather than starting.
 use crate::chips::{word, write_whole};
 use crate::framing::Framer;
 use crate::json::esc;
 use crate::logfile::now_ms;
 use crate::receivers::{self, Header};
+use crate::sdr;
 use crate::serial::{Event, PortInfo};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
@@ -72,6 +77,7 @@ pub struct Source {
     key: String,
     command: String,
     file: Option<PathBuf>,   // the sdr = program's settings; None for a receiver = line
+    builtin: Option<PathBuf>,   // the data folder the built-in SDR unpacks into, for the built-in one
     shared: Arc<Shared>,
     tx: Sender<Event>,
 }
@@ -93,9 +99,9 @@ const SETTINGS_HEADER: &str = "# The SDR on the sdr = line of descent-ground.con
 # on yes|no\n\
 # gain <dB>|auto, passed to the program as --gain. With no gain line it is started without one.\n";
 
-// No file is the program as its conf line has it: on, and no --gain.
-fn load(path: &Path) -> (bool, Option<String>) {
-    let mut on = true;
+// No file is the program as its conf line has it, on and with no --gain; or the built-in SDR, off.
+fn load(path: &Path, on: bool) -> (bool, Option<String>) {
+    let mut on = on;
     let mut gain = None;
     for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
         match word(line) {
@@ -115,11 +121,14 @@ fn save(path: &Path, on: bool, gain: Option<&str>) -> Result<(), String> {
     write_whole(path, &text)
 }
 
-pub fn start(commands: &[String], sdr: Option<&str>, dir: &Path, tx: &Sender<Event>) -> Vec<Source> {
+pub fn start(commands: &[String], sdr: Option<&str>, dir: &Path, data: &Path, tx: &Sender<Event>) -> Vec<Source> {
     let mut all: Vec<Source> =
-        commands.iter().enumerate().map(|(i, c)| Source::new(&format!("cmd:{}", i + 1), c, None, tx)).collect();
+        commands.iter().enumerate().map(|(i, c)| Source::new(&format!("cmd:{}", i + 1), c, None, None, tx)).collect();
     if let Some(c) = sdr {
-        all.push(Source::new(SDR_KEY, c, Some(dir.join(FILE)), tx));
+        all.push(Source::new(SDR_KEY, c, Some(dir.join(FILE)), None, tx));
+    } else if sdr::carried() {
+        let command = format!("built-in SDR: rtl_sdr and file_lora in {}", sdr::folder(data).display());
+        all.push(Source::new(SDR_KEY, &command, Some(dir.join(FILE)), Some(data.to_path_buf()), tx));
     }
     for s in &all {
         std::thread::spawn({
@@ -131,8 +140,8 @@ pub fn start(commands: &[String], sdr: Option<&str>, dir: &Path, tx: &Sender<Eve
 }
 
 impl Source {
-    fn new(key: &str, command: &str, file: Option<PathBuf>, tx: &Sender<Event>) -> Source {
-        let (on, gain) = file.as_deref().map_or((true, None), load);
+    fn new(key: &str, command: &str, file: Option<PathBuf>, builtin: Option<PathBuf>, tx: &Sender<Event>) -> Source {
+        let (on, gain) = file.as_deref().map_or((true, None), |f| load(f, builtin.is_none()));
         let seen = Seen {
             header: None,
             header_line: None,
@@ -156,6 +165,7 @@ impl Source {
             key: key.to_string(),
             command: command.to_string(),
             file,
+            builtin,
             shared: Arc::new(Shared { seen: Mutex::new(seen), wake: Condvar::new() }),
             tx: tx.clone(),
         }
@@ -194,41 +204,24 @@ impl Source {
     fn keep_running(&self) {
         let mut wait = Duration::ZERO;
         loop {
-            let line = {
+            let gain = {
                 let mut s = self.shared.seen.lock().unwrap();
                 while !s.on {
                     s = self.shared.wake.wait(s).unwrap();
                 }
                 s.hurry = false;
-                match (&self.file, &s.gain) {
+                s.gain.clone()
+            };
+            if self.builtin.is_some() && self.no_dongle() {
+                continue;
+            }
+            let began = Instant::now();
+            let why = match &self.builtin {
+                Some(data) => self.run_builtin(data, gain.as_deref()),
+                None => self.run_shell(&match (&self.file, gain) {
                     (Some(_), Some(g)) => format!("{} --gain {}", self.command, g),
                     _ => self.command.clone(),
-                }
-            };
-            let began = Instant::now();
-            let why = match shell(&line).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
-                Ok(mut child) => {
-                    println!("{}: started {}", self.key, line);
-                    {
-                        let mut s = self.shared.seen.lock().unwrap();
-                        s.pid = Some(child.id());
-                        s.started_ms = Some(now_ms());
-                        s.starts += 1;
-                        s.fatal = None;
-                        s.status = String::from("open");
-                        s.error = None;
-                    }
-                    self.told();
-                    let said = self.keep_stderr(child.stderr.take().unwrap());
-                    pump(child.stdout.take().unwrap(), &self.key, &self.shared.seen, &self.tx);
-                    let status = child.wait();
-                    self.shared.seen.lock().unwrap().last_words = said.join().unwrap_or(None);
-                    match status {
-                        Ok(status) => format!("stopped, {}", status),
-                        Err(e) => format!("stopped, and could not be asked why: {}", e),
-                    }
-                }
-                Err(e) => format!("could not be started: {}", e),
+                }),
             };
             let mut s = self.shared.seen.lock().unwrap();
             s.pid = None;
@@ -271,6 +264,110 @@ impl Source {
         }
     }
 
+    fn running_as(&self, pid: u32) {
+        {
+            let mut s = self.shared.seen.lock().unwrap();
+            s.pid = Some(pid);
+            s.started_ms = Some(now_ms());
+            s.starts += 1;
+            s.fatal = None;
+            s.status = String::from("open");
+            s.error = None;
+        }
+        self.told();
+    }
+
+    fn run_shell(&self, line: &str) -> String {
+        match shell(line).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Ok(mut child) => {
+                println!("{}: started {}", self.key, line);
+                self.running_as(child.id());
+                let said = self.keep_stderr(child.stderr.take().unwrap());
+                pump(child.stdout.take().unwrap(), &self.key, &self.shared.seen, &self.tx);
+                let status = child.wait();
+                self.shared.seen.lock().unwrap().last_words = said.join().unwrap_or(None);
+                match status {
+                    Ok(status) => format!("stopped, {}", status),
+                    Err(e) => format!("stopped, and could not be asked why: {}", e),
+                }
+            }
+            Err(e) => format!("could not be started: {}", e),
+        }
+    }
+
+    // pid is rtl_sdr's, so ending it ends the run: the decoders finish on the end of their stdin.
+    fn run_builtin(&self, data: &Path, gain: Option<&str>) -> String {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
+        let ready = sdr::unpack(data).and_then(|tools| {
+            let home = home.ok_or_else(|| String::from("neither HOME nor USERPROFILE is set, so there is nowhere to keep the SDR's id"))?;
+            Ok((tools, sdr::receiver_id(&home)?))
+        });
+        let (tools, id) = match ready {
+            Ok(t) => t,
+            Err(e) => {
+                self.say(&e);
+                return format!("could not be started: {}", e);
+            }
+        };
+        let mut last = None;
+        let ran = sdr::run(&tools, sdr::Input::Dongle { gain }, &id, |pid| {
+            println!("{}: started rtl_sdr and file_lora from {}", self.key, tools.display());
+            self.running_as(pid);
+        }, &mut |o| match o {
+            sdr::Out::Line(line) => heard(&self.key, now_ms(), line, &self.shared.seen, &self.tx),
+            sdr::Out::Said(text) => {
+                self.say(&text);
+                last = Some(text);
+            }
+        });
+        self.shared.seen.lock().unwrap().last_words = last;
+        match ran {
+            Ok(why) => format!("stopped: {}", why),
+            Err(e) => {
+                self.say(&e);
+                format!("could not be started: {}", e)
+            }
+        }
+    }
+
+    // True while no RTL-SDR is plugged in, after a second's wait or less, said on the page as a
+    // stop with its FATAL code and on the console once.
+    fn no_dongle(&self) -> bool {
+        let absent = match sdr::dongle_present() {
+            Ok(present) => !present,
+            Err(e) => {
+                self.say(&e);
+                false
+            }
+        };
+        if !absent {
+            return false;
+        }
+        let mut s = self.shared.seen.lock().unwrap();
+        if s.error.as_deref() != Some(sdr::NO_DONGLE) {
+            println!("{}: {}; waiting for one", self.key, sdr::NO_DONGLE);
+            s.error = Some(sdr::NO_DONGLE.to_string());
+            s.fatal = Some(String::from("2"));
+            s.last_words = Some(sdr::NO_DONGLE.to_string());
+            s.status = String::from("stopped");
+        }
+        s.next_ms = Some(now_ms() + 1000);
+        drop(s);
+        self.told();
+        let s = self.shared.seen.lock().unwrap();
+        let mut s = self.shared.wake.wait_timeout_while(s, FIRST_WAIT, |s| s.on && !s.hurry).unwrap().0;
+        s.next_ms = None;
+        if !s.on {
+            s.status = String::from("off");
+            s.error = None;
+        }
+        true
+    }
+
+    fn say(&self, text: &str) {
+        say(&self.key, &self.shared, text);
+    }
+
     // Its complaints go to this app's own output, where an operator reads ours, and the last
     // of them to the page. The thread's answer is the last line of the run.
     fn keep_stderr(&self, err: impl Read + Send + 'static) -> std::thread::JoinHandle<Option<String>> {
@@ -282,12 +379,7 @@ impl Source {
                 if text.is_empty() {
                     continue;
                 }
-                println!("{}: {}", key, text);
-                let mut s = shared.seen.lock().unwrap();
-                if s.said.len() == SAID_LINES {
-                    s.said.pop_front();
-                }
-                s.said.push_back((now_ms(), text.clone()));
+                say(&key, &shared, &text);
                 last = Some(text);
             }
             last
@@ -405,12 +497,13 @@ impl Source {
         let said: Vec<String> = s.said.iter().map(|(t, l)| format!("{{\"t\":{},\"text\":\"{}\"}}", t, esc(l))).collect();
         format!(
             concat!(
-                "{{\"key\":\"{}\",\"command\":\"{}\",\"sdrLine\":{},\"on\":{},\"gain\":{},\"gainAt\":{},\"state\":\"{}\",",
+                "{{\"key\":\"{}\",\"command\":\"{}\",\"sdrLine\":{},\"builtin\":{},\"on\":{},\"gain\":{},\"gainAt\":{},\"state\":\"{}\",",
                 "\"startedAt\":{},\"nextAt\":{},\"starts\":{},\"lastExit\":{},\"lastExitAt\":{},\"lastExitByApp\":{},\"fatal\":{},\"lastWords\":{},\"header\":{},\"said\":[{}]}}"
             ),
             esc(&self.key),
             esc(&self.command),
             self.file.is_some(),
+            self.builtin.is_some(),
             s.on,
             text(s.gain.as_deref()),
             num(s.gain_at),
@@ -495,8 +588,17 @@ fn end_tree(pid: u32) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+fn say(key: &str, shared: &Shared, text: &str) {
+    println!("{}: {}", key, text);
+    let mut s = shared.seen.lock().unwrap();
+    if s.said.len() == SAID_LINES {
+        s.said.pop_front();
+    }
+    s.said.push_back((now_ms(), text.to_string()));
+}
+
 // Every whole line until the program's stdout ends, each into the same channel the USB ports
-// feed. A header is kept, and the page told only when it differs from the last one.
+// feed.
 fn pump(mut out: impl Read, key: &str, seen: &Mutex<Seen>, tx: &Sender<Event>) {
     let mut framer = Framer::new();
     let mut buf = [0u8; 4096];
@@ -507,26 +609,31 @@ fn pump(mut out: impl Read, key: &str, seen: &Mutex<Seen>, tx: &Sender<Event>) {
         };
         let t = now_ms();
         for line in framer.push(&buf[..n]) {
-            let news = match receivers::header(&line) {
-                Some(h) => {
-                    let mut s = seen.lock().unwrap();
-                    let news = s.header.as_ref() != Some(&h);
-                    s.header = Some(h);
-                    s.header_line = Some((t, line.clone()));
-                    news
-                }
-                None => {
-                    if let Some(code) = line.strip_prefix("#DG,FATAL,") {
-                        seen.lock().unwrap().fatal = Some(code.trim_end().to_string());
-                    }
-                    false
-                }
-            };
-            let _ = tx.send(Event::Line { key: key.to_string(), t_ms: t, text: line });
-            if news {
-                let _ = tx.send(Event::Ports);
-            }
+            heard(key, t, line, seen, tx);
         }
+    }
+}
+
+// A header is kept, and the page told only when it differs from the last one.
+fn heard(key: &str, t: u128, line: String, seen: &Mutex<Seen>, tx: &Sender<Event>) {
+    let news = match receivers::header(&line) {
+        Some(h) => {
+            let mut s = seen.lock().unwrap();
+            let news = s.header.as_ref() != Some(&h);
+            s.header = Some(h);
+            s.header_line = Some((t, line.clone()));
+            news
+        }
+        None => {
+            if let Some(code) = line.strip_prefix("#DG,FATAL,") {
+                seen.lock().unwrap().fatal = Some(code.trim_end().to_string());
+            }
+            false
+        }
+    };
+    let _ = tx.send(Event::Line { key: key.to_string(), t_ms: t, text: line });
+    if news {
+        let _ = tx.send(Event::Ports);
     }
 }
 
@@ -539,7 +646,7 @@ mod tests {
 
     fn source(key: &str, command: &str, file: Option<PathBuf>) -> (Source, mpsc::Receiver<Event>) {
         let (tx, rx) = mpsc::channel();
-        (Source::new(key, command, file, &tx), rx)
+        (Source::new(key, command, file, None, &tx), rx)
     }
 
     fn drain(rx: &mpsc::Receiver<Event>) -> Vec<String> {
@@ -667,16 +774,16 @@ mod tests {
     fn the_sdr_settings_survive_being_saved_and_read_back() {
         let dir = scratch("settings");
         let path = dir.join(FILE);
-        assert_eq!(load(&path), (true, None), "no file is on with no gain");
+        assert_eq!(load(&path, true), (true, None), "no file is on with no gain");
         save(&path, false, Some("20.7")).unwrap();
-        assert_eq!(load(&path), (false, Some(String::from("20.7"))));
+        assert_eq!(load(&path, true), (false, Some(String::from("20.7"))));
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.ends_with("on no\ngain 20.7\n"), "{}", text);
         save(&path, true, Some("auto")).unwrap();
-        assert_eq!(load(&path), (true, Some(String::from("auto"))));
+        assert_eq!(load(&path, true), (true, Some(String::from("auto"))));
         // a gain somebody typed that would not be safe on the command line is not used
         std::fs::write(&path, "on yes\ngain 20; reboot\n").unwrap();
-        assert_eq!(load(&path), (true, None));
+        assert_eq!(load(&path, true), (true, None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -685,7 +792,7 @@ mod tests {
     fn a_real_program_is_read_and_started_again_when_it_stops() {
         let (tx, rx) = mpsc::channel();
         let dir = scratch("again");
-        let sources = start(&[format!("printf '{}\\nHB,1,0,0\\n'; echo complaint >&2; exit 3", HEADER)], None, &dir, &tx);
+        let sources = start(&[format!("printf '{}\\nHB,1,0,0\\n'; echo complaint >&2; exit 3", HEADER)], None, &dir, &dir, &tx);
         let mut lines = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         while lines.len() < 4 && Instant::now() < deadline {
@@ -711,7 +818,7 @@ mod tests {
     fn off_stops_everything_the_program_started_and_on_starts_it_again() {
         let dir = scratch("off");
         let (tx, _rx) = mpsc::channel();
-        let all = start(&[], Some("sleep 3171 & sh -c 'sleep 3172'; echo done"), &dir, &tx);
+        let all = start(&[], Some("sleep 3171 & sh -c 'sleep 3172'; echo done"), &dir, &dir, &tx);
         let sdr = &all[0];
         assert_eq!(sdr.key(), SDR_KEY);
         wait_for("both sleeps", || left("sleep 317[12]") >= 2);
@@ -721,7 +828,7 @@ mod tests {
         assert_eq!(left("sleep 317[12]"), 0, "a child or grandchild was left running");
         wait_for("off", || state(sdr) == "off");
         assert!(sdr.json().contains("\"lastExit\":\"Turned off from the page\""), "{}", sdr.json());
-        assert_eq!(load(&dir.join(FILE)), (false, None));
+        assert_eq!(load(&dir.join(FILE), true), (false, None));
         std::thread::sleep(Duration::from_millis(1500));
         assert_eq!(left("sleep 317[12]"), 0, "off must not be started again");
 
@@ -739,7 +846,7 @@ mod tests {
         let dir = scratch("gain");
         let (tx, rx) = mpsc::channel();
         // what is appended lands on the last command, here a function that says its arguments
-        let all = start(&[], Some(&format!("f() {{ echo \"args $*\" >&2; exec sleep 3173; }}; echo '{}'; f", HEADER)), &dir, &tx);
+        let all = start(&[], Some(&format!("f() {{ echo \"args $*\" >&2; exec sleep 3173; }}; echo '{}'; f", HEADER)), &dir, &dir, &tx);
         let sdr = &all[0];
         wait_for("running", || state(sdr) == "running");
         wait_for("one sleep", || left("sleep 3173") == 1);
@@ -750,7 +857,7 @@ mod tests {
         wait_for("the restart with the gain", || sdr.json().contains("\"starts\":2") && sdr.json().contains("\"text\":\"args --gain 20.7\""));
         assert!(began.elapsed() < Duration::from_secs(4), "a restart from the page does not wait out the backoff");
         wait_for("one sleep again", || left("sleep 3173") == 1);
-        assert_eq!(load(&dir.join(FILE)), (true, Some(String::from("20.7"))));
+        assert_eq!(load(&dir.join(FILE), true), (true, Some(String::from("20.7"))));
         assert!(sdr.json().contains("\"gain\":\"20.7\""), "{}", sdr.json());
         assert!(sdr.json().contains("\"lastExit\":\"Restarted with gain 20.7 dB\""), "{}", sdr.json());
         assert!(sdr.json().contains("\"lastExitByApp\":true"), "{}", sdr.json());
@@ -767,7 +874,7 @@ mod tests {
     fn a_receiver_line_has_no_gain_to_set_and_is_not_restarted_while_off() {
         let dir = scratch("line");
         let (tx, _rx) = mpsc::channel();
-        let all = start(&[String::from("exit 1")], None, &dir, &tx);
+        let all = start(&[String::from("exit 1")], None, &dir, &dir, &tx);
         assert!(all[0].set_gain("20.7").unwrap_err().contains("receiver = line"));
         all[0].turn(false).unwrap();
         assert!(all[0].restart().unwrap_err().contains("is off"));

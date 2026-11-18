@@ -1,8 +1,11 @@
 name: Release builds
 
+# A tag builds and attaches every download. Run by hand on a branch, the same builds are kept as
+# the run's artifacts instead.
 on:
   push:
     tags: ['ground-v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,11 +15,30 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git make patch curl bzip2
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-fftw mingw-w64-ucrt-x86_64-libusb
+      - name: SDR programs
+        shell: msys2 {0}
+        run: ground/sdr/build-tools.sh sdr-windows
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
         working-directory: ground/app
+        env:
+          DG_SDR_BUNDLE: ${{ github.workspace }}\sdr-windows
       - run: copy ground\app\target\release\descent-ground.exe descent-ground-windows-x64.exe
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            descent-ground-windows-x64.exe
+            sdr-windows
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           files: descent-ground-windows-x64.exe
 
@@ -24,27 +46,59 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Alpine, so musl links both programs fully statically and they run on any distribution
+      - name: SDR programs
+        run: >-
+          docker run --rm -v "$PWD:/w" -w /w alpine:3.20 sh -c
+          "apk add -q build-base curl git linux-headers patch file &&
+          ground/sdr/build-tools.sh sdr-linux descent-sdr-sources.tar.gz &&
+          chown -R $(id -u):$(id -g) sdr-linux descent-sdr-sources.tar.gz"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
       - run: sudo apt-get install -y musl-tools
       - run: cargo build --release --target x86_64-unknown-linux-musl
         working-directory: ground/app
+        env:
+          DG_SDR_BUNDLE: ${{ github.workspace }}/sdr-linux
       - run: cp ground/app/target/x86_64-unknown-linux-musl/release/descent-ground descent-ground-linux-x64
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: descent-ground-linux-x64
+          name: linux
+          path: |
+            descent-ground-linux-x64
+            descent-sdr-sources.tar.gz
+            sdr-linux
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            descent-ground-linux-x64
+            descent-sdr-sources.tar.gz
 
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      # Not yet tried on a Mac: a failure here gives an app without the built-in SDR, not no app.
+      - name: SDR programs
+        continue-on-error: true
+        run: brew install fftw libusb && ground/sdr/build-tools.sh sdr-macos
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
-      - run: cargo build --release --target aarch64-apple-darwin
+      - run: |
+          if [ -f ../../sdr-macos/THIRD_PARTY/SOURCES.txt ]; then export DG_SDR_BUNDLE=$GITHUB_WORKSPACE/sdr-macos; fi
+          cargo build --release --target aarch64-apple-darwin
         working-directory: ground/app
       - run: cp ground/app/target/aarch64-apple-darwin/release/descent-ground descent-ground-macos-arm64
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            descent-ground-macos-arm64
+            sdr-macos
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           files: descent-ground-macos-arm64

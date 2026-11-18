@@ -9,11 +9,13 @@ DeSCENT ChipSat: flashes and reads ChipSats and T-Beam receivers, and serves the
   descent-ground [options]
   descent-ground check [--json] <pull folder, dump.txt, ground log, or a folder of those>
   descent-ground check-receiver <file, or - for stdin>
+  descent-ground sdr [--gain <dB>|auto] [--cu8 <recording>] [--tools <folder>]
 
   check             read a pull or a log and print what happened, worst first, then exit.
                     Opens no port and starts no server, so it runs beside a live app
   check-receiver    read what an SDR receiver program printed and say which lines break
                     docs/sdr-receiver.md, then what it heard. Exits 1 if any line does
+  sdr               run the built-in SDR on its own and print its receiver lines
   --port <n>        listen on this port only, and stop if it is taken
   --host <addr>     listen on this address instead of 127.0.0.1. 0.0.0.0 is every
                     interface. Anything that can reach it can flash a board, so this
@@ -41,8 +43,10 @@ receiver. It is started again if it stops:
 
   receiver = ssh station sdr_rx
 
-One SDR can be the app's own, on an sdr = line. The page turns it on and off and sets the
-gain it is started with (--gain), and keeps both in descent-ground-sdr.txt:
+One SDR is the app's own. The page turns it on and off and sets its gain, and keeps both in
+descent-ground-sdr.txt. A release carries one, for an RTL-SDR: rtl_sdr and file_lora,
+unpacked into the sdr folder beside the program the first time it is turned on. An sdr =
+line runs another program instead, started with --gain when the page picks one:
 
   sdr = python3 /opt/sdr_rx/sdr_rx.py
 ";

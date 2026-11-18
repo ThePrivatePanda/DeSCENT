@@ -2793,7 +2793,7 @@ mod tests {
         let data = scratch("programs");
         let (tx, _rx) = std::sync::mpsc::channel();
         let header = "#DG,RX,v1,id=EEF522,f=915.0,bw=125.0,cr=7,sync=0x12,pre=8,kind=sdr,sfs=10+11+12,gain=auto,fw=0.2.0";
-        let programs = crate::command::start(&[], Some(&format!("echo '{}'; exec sleep 3174", header)), &data, &tx);
+        let programs = crate::command::start(&[], Some(&format!("echo '{}'; exec sleep 3174", header)), &data, &data, &tx);
         let Ok(mut ctx) = Arc::try_unwrap(quiet_ctx(&data)) else { panic!("the context is shared already") };
         ctx.programs = programs;
         let ctx = Arc::new(ctx);

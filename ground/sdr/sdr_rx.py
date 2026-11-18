@@ -6,11 +6,10 @@
 #
 # rtl_sdr runs at 1 MS/s tuned 250 kHz above the channel, which keeps the dongle's DC notch and
 # its spur at centre+190 kHz out of it. The channel is moved to 0 Hz, cut to 250 kS/s and fed to
-# one rxx_lora file_lora per spreading factor through named pipes. file_lora needs
-# rxx_lora-ldro.patch, or every SF11 and SF12 payload fails its CRC.
+# one rxx_lora file_lora per spreading factor on its stdin. file_lora needs rxx_lora-ldro.patch,
+# or every SF11 and SF12 payload fails its CRC, and rxx_lora-stdin.patch to read stdin at all.
 import argparse
 import base64
-import fcntl
 import json
 import os
 import queue
@@ -18,13 +17,15 @@ import random
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 
 import numpy as np
 
-VERSION = '0.2.0'
+if sys.platform == 'linux':
+    import fcntl
+
+VERSION = '0.3.0'
 SFS = (10, 11, 12)
 CHANNEL_HZ = 915_000_000
 TUNE_HZ = CHANNEL_HZ + 250_000
@@ -49,8 +50,17 @@ DECODER_WARNINGS = {
     'frame ended after': -1,
 }
 
-# rtl_sdr's last words, as the FATAL code and what to tell the operator
+# rtl_sdr's last words, as the FATAL code and what to tell the operator; the first that matches.
+# The same words as the app's built-in SDR (ground/app/src/sdr.rs).
 DONGLE_FAILURES = [
+    ('usb_open error -12', 3, 'Windows has no WinUSB driver on the RTL-SDR. Install it once with Zadig (zadig.akeo.ie): '
+     'Options, List All Devices, pick "Bulk-In, Interface (Interface 0)", WinUSB, Replace Driver; '
+     'then unplug the RTL-SDR and plug it back in'),
+    ('Please fix the device permissions', 3, 'This user may not open the RTL-SDR. Once, run: echo \'SUBSYSTEM=="usb", '
+     'ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0666"\' | sudo tee /etc/udev/rules.d/20-rtlsdr.rules; '
+     'then unplug the RTL-SDR and plug it back in'),
+    ('Detaching kernel driver failed', 3, "The kernel's TV driver holds the RTL-SDR. Once, run: echo blacklist "
+     'dvb_usb_rtl28xxu | sudo tee /etc/modprobe.d/blacklist-rtlsdr.conf; then sudo modprobe -r dvb_usb_rtl28xxu'),
     ('No supported devices found', 2, 'No RTL-SDR plugged in'),
     ('usb_claim_interface error', 3, 'The RTL-SDR is held by another program'),
     ('Failed to open rtlsdr device', 3, 'The RTL-SDR could not be opened: held by another program, or no permission'),
@@ -103,7 +113,7 @@ def read_dongle(gain, raw_q, counts):
     if gain != 'auto':
         cmd += ['-g', gain]
     proc = subprocess.Popen(cmd + ['-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
-    fcntl.fcntl(proc.stdout, fcntl.F_SETPIPE_SZ, 1 << 20)
+    bigger_pipe(proc.stdout)
     counts['children'].append(proc)
 
     def relay_stderr():
@@ -130,6 +140,12 @@ def read_dongle(gain, raw_q, counts):
     raw_q.put(None)
 
 
+# A second of samples in the pipe, where Linux lets a program ask; elsewhere its default.
+def bigger_pipe(f):
+    if sys.platform == 'linux':
+        fcntl.fcntl(f, fcntl.F_SETPIPE_SZ, 1 << 20)
+
+
 def read_file(path, raw_q, counts):
     # paced to real time, so the HB, the header and the app see what a dongle would give them
     with open(path, 'rb') as f:
@@ -149,7 +165,8 @@ def read_decoder(sf, proc, events):
 
 
 def read_decoder_warnings(sf, proc, events):
-    for line in proc.stderr:
+    for raw in proc.stderr:
+        line = raw.decode(errors='replace')
         for text, code in DECODER_WARNINGS.items():
             if text in line:
                 events.put((sf, {'err': code}))
@@ -239,22 +256,18 @@ def main():
     raw_q = queue.Queue(maxsize=64)
     events = queue.Queue()
     done = threading.Event()
-    pipes = tempfile.mkdtemp(prefix='sdr_rx_')
     try:
         decoders = []
         for sf in SFS:
-            fifo = os.path.join(pipes, f'sf{sf}.cf32')
-            os.mkfifo(fifo)
             proc = subprocess.Popen(
                 [args.decoder, '-s', str(sf), '-o', '2', '-w', '0x12', '--report-bad', '-q', '1',
-                 '--center-freq', str(CHANNEL_HZ), '--bw', '125e3', fifo],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 '--center-freq', str(CHANNEL_HZ), '--bw', '125e3', '-'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             counts['children'].append(proc)
             threading.Thread(target=read_decoder, args=(sf, proc, events), daemon=True).start()
             threading.Thread(target=read_decoder_warnings, args=(sf, proc, events), daemon=True).start()
-            decoders.append(open(fifo, 'wb'))
-        for f in decoders:
-            fcntl.fcntl(f, fcntl.F_SETPIPE_SZ, 1 << 20)
+            bigger_pipe(proc.stdin)
+            decoders.append(proc.stdin)
 
         threading.Thread(target=write_lines, args=(events, counts, level, header, not args.cu8, done),
                          daemon=True).start()
@@ -281,9 +294,6 @@ def main():
     finally:
         for proc in counts['children']:
             proc.kill()
-        for name in os.listdir(pipes):
-            os.unlink(os.path.join(pipes, name))
-        os.rmdir(pipes)
 
 
 if __name__ == '__main__':
