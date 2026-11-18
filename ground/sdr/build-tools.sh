@@ -20,6 +20,9 @@ LIBUSB=1.0.30
 here=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$1/THIRD_PARTY/patches"
 out=$(cd "$1" && pwd)
+if [ $# -ge 2 ]; then
+    sources=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+fi
 work=$(mktemp -d)
 cd "$work"
 
@@ -126,6 +129,6 @@ if [ $# -ge 2 ]; then
     git -C rxx_lora archive --prefix=rxx_lora/ -o "$s/rxx_lora-$RXX_LORA.tar.gz" $RXX_LORA
     cp rtl-sdr-$RTL_SDR.tar.gz fftw-$FFTW.tar.gz libusb-$LIBUSB.tar.bz2 "$s/"
     cp "$here/build-tools.sh" "$here/rxx_lora-ldro.patch" "$here/rxx_lora-stdin.patch" "$here/rtl-sdr-stdout.patch" "$s/"
-    tar czf "$2" -C "$work" descent-sdr-sources
+    tar czf "$sources" -C "$work" descent-sdr-sources
 fi
 rm -rf "$work"
