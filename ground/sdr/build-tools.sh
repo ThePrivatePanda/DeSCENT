@@ -79,8 +79,9 @@ esac
 
 make -s -C rxx_lora file CFLAGS="-O3 $arch -Wall -Wextra -I./include $inc" LIBS="$fftw_libs -lpthread -lm"
 cp rxx_lora/bin/file_lora$exe "$out/"
+# gnu17: rtl-sdr's getopt.c is K&R C, which C23 (GCC 15's default) refuses
 # shellcheck disable=SC2086
-${CC:-gcc} -O2 $arch -Drtlsdr_STATIC -I rtl-sdr-$RTL_SDR/include $usb_inc -o "$out/rtl_sdr$exe" $rtl_src $usb_libs -lpthread -lm
+${CC:-gcc} -std=gnu17 -O2 $arch -Drtlsdr_STATIC -I rtl-sdr-$RTL_SDR/include $usb_inc -o "$out/rtl_sdr$exe" $rtl_src $usb_libs -lpthread -lm
 
 case $os in
     linux) file "$out/file_lora" "$out/rtl_sdr" 2>/dev/null || true ;;
